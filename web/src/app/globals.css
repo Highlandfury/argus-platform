@@ -146,3 +146,72 @@ th {
   border: 1px solid var(--border);
   font-weight: 500;
 }
+
+select {
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #0b1014;
+  color: var(--text);
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-sm {
+  width: auto;
+  margin: 12px 0 0;
+  padding: 8px 14px;
+  font-size: 14px;
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #1a0507;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.status {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+
+.status-active {
+  color: #7ee2a8;
+  border-color: #2f6b48;
+}
+
+.status-revoked {
+  color: var(--danger);
+  border-color: #7a3038;
+}
+
+.status-pending,
+.status-stale {
+  color: #e2c97e;
+  border-color: #6b5f2f;
+}
+
+.token {
+  display: block;
+  word-break: break-all;
+  background: #0b1014;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin-top: 8px;
+  font-family: ui-monospace, "Cascadia Mono", monospace;
+  font-size: 13px;
+}
+

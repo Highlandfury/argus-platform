@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -69,7 +70,11 @@ func newHandlers(o Options) *handlers {
 		h.tenancyHTTP = &tenancy.HTTP{Svc: o.Tenancy}
 	}
 	if o.Collectors != nil {
-		h.collectorsHTTP = &collectors.HTTP{Svc: o.Collectors, Registry: o.CollectorSessions}
+		h.collectorsHTTP = &collectors.HTTP{
+			Svc:         o.Collectors,
+			Registry:    o.CollectorSessions,
+			Idempotency: httpx.NewIdempotencyCache(24*time.Hour, 4096),
+		}
 	}
 	return h
 }

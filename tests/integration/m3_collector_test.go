@@ -11,8 +11,13 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
+	"io"
+	"log/slog"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,13 +30,17 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
+	"github.com/argus-platform/argus/internal/api"
 	"github.com/argus-platform/argus/internal/collector"
 	"github.com/argus-platform/argus/internal/collector/enrollclient"
-	"github.com/argus-platform/argus/internal/collector/identity"
+	collectoridentity "github.com/argus-platform/argus/internal/collector/identity"
 	"github.com/argus-platform/argus/internal/collector/stream"
 	"github.com/argus-platform/argus/internal/modules/collectors"
+	identitymod "github.com/argus-platform/argus/internal/modules/identity"
+	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/database"
 	"github.com/argus-platform/argus/internal/platform/ratelimit"
+	"github.com/argus-platform/argus/internal/platform/telemetry"
 )
 
 // m3Env is a full in-process collector control plane (real CA, real gRPC
@@ -147,7 +156,7 @@ func withEnrollLimiter() m3Option {
 }
 
 // enrollIdentity performs a full enrollment and writes the identity to disk.
-func (e *m3Env) enrollIdentity(t *testing.T, name, token string) (identity.Identity, *identity.Store) {
+func (e *m3Env) enrollIdentity(t *testing.T, name, token string) (collectoridentity.Identity, *collectoridentity.Store) {
 	t.Helper()
 	res, err := enrollclient.Enroll(context.Background(), enrollclient.Config{
 		EnrollURL:    "https://" + e.enrollAddr,
@@ -161,7 +170,7 @@ func (e *m3Env) enrollIdentity(t *testing.T, name, token string) (identity.Ident
 	})
 	must(t, err)
 
-	id := identity.Identity{
+	id := collectoridentity.Identity{
 		CollectorID:     res.CollectorID,
 		Name:            name,
 		ServerEnrollURL: "https://" + e.enrollAddr,
@@ -172,12 +181,12 @@ func (e *m3Env) enrollIdentity(t *testing.T, name, token string) (identity.Ident
 		PolicyVersion:   res.PolicyVersion,
 		PolicyKeyDERB64: base64Std(res.PolicyKeyDER),
 	}
-	store := identity.NewStore(t.TempDir())
+	store := collectoridentity.NewStore(t.TempDir())
 	must(t, store.Save(id, res.CertPEM, res.KeyPEM, res.CAPEM))
 	return id, store
 }
 
-func (e *m3Env) newStreamClient(t *testing.T, id identity.Identity, store *identity.Store, applied *int64, disconnects *[]collectorv1.Disconnect_Code) (*stream.Client, *collector.Machine) {
+func (e *m3Env) newStreamClient(t *testing.T, id collectoridentity.Identity, store *collectoridentity.Store, applied *int64, disconnects *[]collectorv1.Disconnect_Code) (*stream.Client, *collector.Machine) {
 	t.Helper()
 	machine := collector.NewMachine(collector.StateNew, nil)
 	must(t, machine.Transition(collector.StateReconnecting))
@@ -566,5 +575,78 @@ func TestM3UnknownIdentityRejected(t *testing.T) {
 	}
 	if errorsIsDisconnect(err) {
 		t.Fatalf("rogue certificate produced an application-level disconnect: %v", err)
+	}
+}
+
+// TestM3EnrollmentHTTPIdempotency: POST /v1/enrollments requires an
+// Idempotency-Key; replaying the same key returns the original credential and
+// creates only one token row; a new key mints a new credential.
+func TestM3EnrollmentHTTPIdempotency(t *testing.T) {
+	slug := "m3-http-" + newUUID()[:8]
+	tn := seedLoginUser(t, slug, "HQ-"+slug)
+
+	tenancySvc := tenancy.New(appPool, authPool)
+	identitySvc, err := identitymod.New(appPool, authPool, tenancySvc)
+	must(t, err)
+	router := api.NewRouter(api.Options{
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Telemetry:         telemetry.New("it-m3-http", "0", "0"),
+		Version:           "it",
+		Commit:            "it",
+		Identity:          identitySvc,
+		Tenancy:           tenancySvc,
+		Collectors:        collectors.New(appPool, authPool, nil, nil),
+		CollectorSessions: collectors.NewSessionRegistry(),
+	})
+	srv := httptest.NewServer(router)
+	t.Cleanup(srv.Close)
+	jar, err := cookiejar.New(nil)
+	must(t, err)
+	client := &http.Client{Jar: jar, Timeout: 10 * time.Second}
+
+	res := doRequest(t, client, http.MethodPost, srv.URL+"/v1/auth/login", loginBody(slug, "it-password"), nil)
+	if res.Status != http.StatusOK {
+		t.Fatalf("login: status %d", res.Status)
+	}
+	csrf := cookieByName(res, "argus_csrf")
+	if csrf == nil {
+		t.Fatal("login did not set the CSRF cookie")
+	}
+	body := `{"site_id":"` + tn.SiteID + `","ttl_seconds":3600}`
+
+	// Missing Idempotency-Key -> 400 (documented requirement).
+	res = doRequest(t, client, http.MethodPost, srv.URL+"/v1/enrollments", body,
+		map[string]string{"X-CSRF-Token": csrf.Value})
+	if res.Status != http.StatusBadRequest {
+		t.Fatalf("missing key: status %d, want 400", res.Status)
+	}
+
+	headers := map[string]string{"X-CSRF-Token": csrf.Value, "Idempotency-Key": "idem-" + newUUID()[:8]}
+	first := doRequest(t, client, http.MethodPost, srv.URL+"/v1/enrollments", body, headers)
+	if first.Status != http.StatusCreated {
+		t.Fatalf("create: status %d body %v", first.Status, first.Body)
+	}
+	replay := doRequest(t, client, http.MethodPost, srv.URL+"/v1/enrollments", body, headers)
+	if replay.Status != http.StatusCreated {
+		t.Fatalf("replay: status %d", replay.Status)
+	}
+	if replay.Body["token"] != first.Body["token"] || replay.Body["id"] != first.Body["id"] {
+		t.Fatalf("replay must return the original credential: %v vs %v", replay.Body, first.Body)
+	}
+	if replay.Header.Get("Idempotency-Replayed") != "true" {
+		t.Fatal("replay must be marked Idempotency-Replayed")
+	}
+
+	headers2 := map[string]string{"X-CSRF-Token": csrf.Value, "Idempotency-Key": "idem2-" + newUUID()[:8]}
+	second := doRequest(t, client, http.MethodPost, srv.URL+"/v1/enrollments", body, headers2)
+	if second.Status != http.StatusCreated || second.Body["token"] == first.Body["token"] {
+		t.Fatalf("second key must mint a distinct credential: %v", second.Body)
+	}
+
+	var tokenCount int
+	must(t, ownerPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM enrollment_tokens WHERE org_id = $1`, mustUUID(t, tn.OrgID)).Scan(&tokenCount))
+	if tokenCount != 2 {
+		t.Fatalf("token rows = %d, want 2 (one per distinct Idempotency-Key)", tokenCount)
 	}
 }

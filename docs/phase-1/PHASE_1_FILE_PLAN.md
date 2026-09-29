@@ -85,18 +85,25 @@ Companion to `PHASE_1_SPEC.md`. Every file below is created in the listed milest
 | `internal/modules/collectors/ca.go` | create | Internal CA (generate-on-first-boot, 0600), CSR verify (P-256, signature check), 90-day issuance, chain build | unit + S-11 |
 | `internal/modules/collectors/service.go` | create | Collector registry lifecycle (pending→active→stale→revoked), policy issue v1, resync, revoke | integration |
 | `internal/modules/collectors/repo.go` | create | SQL for collectors/certs/policies/tokens (tenant-scoped) | integration |
-| `internal/modules/collectors/enroll_grpc.go` | create | `EnrollmentService.Enroll` + rate limits + no-oracle errors | T6; S-01–S-04 |
-| `internal/platform/grpcx/auth.go` | create | mTLS verify hook → fingerprint→collector; per-RPC status check | T7; S-03, S-11 |
+| `internal/modules/collectors/enroll.go` | create | `EnrollmentService.Enroll` + rate limits + no-oracle errors (delivered name; plan said `enroll_grpc.go`) | T6; S-01–S-04 |
+| `internal/platform/grpcx/fingerprint.go` | create | mTLS leaf fingerprint extraction (delivered; plan said `auth.go` — resolution runs through migration 000007's `argus_resolve_collector_certificate`, granted only to `argus_auth`) | T7; S-03, S-11 |
 | `internal/modules/collectors/stream.go` | create | Stream handler: hello validation, credits, heartbeat intake, stream registry, disconnect-on-revoke | T7; AC-01–AC-04 |
 | `internal/modules/collectors/policy.go` | create | Policy document build + Ed25519 sign; version bump | unit + integration |
 | `internal/modules/collectors/http.go` | create | `/v1/enrollments`, `/v1/collectors`, detail, `:revoke`, `:resync` | AC-11 (partial) |
 | `internal/collector/identity/store.go` (path under `cmd/argus-collector` internals per repo rules → `internal/collector/identity`) | create | Key/cert/collector.json persistence (0600), load/validate | unit |
 | `internal/collector/enrollclient/client.go` | create | CSR gen, Enroll RPC, policy verify+persist | integration vs real server |
-| `internal/collector/transport/stream.go` (skeleton) | create | Connect loop, hello, heartbeat loop, backoff, disconnect handling | T3 partial; AC-03 |
+| `internal/collector/stream/client.go` | create | Connect loop, hello, heartbeat loop, backoff, disconnect handling, terminal REVOKED (delivered name; plan said `internal/collector/transport/stream.go`) + `internal/collector/state.go` explicit lifecycle machine | T3 partial; AC-03 |
 | `web/src/app/(app)/collectors/page.tsx` | create | Collector list view (status, last heartbeat, version, site) | AC-11 |
 | `web/src/app/(app)/collectors/[id]/page.tsx` | create | Detail view (identity/status/policy/connection/spool stats) | AC-11 |
 
 **Exit criteria:** a real collector enrolls against the dev stack, appears in UI as `pending→active` with live heartbeat; expired/used/revoked paths behave per SPEC §8.4.
+
+**Delivered (2026-09-29; commits M3a `ea2c7ea` · M3b `be7b891` · M3c `78406e3` · M3d `2a7356b` · M3e `b443279` + docs commit):**
+- Generated protobuf/gRPC stubs are now **committed** under `gen/` with a CI drift gate (`buf generate` + `git diff --exit-code -- gen`, plus conditional `buf breaking`); protocol change **P1** (`EnrollResponse.policy_signing_public_key`) recorded and delivered.
+- Extra delivered files beyond the plan: `internal/modules/collectors/{repo,policy,session,metrics,http}.go`, `internal/platform/ratelimit`, `internal/collector/{identity,enrollclient,policy,stream}`, `web/src/components/{EnrollCollectorForm,CollectorActions}.tsx`, `web/e2e/collectors.spec.ts`, compose `ca-data` volume + seed-minted dev token.
+- Policy versioning: `collector_policies` holds every issued version; `collectors.policy_version` is the **acked** watermark; `POST /policy:resync` issues vN+1 and pushes it to a live stream; collectors re-verify, apply newer only, and ack either way (idempotent redelivery).
+- Collector lifecycle state machine (`NEW/ENROLLING/ACTIVE/DISCONNECTED/RECONNECTING/REVOKED/FAILED`) is explicit and validated; invalid transitions are rejected (unit-tested).
+- Findings fixed during M3: revoked identity returning before `ServerHello` was misclassified as a protocol error by the collector (fixed: `Disconnect` handled pre-hello); TimescaleDB first-boot init race killed the short-lived `migrate` job on fresh volumes (fixed: 90 s connection-class retry in `database.MigrateUp`).
 
 ---
 

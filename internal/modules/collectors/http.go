@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,8 +18,9 @@ import (
 // sit behind session auth; mutations require the admin role (Phase-1 stand-in
 // for the full RBAC-SC model).
 type HTTP struct {
-	Svc      *Service
-	Registry *SessionRegistry
+	Svc         *Service
+	Registry    *SessionRegistry
+	Idempotency *httpx.IdempotencyCache
 }
 
 func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
@@ -188,12 +190,27 @@ type createEnrollmentRequest struct {
 }
 
 // CreateEnrollment handles POST /v1/enrollments (admin only). The raw token is
-// returned exactly once.
+// returned exactly once; the Idempotency-Key header is required so retries of
+// the same logical create replay the original response (SPEC §13).
 func (h *HTTP) CreateEnrollment(w http.ResponseWriter, r *http.Request) {
 	if !requireAdmin(w, r) {
 		return
 	}
 	p, _ := httpx.PrincipalFrom(r.Context())
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" || len(key) > 128 {
+		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed",
+			"Idempotency-Key header is required for enrollment creation (max 128 chars)")
+		return
+	}
+	scopedKey := p.OrgID.String() + ":" + p.UserID.String() + ":" + key
+	if status, body, ok := h.Idempotency.Get(scopedKey); ok {
+		w.Header().Set("Idempotency-Replayed", "true")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write(body) //nolint:gosec // cached JSON response produced by this handler, not user-controlled HTML
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var req createEnrollmentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -216,12 +233,20 @@ func (h *HTTP) CreateEnrollment(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", err.Error())
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
+	payload, err := json.Marshal(map[string]any{
 		"id":         id.String(),
 		"token":      raw,
 		"site_id":    siteID.String(),
 		"expires_at": expiresAt.UTC().Format(time.RFC3339),
 	})
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "encode failed")
+		return
+	}
+	h.Idempotency.Put(scopedKey, http.StatusCreated, payload)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write(payload)
 }
 
 // ListEnrollments handles GET /v1/enrollments (metadata only).

@@ -9,15 +9,15 @@ Phase-1 engineering specification live alongside this repo:
 
 ## Status
 
-**Phase 1 — Walking Skeleton. M2 (Identity & API Shell) complete.**
+**Phase 1 — Walking Skeleton. M3 (Enrollment, Collector Identity, Control Plane) complete.**
 
 | Milestone | State |
 |---|---|
 | M0 scaffold, health/metrics endpoints, config/logging/telemetry, CI | ✅ |
 | M1 schema + RLS + migrations + idempotency + seed | ✅ |
 | M2 identity API (login/logout/me, CSRF, rate limits) + OpenAPI contract gate + minimal web UI | ✅ |
-| M3 enrollment + collector identity + stream control | next |
-| M4 metric spine (producer → spool → ingest → chart) | |
+| M3 enrollment + collector identity + mTLS control plane + collectors UI + live stack bootstrap | ✅ |
+| M4 metric spine (producer → spool → ingest → chart) | next |
 | M5 observability polish | |
 | M6 failure/security/load suites + acceptance run | |
 
@@ -38,10 +38,16 @@ Docker Desktop (Windows): run `wsl --install` once (admin, may need a reboot), t
 ```powershell
 .\scripts\dev.ps1 build     # compile server + collector into bin\
 .\scripts\dev.ps1 test      # go test ./...
-.\scripts\dev.ps1 up        # docker compose up (db + server + collector)
-# UI/API:  http://127.0.0.1:8080/v1/healthz   ops/metrics: http://127.0.0.1:9090/metrics
+.\scripts\dev.ps1 up        # docker compose up (db + server + collector + web)
+# UI/API:  http://127.0.0.1:8080/v1/healthz   web: http://127.0.0.1:3000
+# ops:     http://127.0.0.1:9090/metrics      agent: collector gRPC :8443 (mTLS) / :8444 (enroll)
 .\scripts\dev.ps1 down
 ```
+
+The dev stack is **self-enrolling**: `seed-dev` mints a one-time enrollment credential into the
+shared CA volume (`ca-data`), the server writes its internal CA there, and the collector container
+pins that CA and enrolls on first start (`dev-collector` appears as `active` in the UI). A pristine
+reset (`dev.ps1 reset` then `up`) re-provisions the whole chain end-to-end.
 
 ### Troubleshooting: stale dev database volume (PostgreSQL 18 layout)
 
@@ -66,14 +72,16 @@ Linux/WSL: use `make` (`make check`, `make dev`, `make versions`); source
 ## Repository map
 
 ```text
-cmd/argus-server         control plane: API + ops (+ enrollment/stream from M3)
-cmd/argus-collector      edge agent: identity, policy, producer, spool, transport
-internal/platform/       config, logging, telemetry, httpx (problem+json, request IDs)
+cmd/argus-server         control plane: API + ops + enrollment :8444 + collector stream :8443 (mTLS)
+cmd/argus-collector      edge agent: identity, policy, enrollment, mTLS control stream
+internal/platform/       config, logging, telemetry, httpx (problem+json, request IDs, idempotency)
 internal/api/            route wiring
-internal/modules/        domain modules (arrive M1+)
+internal/collector/      collector runtime (state machine, identity, policy, enroll/stream clients)
+internal/modules/        domain modules (collectors arrive in M3)
 proto/                   collector.proto (normative wire contract)
+gen/                     committed protobuf/gRPC stubs (regenerate with `make proto`; CI drift-checks)
 openapi/                 argus.v1.yaml (normative API contract)
-migrations/              schema migrations (arrive M1)
+migrations/              schema migrations (000001–000007)
 deployments/compose/     dev stack + Dockerfiles
 scripts/                 dev.ps1, env.sh, install-tools.ps1, db-init
 docs/phase-1/            Phase-1 specification set (SPEC, FILE_PLAN, ACCEPTANCE, …)
@@ -86,14 +94,18 @@ docs/phase-1/            Phase-1 specification set (SPEC, FILE_PLAN, ACCEPTANCE,
 | `ARGUS_ENV` | `dev` | `dev` or `prod` |
 | `ARGUS_SERVER_HTTP_ADDR` | `:8080` | public API listener |
 | `ARGUS_SERVER_OPS_ADDR` | `:9090` | ops listener (`/metrics`, health) |
-| `ARGUS_SERVER_GRPC_ADDR` / `ARGUS_SERVER_ENROLL_ADDR` | `:8443` / `:8444` | collector stream / enrollment (M3) |
+| `ARGUS_SERVER_GRPC_ADDR` / `ARGUS_SERVER_ENROLL_ADDR` | `:8443` / `:8444` | collector stream (mTLS) / enrollment (token-gated TLS) |
+| `ARGUS_SERVER_GRPC_SANS` | `localhost,server,127.0.0.1` | DNS/IP SANs for the listener certificate |
+| `ARGUS_SERVER_CA_DIR` | `./.dev/ca` | internal CA + server cert + policy signing key |
 | `ARGUS_SERVER_DB_DSN` | — | runtime role (`argus_app_login`) |
 | `ARGUS_SERVER_AUTH_DB_DSN` | — | pre-auth lookup role (`argus_auth_login`) |
 | `ARGUS_SERVER_MIGRATE_DSN` | — | owner role (migrations only) |
 
 Collector variables (subset): `ARGUS_COLLECTOR_SERVER` (enrollment URL),
-`ARGUS_COLLECTOR_STREAM` (host:port), `ARGUS_COLLECTOR_DATA_DIR`,
-`ARGUS_COLLECTOR_SPOOL_MAX_BYTES`, `ARGUS_COLLECTOR_FSYNC_INTERVAL_MS`.
+`ARGUS_COLLECTOR_STREAM` (host:port), `ARGUS_COLLECTOR_CA_FILE` (pinned server CA,
+required), `ARGUS_COLLECTOR_NAME`, `ARGUS_ENROLL_TOKEN` / `ARGUS_ENROLL_TOKEN_FILE`,
+`ARGUS_COLLECTOR_DATA_DIR`, `ARGUS_COLLECTOR_SPOOL_MAX_BYTES`,
+`ARGUS_COLLECTOR_FSYNC_INTERVAL_MS`.
 
 ## Golden rules (from the spec)
 

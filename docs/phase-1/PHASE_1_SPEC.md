@@ -428,14 +428,14 @@ RLS policies compare `org_id = current_setting('app.current_org')::uuid` (organi
 - Stored as `SHA-256(token)` in `enrollment_tokens.token_hash bytea`. Lookup by hash only; constant-time compare by construction (hash lookup). **Raw token is shown exactly once** in the API response to its creator.
 - TTL: default 24 h (max 7 d). One-time: consumed atomically by `UPDATE … SET used_at=now(), used_by_collector_id=$id WHERE token_hash=$1 AND used_at IS NULL AND expires_at > now() RETURNING id` — replay yields zero rows.
 - No token oracle: unknown, expired, and used tokens all return the same gRPC error (`PERMISSION_DENIED`, message "enrollment failed") + server-side log with reason + request id.
-- Scope: org-bound always; site-bound when the token was created with a site. Rate limits: 10 attempts/min/IP, 100/hour/org, metrics `argus_enroll_attempts_total{result}`.
+- Scope: org-bound always; site-bound when the token was created with a site. **M3 implementation requires site-bound tokens** (`POST /v1/enrollments` takes `site_id`; collectors must belong to a site — org-wide tokens are deferred to a later milestone). Rate limits: 10 attempts/min/IP (shared `platform/ratelimit` token bucket); the per-org hourly budget lands with fleet-scale work. Metrics: `argus_collector_enrollments_total{result}`.
 
 ## 8.2 Certificate issuance
 
 - Collector generates ECDSA P-256 keypair locally (private key never leaves; file mode 0600, OS keyring later). Sends PKCS#10 CSR (PEM).
 - Server (in-process internal CA — root generated on first boot into `ARGUS_SERVER_CA_DIR`, 10-year root, 0600; dev only in Phase 1, documented as such) issues: subject `CN=<collector_id>`, SAN URI `argus://collector/<org-slug>/<collector_id>`, validity **90 days**, serial = random 128-bit, key usage = digital signature + client auth, EKU clientAuth.
 - Server stores `collector_certificates` (serial, SHA-256 fingerprint of DER, not_before/not_after, revoked_at) for identity mapping and revocation.
-- Stream-side verification: `RequireAndVerifyClientCert` against the internal CA + custom `VerifyPeerCertificate` that maps fingerprint → `collector_certificates` → `collectors` and rejects `revoked`/unknown. The handler then asserts `ClientHello.collector_id == cert's collector_id` (G4 note).
+- Stream-side verification (M3 delivered): `RequireAndVerifyClientCert` against the internal CA (chain + validity enforced by TLS), then the handler resolves SHA-256(leaf DER) through the fixed `argus_resolve_collector_certificate(bytea)` function (migration 000007, granted only to the auth role) and rejects `revoked`/unknown identities (`UNAUTHENTICATED`). The handler then asserts `ClientHello.collector_id == cert's collector_id` (G4 note).
 
 ## 8.3 Enrollment sequence
 
@@ -466,9 +466,9 @@ sequenceDiagram
 
 ## 8.4 Revocation and failure behavior
 
-- `POST /v1/collectors/{id}:revoke` → status `revoked`, certificate `revoked_at=now()`, and any live stream for that collector is terminated with `Disconnect{CODE_REVOKED}` (in-memory stream registry).
+- `POST /v1/collectors/{id}/revoke` (path correction P2, §13) → status `revoked`, certificate `revoked_at=now()`, and any live stream for that collector is terminated with `Disconnect{CODE_REVOKED}` (in-memory stream registry).
 - Subsequent stream attempts fail at the auth interceptor (fingerprint → status check). Reconnect policy on the collector: `CODE_REVOKED` ⇒ stop permanently (no retry storm), log loudly, surface in `doctor`.
-- Enrollment failure modes: invalid token (generic denied), expired, already-used, duplicate collector name in org (distinct error), malformed CSR (distinct error), rate limited (`RESOURCE_EXHAUSTED` with retry hint). Collector backs off exponentially (1 s → 5 min cap) on transient failures and never retries invalid-token/superseded classes.
+- Enrollment failure modes: invalid token (generic denied), expired, already-used, duplicate collector name in org (distinct error), malformed CSR (distinct error), rate limited (`RESOURCE_EXHAUSTED` with retry hint). Collector backs off exponentially (1 s → 30 s cap with full jitter, per §9.2) on transient failures and never retries invalid-token/superseded classes (revoked identities are terminal).
 - Lost response after successful creation (collector crashed before persisting identity): token is consumed; operator issues a fresh token and the collector re-enrolls with the **same name** ⇒ server returns `ALREADY_EXISTS` with instructions; resolution is a documented admin flow (rename or delete pending record). This is intentional (tokens are not re-usable).
 
 ---
@@ -496,7 +496,7 @@ sequenceDiagram
 ## 9.2 Stream lifecycle and retry semantics
 
 1. Collector connects mTLS (HTTP/2 keepalive: server `PermitWithoutStream=false`, ping 30 s/timeout 10 s; client mirrors).
-2. `ClientHello` → server validates cert↔claim, status, protocol version → `ServerHello` (policy if newer; credits).
+2. `ClientHello` → server validates cert↔claim, status, protocol version → `ServerHello` (credits + the latest signed policy — always included; the collector applies it only when the version is newer than the one persisted locally and acks either way, so re-delivery is idempotent and `collectors.policy_version` remains the authoritative acked watermark).
 3. Collector sends batches strictly in spool order, ≤ `max_inflight_batches` un-acked; server responds `BatchResult` per batch **after commit**.
 4. `STATUS_OK|DUPLICATE` ⇒ advance in-memory send watermark; watermark persisted to spool state (batched).
 5. `STATUS_RETRY` ⇒ collector backs off (1 s→2 s→…→60 s cap) and resends **the same batch**; later batches wait (ordering preserved; bounded by window).

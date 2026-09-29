@@ -70,3 +70,46 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 1. **Web runtime env:** Next bakes rewrites at build time but server components read `ARGUS_API_BASE` at runtime; the final image stage must set it (fixed in `web/Dockerfile` + compose, with graceful "API unreachable" panels).
 2. **TypeScript 7.0.2 verified** with Next 16.3.7 (auto-adjusted `jsx: react-jsx`); the VERSIONS fallback note is retired.
 3. **Operational reminder:** the compose stack must be rebuilt (`up --build`) after server code changes — running old images against new UI surfaces 404s that look like UI bugs.
+
+---
+
+# ACCEPTANCE_RUN — M3 (Enrollment, Collector Identity, Control Plane)
+
+**Date:** 2026-09-29 · **Commits:** M3a `ea2c7ea` · M3b `be7b891` · M3c `78406e3` · M3d `2a7356b` · M3e `b443279` + final commit (this one)
+
+| Gate | Command / evidence | Result |
+|---|---|---|
+| Proto pipeline (M3a) | `buf lint` · `buf generate` ×2 (deterministic hash) · `go build ./...` | **PASS** — stubs committed under `gen/`; CI runs lint → drift (`git diff --exit-code -- gen`) → build → `buf breaking` vs `origin/main` when present |
+| Identity core units (M3b) | `go test ./internal/modules/collectors/...` | **PASS** — leaf identity (CN/SAN URI/EKU/validity/chain verify), Ed25519 policy sign/verify/tamper, token format/uniqueness/hash |
+| Migrations + RLS (M3b) | integration `TestSchemaMatchesSpec`, `TestAuthRoleBoundaries` | **PASS** — schema v7; auth role SELECT-only on `enrollment_tokens`; resolver function executes for `argus_auth`, denied for `argus_app` |
+| Enrollment matrix (M3e) | `TestM3EnrollmentMatrix` | **PASS** — valid; replay/unknown/expired → uniform `PERMISSION_DENIED`; malformed + oversized (64 KiB) CSR → `INVALID_ARGUMENT`; duplicate name → `ALREADY_EXISTS`; raw token absent (SHA-256 at rest); collector invisible to another org |
+| Enrollment rate limit (S-01) | `TestM3EnrollmentRateLimit` | **PASS** — attempts 1–10 denied, 11th → `RESOURCE_EXHAUSTED` |
+| Enrollment idempotency | `TestM3EnrollmentHTTPIdempotency` + `httpx` units | **PASS** — missing `Idempotency-Key` → 400; same key replays the original credential (`Idempotency-Replayed: true`, one row); new key → new credential |
+| Stream lifecycle (T7 / AC-01…04) | `TestM3StreamLifecycle` | **PASS** — hello + policy v1 applied and acked in DB; duplicate connection: newest wins, old receives `CODE_SUPERSEDED`; server restart: reconnect to ACTIVE; revoke: terminal `REVOKED`, `Run` returns nil, fresh connection rejected pre-hello |
+| Unknown identity (S-03) | `TestM3UnknownIdentityRejected` | **PASS** — rogue-CA certificate fails at the TLS layer (no application-level disconnect) |
+| Live stack (M3d) | compose pristine `down -v` + `up --build --wait` | **PASS** — db → migrate → seed (mints dev token into the shared CA volume) → server (both gRPC listeners) → collector (enroll → ACTIVE) → web |
+| Live policy delivery | `POST /v1/collectors/{id}/policy:resync` + collector log | **PASS** — 202 `{"policy_version":2}`; collector applied v2 within ~3 s; acked watermark moved to 2 |
+| Live reconnect (collector) | `docker compose restart collector` | **PASS** — identity reloaded (same `collector_id`, persisted policy v2) → RECONNECTING → ACTIVE; registry count still 1 |
+| Live reconnect (server) | `docker compose restart server` | **PASS** — collector ACTIVE → DISCONNECTED → RECONNECTING → ACTIVE in ~4 s |
+| Live revocation (T7) | `POST /revoke` + container restart | **PASS** — live stream terminated `CODE_REVOKED`; restarted collector exits cleanly in `REVOKED` (no retry storm) |
+| Web E2E (AC-11) | `playwright test` (collectors spec) | **PASS** — registry lists `dev-collector`; detail shows acked policy + admin actions; enrollment form shows a one-time `arg_enr_…` credential |
+| Regression (M0–M2) | build · vet · full `go test ./...` · golangci-lint · contract · Playwright login spec | **PASS** (see the M3 final gate report) |
+
+**Protocol/API changes recorded (delivered, not silent):**
+
+1. **P1 — `EnrollResponse.policy_signing_public_key` (field 7)** (`ea2c7ea`): SPEC §27.3 requires the collector to pin the policy key at enrollment; the wire contract lacked the field. Added before implementation; the `buf breaking` gate is active from this change onward.
+2. **P2 — revoke path `/v1/collectors/{id}/revoke`** (`78406e3`): Go `http.ServeMux` cannot mix a wildcard with literal text inside one path segment; OpenAPI + SPEC §13 updated in the same commit (no consumers existed at the time).
+
+**M3 findings (documented):**
+
+1. **Revoked-before-hello misclassification** (found live): a revoked collector receiving `Disconnect{REVOKED}` as the first server message logged `CODE_PROTOCOL_ERROR` and exited 1. Fixed in `internal/collector/stream` (disconnect handled pre-hello; `OnDisconnect` observability hook added); regression-covered by `TestM3StreamLifecycle`.
+2. **TimescaleDB first-boot race** (found on pristine `down -v`): the image's temporary init server shutdown window killed the short-lived `migrate` service. Fixed with a 90 s connection-class retry (`database.MigrateUp`); pristine boots now pass end-to-end (keeps CI non-flaky).
+3. **Idempotency gap closed**: SPEC §13 requires `Idempotency-Key` on `POST /v1/enrollments`; the first M3 cut omitted it. Implemented as a bounded 24 h in-memory replay cache (`platform/httpx`) scoped per org+user, 400 when the header is missing.
+
+**Deviations / deferrals (recorded):**
+
+- Org-wide (site-less) enrollment tokens: deferred — M3 requires `site_id` because collectors must belong to a site (SPEC §8.1 updated).
+- Per-org enrollment budget (100/h): deferred to fleet-scale work; the per-IP limiter is live.
+- `ServerHello` always carries the latest signed policy; the collector applies only newer versions and acks idempotently (SPEC §9.2 updated).
+- Leaf auto-renewal: surfaced (`doctor`, `cert_not_after`) but not automated; rotation lands with lifecycle hardening.
+- Revocation terminates the collector cleanly; re-enrollment requires a fresh token plus an operator decision (rename/delete flow per SPEC §8.4).

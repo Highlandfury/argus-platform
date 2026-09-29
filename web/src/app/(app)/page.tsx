@@ -47,7 +47,9 @@ export default async function DashboardPage() {
         )}
       </div>
       <p className="muted" style={{ marginTop: 16 }}>
-        Collectors, metrics, and topology arrive in later milestones (M3+).
+        <a href="/collectors">Collectors</a> — enrollment, identity, and the
+        secure control stream. Metrics, topology, and alerting arrive in later
+        milestones (M4+).
       </p>
     </section>
   );
