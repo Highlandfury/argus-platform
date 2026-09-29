@@ -2,7 +2,7 @@
 # Usage:  .\scripts\dev.ps1 <command>
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'dev', 'down', 'reset', 'logs', 'ps', 'build', 'test', 'check', 'vet', 'fmt', 'lint', 'proto', 'tidy', 'versions', 'doctor', 'install-tools')]
+    [ValidateSet('up', 'dev', 'down', 'reset', 'logs', 'ps', 'build', 'test', 'check', 'vet', 'fmt', 'lint', 'proto', 'tidy', 'versions', 'doctor', 'check-compose', 'install-tools')]
     [string]$Command = 'help'
 )
 
@@ -15,6 +15,8 @@ $env:GOMODCACHE = Join-Path $Root '.tools\gomodcache'
 $env:GOBIN = Join-Path $Root '.tools\bin'
 $env:GOTOOLCHAIN = 'local'
 $env:PATH = (Join-Path $Root '.tools\go\bin') + ';' + (Join-Path $Root '.tools\bin') + ';' + $env:PATH
+$dockerDir = Join-Path ${env:ProgramFiles} 'Docker\Docker\resources\bin'
+if (Test-Path $dockerDir) { $env:PATH = "$dockerDir;$env:PATH" }
 
 $Go = Join-Path $Root '.tools\go\bin\go.exe'
 if (-not (Test-Path $Go)) { $Go = 'go' }
@@ -62,6 +64,7 @@ switch ($Command) {
         Invoke-Command (Join-Path $Root '.tools\bin\buf.exe') @('generate')
     }
     'tidy' { Invoke-Command $Go @('mod', 'tidy') }
+    'check-compose' { Invoke-Command 'powershell' @('-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'check-compose.ps1')) }
     'versions' {
         Invoke-Command $Go @('version')
         try { (node --version) } catch { Write-Host 'node: not installed' }

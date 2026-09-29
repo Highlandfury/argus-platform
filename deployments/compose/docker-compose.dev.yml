@@ -6,7 +6,7 @@ name: argus-dev
 
 services:
   db:
-    image: timescale/timescaledb:2.30.1-pg18
+    image: timescale/timescaledb:2.30.1-pg18@sha256:9dede0e3ccc071cf71935b17f76bf243331df0b1575338c8ac294640fcf12a36
     environment:
       POSTGRES_DB: argus
       POSTGRES_USER: argus_owner
@@ -14,8 +14,17 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - db-data:/var/lib/postgresql/data
-      - ../../scripts/db-init:/docker-entrypoint-initdb.d:ro
+      # PostgreSQL 18 image layout: PGDATA lives under /var/lib/postgresql/18/docker and
+      # the image declares /var/lib/postgresql as its volume target. Mounting the legacy
+      # /var/lib/postgresql/data path makes the PG18 entrypoint treat the mount as
+      # foreign data and refuse to start. Regression-checked by scripts/check-compose.ps1
+      # (also enforced in CI's compose-smoke job).
+      - db-data:/var/lib/postgresql
+      # Init script mounted as a FILE on purpose: a directory mount over
+      # /docker-entrypoint-initdb.d would hide the image's own scripts
+      # (000_install_timescaledb.sh, 001_timescaledb_tune.sh) and silently skip
+      # TimescaleDB extension installation and tuning. Also regression-checked.
+      - ../../scripts/db-init/01-roles.sql:/docker-entrypoint-initdb.d/01-roles.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U argus_owner -d argus"]
       interval: 2s

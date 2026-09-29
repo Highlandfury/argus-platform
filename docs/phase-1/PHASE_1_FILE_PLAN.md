@@ -22,7 +22,8 @@ Companion to `PHASE_1_SPEC.md`. Every file below is created in the listed milest
 | `internal/platform/httpx/*.go` | create | problem+json, request-id middleware, pagination, CSRF/session primitives (skeleton) | unit tests |
 | `internal/api/router.go` | create | Route registration + middleware order | healthz/readyz tests |
 | `deployments/compose/Dockerfile.server`, `Dockerfile.collector` | create | Multi-stage builds, distroless/static base, pinned digests | `docker compose build` |
-| `deployments/compose/docker-compose.dev.yml` | create | Stack per SPEC §17 (digests pinned here in M0) | `make dev` |
+| `deployments/compose/docker-compose.dev.yml` | create | Stack per SPEC §17; db volume uses the **PG18 image layout** (`/var/lib/postgresql`) | `make dev`; `check-compose` |
+| `scripts/check-compose.ps1` + CI assert step | create (M0 fix) | Compose regression checks: db volume must target `/var/lib/postgresql` (never `/var/lib/postgresql/data`); `/docker-entrypoint-initdb.d` must never be directory-mounted (would hide image init scripts, incl. TimescaleDB extension install/tune) | `scripts/dev.ps1 check-compose`; CI `compose-smoke` |
 | `.github/workflows/ci.yml` | create | Full pipeline per SPEC §16 (`compat-matrix` job included) | green on PR |
 | `docs/phase-1/VERSIONS.md` | create | Generated pin matrix (`make versions`) | reviewed in PR |
 | `web/` scaffold (Next 16.3.7, TS 7.0.2, ES-Lint, Playwright config) | create | App shell + API client skeleton + `/login` placeholder | `next build` in compat job |

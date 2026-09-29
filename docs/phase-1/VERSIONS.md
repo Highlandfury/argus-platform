@@ -53,14 +53,21 @@
 
 ## Container images
 
-| Image | Pin | Notes |
-|---|---|---|
-| timescale/timescaledb | **2.30.1-pg18** | Chosen because official `*-pg18` tags confirm PostgreSQL 18 compatibility, and 2.30.1 contains `INSERT … ON CONFLICT` conflict-handling fixes relevant to the ingest claim path. |
-| golang (build stage) | **1.27.1** | tag `golang:1.27.1` |
-| gcr.io/distroless/static-debian12 | **:nonroot** | **Digest pinning pending** — requires a Docker host (`docker buildx imagetools inspect`); tracked M0/M1 task. |
+| Image | Pin | Digest | Notes |
+|---|---|---|---|
+| timescale/timescaledb | **2.30.1-pg18** | `sha256:9dede0e3ccc071cf71935b17f76bf243331df0b1575338c8ac294640fcf12a36` | Chosen because official `*-pg18` tags confirm PostgreSQL 18 compatibility, and 2.30.1 contains `INSERT … ON CONFLICT` conflict-handling fixes relevant to the ingest claim path. **PG18 volume layout:** mount `/var/lib/postgresql` (not the pre-18 `/var/lib/postgresql/data`). |
+| golang (build stage) | **1.27.1** | `sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244` | Multi-arch index digest; resolved via `docker buildx imagetools` and BuildKit. |
+| gcr.io/distroless/static-debian12 | **:nonroot** | `sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab` | Multi-arch index digest; runtime stage. |
 
-## Pending verification tasks (tracked, not silently skipped)
+Note: Dockerfiles intentionally omit the `# syntax=docker/dockerfile:1` directive — it pulls a
+floating BuildKit frontend image from Docker Hub. The engine's built-in frontend is used instead;
+its version is pinned by the documented Docker Engine minimum (≥ 27, dev verified on 29.8.1).
+PostgreSQL 18 images declare `/var/lib/postgresql` as their volume target (`PGDATA` lives at
+`/var/lib/postgresql/18/docker`); compose and regression checks enforce this layout
+(`scripts/check-compose.ps1`).
 
-1. **Digest pinning** for all container images (needs Docker; CI `compose-smoke` validates tags meanwhile).
-2. **`golang:1.27.1` tag existence** confirmed by the CI `compose-smoke` job (first green run).
+## Verification status (updated 2026-09-29)
+
+1. **Container digests pinned** (via `docker buildx imagetools inspect` + BuildKit resolution); Dockerfiles deliberately omit the floating `# syntax=` frontend directive.
+2. **Compose stack booted and verified locally** (Docker Engine 29.8.1 / Compose v5.5.1): PostgreSQL 18.6 at `/var/lib/postgresql/18/docker`, `shared_preload_libraries=timescaledb`, extension 2.30.1 installed, dev roles bootstrapped, hypertable `ON CONFLICT` idempotency smoke passed, volume persistence across down/up and container recreation; server healthy; collector idle-mode healthy.
 3. **TypeScript 7.0.2** pin for `web/` (M2) — compatibility check with Next 16.3.7 runs in the M2 slice; documented fallback to the newest 5.x line if the toolchain objects.

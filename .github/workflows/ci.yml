@@ -111,6 +111,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: assert PostgreSQL 18 volume layout and safe init mounts
+        run: |
+          targets=$(docker compose -f deployments/compose/docker-compose.dev.yml config --format json \
+            | grep -oE '"target": *"[^"]+"' | sed 's/.*"target": *"//; s/"$//' | sort -u)
+          echo "$targets"
+          echo "$targets" | grep -qx "/var/lib/postgresql"
+          if echo "$targets" | grep -qx "/var/lib/postgresql/data"; then
+            echo "ERROR: PG17-style volume target detected; PG18 images require /var/lib/postgresql"
+            exit 1
+          fi
+          if echo "$targets" | grep -qx "/docker-entrypoint-initdb.d"; then
+            echo "ERROR: directory mount over /docker-entrypoint-initdb.d hides the image's own init scripts (TimescaleDB extension install/tune)"
+            exit 1
+          fi
       - name: build and start stack
         run: docker compose -f deployments/compose/docker-compose.dev.yml up --build --wait
       - name: probe healthz

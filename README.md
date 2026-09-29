@@ -44,6 +44,23 @@ Docker Desktop (Windows): run `wsl --install` once (admin, may need a reboot), t
 .\scripts\dev.ps1 down
 ```
 
+### Troubleshooting: stale dev database volume (PostgreSQL 18 layout)
+
+The dev database mounts its named volume at **`/var/lib/postgresql`** — the PostgreSQL 18
+image layout (the pre-18 path `/var/lib/postgresql/data` is rejected by the PG18
+entrypoint as "foreign data"). If you booted an earlier revision of the stack before this
+fix, delete the stale dev volume **once** (development data only — this is never a
+production migration procedure):
+
+```powershell
+.\scripts\dev.ps1 reset     # docker compose down -v (removes dev volumes only)
+.\scripts\dev.ps1 up
+```
+
+`.\scripts\dev.ps1 check-compose` (also enforced by CI) verifies the PostgreSQL 18
+volume layout and safe init-script mounts so this class of mistake cannot return
+silently.
+
 Linux/WSL: use `make` (`make check`, `make dev`, `make versions`); source
 `scripts/env.sh` to put `.tools` on PATH.
 

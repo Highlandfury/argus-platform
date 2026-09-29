@@ -733,6 +733,8 @@ main branch: same + publish images to GHCR (tag: git SHA), nightly load test (L-
 
 **One command:** `make dev` (= `docker compose -f deployments/compose/docker-compose.dev.yml up --build --wait`). First run: migrations execute as a one-shot `argus-server migrate` service; `seed-dev` creates Org "Dev Org", Site "HQ", admin user; a dev enrollment token is printed to the server log and written to `./.dev/enroll-token`.
 
+**PostgreSQL 18 volume layout (normative):** the database volume mounts **`/var/lib/postgresql`** — the declared volume target of the PostgreSQL 18 images, where `PGDATA` is `/var/lib/postgresql/18/docker`. The pre-18 path `/var/lib/postgresql/data` makes the PG18 entrypoint detect "foreign" data and refuse to start. Init scripts are mounted as **files** into `/docker-entrypoint-initdb.d`, **never as a directory mount** — a directory mount hides the image's own initialization scripts (`000_install_timescaledb.sh`, `001_timescaledb_tune.sh`) and silently skips TimescaleDB extension installation and tuning. Both properties are enforced by `scripts/check-compose.ps1` (mirrored in CI). Dev recovery after booting a pre-fix revision: one-time `docker compose down -v` (dev data only — never a production procedure).
+
 ```yaml
 # deployments/compose/docker-compose.dev.yml (normative excerpt; digests pinned in M0)
 services:
@@ -740,7 +742,7 @@ services:
     image: timescale/timescaledb:2.30.1-pg18
     environment: [POSTGRES_DB=argus, POSTGRES_USER=argus_owner, POSTGRES_PASSWORD=devpass]
     ports: ["5432:5432"]
-    volumes: [db-data:/var/lib/postgresql/data]
+    volumes: [db-data:/var/lib/postgresql]  # PG18 image layout (see note above)
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U argus_owner -d argus"], interval: 2s, retries: 30 }
   migrate:
     build: { context: ., dockerfile: deployments/compose/Dockerfile.server }

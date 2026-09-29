@@ -15,7 +15,7 @@ LDFLAGS := -s -w \
   -X github.com/argus-platform/argus/internal/platform/buildinfo.Date=$(DATE)
 
 .PHONY: help build build-server build-collector test test-race vet fmt fmt-check lint proto tidy \
-        dev up down reset logs ps check versions doctor
+        dev up down reset logs ps check versions doctor check-compose
 
 help:
 	@echo "Argus dev targets:"
@@ -26,6 +26,7 @@ help:
 	@echo "  make test         - go test ./..."
 	@echo "  make check        - fmt-check + vet + test"
 	@echo "  make lint         - golangci-lint (installed in .tools/bin)"
+	@echo "  make check-compose- regression check: PG18 image volume layout"
 	@echo "  make proto        - buf generate (requires protoc plugins in .tools/bin)"
 	@echo "  make versions     - print toolchain versions in use"
 
@@ -54,6 +55,14 @@ fmt-check:
 
 lint:
 	.tools/bin/golangci-lint run
+
+check-compose:
+	@targets="$$(docker compose -f $(COMPOSE_FILE) config --format json | grep -oE '"target": *"[^"]+"' | sed 's/.*"target": *"//; s/"$$//' | sort -u)"; \
+	echo "$$targets"; \
+	echo "$$targets" | grep -qx "/var/lib/postgresql" || { echo "ERROR: db volume must mount /var/lib/postgresql (PG18 image layout)"; exit 1; }; \
+	if echo "$$targets" | grep -qx "/var/lib/postgresql/data"; then echo "ERROR: PG17-style /var/lib/postgresql/data mount detected"; exit 1; fi; \
+	if echo "$$targets" | grep -qx "/docker-entrypoint-initdb.d"; then echo "ERROR: directory mount over /docker-entrypoint-initdb.d hides image init scripts"; exit 1; fi; \
+	echo "compose volume layout OK (PG18 data dir + safe init mounts)"
 
 proto:
 	.tools/bin/buf lint

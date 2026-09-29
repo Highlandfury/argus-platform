@@ -1,9 +1,11 @@
-# syntax=docker/dockerfile:1
 # Build: argus-server (control plane). Multi-stage, static binary, distroless runtime.
 # Tag pin: golang:1.27.1 / gcr.io/distroless/static-debian12:nonroot.
 # Digest pinning is a tracked task (docs/phase-1/VERSIONS.md).
+# No `# syntax=` directive on purpose: it would pull a floating BuildKit frontend image.
+# These Dockerfiles use only the engine's built-in frontend (pinned by the documented
+# Docker Engine minimum in VERSIONS.md).
 
-FROM golang:1.27.1 AS build
+FROM golang:1.27.1@sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -18,7 +20,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -X github.com/argus-platform/argus/internal/platform/buildinfo.Date=${BUILD_DATE}" \
     -o /out/argus-server ./cmd/argus-server
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/argus-server /argus-server
 USER nonroot:nonroot
 EXPOSE 8080 8443 8444 9090
