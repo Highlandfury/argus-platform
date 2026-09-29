@@ -14,4 +14,4 @@ import "embed"
 var FS embed.FS
 
 // Latest is the highest migration version in this package.
-const Latest uint = 6
+const Latest uint = 7

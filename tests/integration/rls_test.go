@@ -227,7 +227,7 @@ func TestAuthRoleBoundaries(t *testing.T) {
 	seedTenant(t, "iso-auth-b")
 
 	t.Run("allowed-reads", func(t *testing.T) {
-		var orgs, users, sessions int
+		var orgs, users, sessions, tokens int
 		must(t, database.WithAuthTx(ctx, authPool, func(ctx context.Context, tx pgx.Tx) error {
 			if err := tx.QueryRow(ctx, `SELECT count(*) FROM organizations`).Scan(&orgs); err != nil {
 				return err
@@ -235,7 +235,11 @@ func TestAuthRoleBoundaries(t *testing.T) {
 			if err := tx.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&users); err != nil {
 				return err
 			}
-			return tx.QueryRow(ctx, `SELECT count(*) FROM sessions`).Scan(&sessions)
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
+				return err
+			}
+			// M3 amendment: enrollment token resolution is a pre-auth lookup.
+			return tx.QueryRow(ctx, `SELECT count(*) FROM enrollment_tokens`).Scan(&tokens)
 		}))
 		if orgs < 2 || users < 2 || sessions < 2 {
 			t.Fatalf("auth role pre-auth visibility too small: orgs=%d users=%d sessions=%d", orgs, users, sessions)
@@ -245,7 +249,7 @@ func TestAuthRoleBoundaries(t *testing.T) {
 	t.Run("denied-tables", func(t *testing.T) {
 		denied := []string{
 			"collectors", "collector_certificates", "collector_policies",
-			"metric_series", "metric_samples", "ingested_batches", "enrollment_tokens", "sites",
+			"metric_series", "metric_samples", "ingested_batches", "sites",
 		}
 		for _, tbl := range denied {
 			err := database.WithAuthTx(ctx, authPool, func(ctx context.Context, tx pgx.Tx) error {
@@ -295,6 +299,50 @@ func TestAuthRoleBoundaries(t *testing.T) {
 		})
 		if got := pgErrCode(err); got != sqlstateInsufficientPrivilege {
 			t.Fatalf("auth role update sessions.token_hash: want SQLSTATE %s, got %q (%v)", sqlstateInsufficientPrivilege, got, err)
+		}
+	})
+
+	t.Run("enrollment-token-select-only", func(t *testing.T) {
+		tn := seedTenant(t, "iso-token-a")
+		tokenID := newUUID()
+		_, err := ownerPool.Exec(ctx,
+			`INSERT INTO enrollment_tokens (id, org_id, site_id, token_hash, expires_at)
+			 VALUES ($1, $2, $3, $4, now() + interval '1 hour')`,
+			tokenID, tn.OrgID, tn.SiteID, []byte("token-hash-"+tn.Slug))
+		must(t, err)
+
+		// SELECT is the whole grant: claiming (UPDATE) stays on the app role.
+		err = database.WithAuthTx(ctx, authPool, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE enrollment_tokens SET used_at = now() WHERE id = $1`, tokenID)
+			return err
+		})
+		if got := pgErrCode(err); got != sqlstateInsufficientPrivilege {
+			t.Fatalf("auth role update enrollment_tokens: want SQLSTATE %s, got %q (%v)", sqlstateInsufficientPrivilege, got, err)
+		}
+	})
+
+	t.Run("certificate-resolver-function", func(t *testing.T) {
+		tn := seedTenant(t, "iso-resolver-a")
+		fp := []byte("fp-" + tn.Slug)
+
+		// The auth role may execute the fixed resolver...
+		var resolvedID, resolvedStatus string
+		must(t, database.WithAuthTx(ctx, authPool, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT collector_id::text, status FROM public.argus_resolve_collector_certificate($1)`, fp).
+				Scan(&resolvedID, &resolvedStatus)
+		}))
+		if resolvedID != tn.CollectorID || resolvedStatus != "active" {
+			t.Fatalf("resolver returned (%s,%s), want (%s,active)", resolvedID, resolvedStatus, tn.CollectorID)
+		}
+
+		// ...the app role may not.
+		err := database.WithTenant(ctx, appPool, mustUUID(t, tn.OrgID), func(ctx context.Context, tx pgx.Tx) error {
+			var n int
+			return tx.QueryRow(ctx, `SELECT count(*) FROM public.argus_resolve_collector_certificate($1)`, fp).Scan(&n)
+		})
+		if got := pgErrCode(err); got != sqlstateInsufficientPrivilege {
+			t.Fatalf("app role resolver execution: want SQLSTATE %s, got %q (%v)", sqlstateInsufficientPrivilege, got, err)
 		}
 	})
 }

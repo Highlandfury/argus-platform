@@ -195,6 +195,15 @@ func TestSchemaMatchesSpec(t *testing.T) {
 			t.Fatalf("schema_migrations version = %d, want %d", version, migrations.Latest)
 		}
 	})
+
+	t.Run("collector_identity_function", func(t *testing.T) {
+		var exists bool
+		must(t, ownerPool.QueryRow(ctx,
+			`SELECT to_regprocedure('public.argus_resolve_collector_certificate(bytea)') IS NOT NULL`).Scan(&exists))
+		if !exists {
+			t.Fatal("argus_resolve_collector_certificate(bytea) missing (migration 000007)")
+		}
+	})
 }
 
 func replaceDatabase(t *testing.T, dsn, name string) string {

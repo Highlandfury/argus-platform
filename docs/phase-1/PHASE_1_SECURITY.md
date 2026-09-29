@@ -16,7 +16,7 @@ Scope: the Phase-1 attack surface is deliberately small — collector identity/e
 | Stream auth | mTLS `RequireAndVerifyClientCert` + per-RPC fingerprint→collector status check + cert↔claim assertion | grpcx/auth |
 | Revocation | DB status + `revoked_at`; live-stream termination; terminal client behavior | collectors |
 | Policy integrity | Ed25519 signature verified against key pinned at enrollment; invalid ⇒ last-good retained | collector/policy |
-| Tenant isolation | RLS (`FORCE`) on parents, `SET LOCAL` per tx, app role without BYPASSRLS, 404-not-403 semantics; chunk-level RLS policy on hypertable chunks via migration 000006 (event trigger + backfill); pre-auth lookups via `argus_auth` (BYPASSRLS but granted only organizations/users/sessions) | migrations + database/tenant |
+| Tenant isolation | RLS (`FORCE`) on parents, `SET LOCAL` per tx, app role without BYPASSRLS, 404-not-403 semantics; chunk-level RLS policy on hypertable chunks via migration 000006 (event trigger + backfill); pre-auth lookups via `argus_auth` (BYPASSRLS but granted only organizations/users/sessions/enrollment-token SELECT + the fixed certificate-resolver function, granted only to that role) | migrations + database/tenant |
 | Input validation | Proto-level bounds, metric allowlist by policy, dim caps, ts window, batch caps | ingest/validate |
 | Oversized payloads | gRPC `MaxRecvMsgSize` 16 MiB + batch sample cap 5,000; collector keeps batches ≤ 1 MiB | grpcx, transport |
 | Error hygiene | RFC 9457 problem+json; internal errors generic to callers, detailed in logs with request-id | httpx |
