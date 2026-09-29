@@ -169,3 +169,28 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 - AC-08's "24 h @ 10 s" latency leg cannot return points under the normative 2000-point cap; measured at 24h@1m (1440 points). Wide-window queries over a multi-million-sample series are dataset-bound (raw scan; no CAGGs in Phase 1 per G6) and were measured separately (≈1.1 s for a 2.56 M-sample series) — no CAGG/compression work is in scope until Phase 2.
 - L-03 (k6 API leg) and the 2-hour soak (L-05) remain M6 items per the file plan.
 - Environment honesty: single Windows Docker Desktop node (containerized PostgreSQL 18 + TimescaleDB 2.30.1, same host as server/collectors); synthetic `collector_cpu_percent` only; no HA, no compression. Results are direction/architecture evidence, not a production capability claim.
+
+---
+
+# ACCEPTANCE_RUN — M5b (Collector Self-Observability, :9091)
+
+**Date:** 2026-09-29 · **Commit:** M5b (this commit)
+
+| Gate | Evidence | Result |
+|---|---|---|
+| Metrics endpoint | `internal/collector/telemetry/metrics.go`; live log `collector metrics listening addr=127.0.0.1:9091` | **PASS** |
+| Loopback binding | Non-loopback/wildcard addresses refused at Start (unit-tested with `0.0.0.0:0` and `:9091`); live: in-namespace scrape OK, a peer on the compose network gets `Could not connect to server`, host port not published (unreachable) | **PASS** |
+| Canonical metric set | `argus_collector_spool_bytes` (gauge), `_spool_records` (gauge), `_highest_seq` (gauge), `_acked_seq` (gauge), `_dropped_total` (counter), `_corrupt_total` (counter), `_stream_connected` (gauge), `_send_batch_duration_seconds` (histogram), `_backoff_seconds` (gauge), `_clock_skew_ms` (gauge), `collector_cpu_percent` (gauge). All label-free; source: single `SpoolSnapshot()` for the spool family, setters fed by the real pipeline for the rest | **PASS** |
+| Spool metrics/transitions | Unit test asserts endpoint == snapshot == `spool.Stats()` at empty → unsent (records 2) → acked-1 → retired; no second state source | **PASS** |
+| Stream connectivity | Live outage: `stream_connected` 1 → 0 during server stop → 1 after reconnect (actual session state via the M3 stream lifecycle hooks, not heartbeat inference) | **PASS** |
+| Send latency boundary | Histogram = transport **send write → BatchResult receipt** (any of OK/DUPLICATE/REJECTED/RETRY); a transport failure observes nothing until the batch is re-sent and acknowledged. Documented in code | **PASS** |
+| Backoff | Live: 8 s during retry, **0 after successful reconnection** (reset to 1 s base on a connected session ending; pre-jitter value exposed) | **PASS** |
+| Clock skew | Same skew variable as the heartbeat payload, mirrored via `OnClockSkew`; live values 1–2 ms; no timestamp rewriting anywhere | **PASS** |
+| Collector CPU | Exactly the produced sample mirrored at production time (`collector_cpu_percent 4.05…` live) — one measurement, no re-derivation | **PASS** |
+| Heartbeat consistency | One `SpoolSnapshot()` feeds both the heartbeat `Stats` callback and the endpoint; unit test proves equality across transitions. Live endpoint seq 1494 vs heartbeat 1474 from its previous 30 s publish — lag is by design (periodic heartbeat), values agree at the same instant | **PASS** |
+| Cardinality/label safety | Automated test: no label on any collector family (histogram `le` excepted), no metric family outside the canonical set (+ standard `go_`/`process_`) | **PASS** |
+| Race detector | `-race` unavailable on this Windows host (requires cgo/gcc; documented); run in the pinned Linux toolchain container: `ok` for all `internal/collector/...` packages | **PASS** (environment-documented) |
+| Failure tests | Non-loopback refused; occupied-port Start returns an error while the collector keeps running (covered live: endpoint restarts on a fresh port); scrape during spool transitions; disconnect/reconnect; spool recovery (M4b suite unchanged); clean `Shutdown` | **PASS** |
+| Regression | Full `go test ./...` (17 packages) · lint 0 · buf lint/generate/drift clean · M0–M5a suites green | **PASS** |
+
+**Deviations / notes:** `ARGUS_COLLECTOR_METRICS_ADDR` added (default `127.0.0.1:9091`) — env surface extension beyond the §3.6 table, recorded here; README/RUNBOOK references land in M5d per slice discipline; the spool family is emitted at scrape time (single snapshot per scrape) while the heartbeat remains a 30 s periodic publish — same source, different sampling instants.

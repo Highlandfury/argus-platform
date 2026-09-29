@@ -98,6 +98,7 @@ type Collector struct {
 	DataDir         string
 	CAFile          string // pinned server CA (operator-distributed)
 	Name            string
+	MetricsAddr     string // loopback-only self-observability endpoint (SPEC §15)
 	SpoolMaxBytes   int64
 	FsyncIntervalMS int
 	EnrollTokenFile string // read once when enrolling; never persisted
@@ -112,6 +113,7 @@ func LoadCollector() (Collector, error) {
 		DataDir:         env("ARGUS_COLLECTOR_DATA_DIR", defaultCollectorDataDir()),
 		CAFile:          env("ARGUS_COLLECTOR_CA_FILE", ""),
 		Name:            env("ARGUS_COLLECTOR_NAME", defaultCollectorName()),
+		MetricsAddr:     env("ARGUS_COLLECTOR_METRICS_ADDR", "127.0.0.1:9091"),
 		SpoolMaxBytes:   envInt64("ARGUS_COLLECTOR_SPOOL_MAX_BYTES", 64<<20),
 		FsyncIntervalMS: int(envInt64("ARGUS_COLLECTOR_FSYNC_INTERVAL_MS", 1000)),
 		EnrollTokenFile: env("ARGUS_ENROLL_TOKEN_FILE", ""),

@@ -75,6 +75,14 @@ type Config struct {
 	// Stats, when set, is sampled for every heartbeat so the server sees the
 	// collector's spool accounting (SPEC §15 self-observability).
 	Stats func() TelemetryStats
+	// OnStreamState reports control-stream session state for the collector's
+	// own metrics: connected=true after ServerHello (session ACTIVE);
+	// connected=false when the session ends, with the pre-jitter backoff delay
+	// for the next attempt (0 on terminal exits).
+	OnStreamState func(connected bool, backoff time.Duration)
+	// OnClockSkew reports the skew estimate (collector minus server, ms)
+	// whenever the server provides a timestamp (ServerHello/ServerPing).
+	OnClockSkew func(ms int64)
 }
 
 // TelemetryStats is the spool/sender accounting published in heartbeats.
@@ -91,6 +99,10 @@ type TelemetryStats struct {
 type Client struct {
 	cfg     Config
 	machine *collector.Machine
+	// connectedThisSession is set by runOnce when a session reaches ACTIVE and
+	// consumed by Run to reset the reconnect backoff after a successful
+	// reconnection (single-goroutine access).
+	connectedThisSession bool
 }
 
 // New creates a stream client bound to a state machine.
@@ -114,6 +126,20 @@ func (c *Client) disconnectErr(code collectorv1.Disconnect_Code, reason string) 
 	return &DisconnectError{Code: code, Reason: reason}
 }
 
+// notifyStreamState reports session state to the optional observability hook.
+func (c *Client) notifyStreamState(connected bool, backoff time.Duration) {
+	if c.cfg.OnStreamState != nil {
+		c.cfg.OnStreamState(connected, backoff)
+	}
+}
+
+// notifyClockSkew reports a skew estimate to the optional hook.
+func (c *Client) notifyClockSkew(ms int64) {
+	if c.cfg.OnClockSkew != nil {
+		c.cfg.OnClockSkew(ms)
+	}
+}
+
 // Run drives connect -> active -> reconnect until ctx ends or the identity is
 // revoked (terminal). It returns nil for clean shutdown and revocation.
 func (c *Client) Run(ctx context.Context) error {
@@ -130,13 +156,22 @@ func (c *Client) Run(ctx context.Context) error {
 			case collectorv1.Disconnect_CODE_REVOKED:
 				c.log().Error("collector revoked by server; stopping permanently", "reason", dErr.Reason)
 				_ = c.machine.Transition(collector.StateRevoked)
+				c.notifyStreamState(false, 0)
 				return nil
 			case collectorv1.Disconnect_CODE_PROTOCOL_ERROR:
 				c.log().Error("protocol error; stopping", "reason", dErr.Reason)
 				_ = c.machine.Transition(collector.StateFailed)
+				c.notifyStreamState(false, 0)
 				return fmt.Errorf("stream: %w", dErr)
 			}
 		}
+		// Reset the backoff after a session that actually connected: the next
+		// outage starts from 1 s again (observable via _backoff_seconds).
+		if c.connectedThisSession {
+			backoff = time.Second
+			c.connectedThisSession = false
+		}
+		c.notifyStreamState(false, backoff)
 		c.log().Warn("stream lost; will reconnect", "error", err, "backoff", backoff)
 		if c.machine.State() == collector.StateActive {
 			_ = c.machine.Transition(collector.StateDisconnected)
@@ -247,6 +282,8 @@ func (c *Client) runOnce(ctx context.Context) error {
 			return err
 		}
 	}
+	c.connectedThisSession = true
+	c.notifyStreamState(true, 0)
 
 	// Telemetry: pull batches from the source under the server-advertised
 	// in-flight window. Send errors terminate the session (the reconnect path
@@ -300,6 +337,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 	var skewMillis int64
 	if st := hello.GetServerTime(); st != nil {
 		skewMillis = time.Since(st.AsTime()).Milliseconds()
+		c.notifyClockSkew(skewMillis)
 	}
 
 	for {
@@ -316,6 +354,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 			case msg.GetPing() != nil:
 				if st := msg.GetPing().GetServerTime(); st != nil {
 					skewMillis = time.Since(st.AsTime()).Milliseconds()
+					c.notifyClockSkew(skewMillis)
 				}
 			case msg.GetBatchResult() != nil:
 				if inflight > 0 {

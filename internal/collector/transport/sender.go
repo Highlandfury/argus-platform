@@ -33,6 +33,9 @@ type Sender struct {
 	sp            *spool.Spool
 	deadletterDir string
 	log           *slog.Logger
+	// observeSend is called once per BatchResult with the transport latency
+	// (send write → result receipt). Set before Run starts.
+	observeSend func(time.Duration)
 
 	batchesSent      atomic.Int64
 	batchesOK        atomic.Int64
@@ -42,6 +45,12 @@ type Sender struct {
 
 	mu      sync.Mutex
 	current *session
+}
+
+// SetSendDurationObserver wires the transport-latency observer (called from
+// the session result path; must be set before Run starts).
+func (s *Sender) SetSendDurationObserver(fn func(time.Duration)) {
+	s.observeSend = fn
 }
 
 // NewSender wires the sender.
@@ -68,6 +77,7 @@ func (s *Sender) SessionStart(_ *collectorv1.ServerHello) {
 		nextAck:    s.sp.Watermark() + 1,
 		acks:       map[int64]bool{},
 		sent:       map[int64]*spool.Batch{},
+		sentAt:     map[int64]time.Time{},
 	}
 	s.mu.Unlock()
 }
@@ -165,7 +175,8 @@ type session struct {
 	nextAck int64
 	acks    map[int64]bool
 
-	sent map[int64]*spool.Batch
+	sent   map[int64]*spool.Batch
+	sentAt map[int64]time.Time // transport latency boundary: send write → result
 
 	mu sync.Mutex
 }
@@ -197,6 +208,7 @@ func (s *session) next() (*collectorv1.MetricBatch, bool) {
 		return nil, false
 	}
 	s.sent[b.Seq] = b
+	s.sentAt[b.Seq] = time.Now()
 	s.sender.batchesSent.Add(1)
 	return b.ToProto(), true
 }
@@ -208,6 +220,15 @@ func (s *session) result(br *collectorv1.BatchResult) {
 	defer s.mu.Unlock()
 	batch := s.sent[seq]
 	delete(s.sent, seq)
+	// Transport latency: send write → BatchResult receipt (any status). A
+	// transport failure produces no result, so nothing is observed until the
+	// batch is re-sent and acked, and a RETRY observes its attempt's latency.
+	if t, ok := s.sentAt[seq]; ok {
+		delete(s.sentAt, seq)
+		if s.sender.observeSend != nil {
+			s.sender.observeSend(time.Since(t))
+		}
+	}
 
 	switch br.GetStatus() {
 	case collectorv1.BatchResult_STATUS_OK:

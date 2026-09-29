@@ -25,6 +25,7 @@ import (
 	"github.com/argus-platform/argus/internal/collector/policy"
 	"github.com/argus-platform/argus/internal/collector/spool"
 	"github.com/argus-platform/argus/internal/collector/stream"
+	ctel "github.com/argus-platform/argus/internal/collector/telemetry"
 	"github.com/argus-platform/argus/internal/collector/transport"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
@@ -156,6 +157,20 @@ func cmdRun(args []string) int {
 		"acked_seq", spoolStats.AckedSeq,
 		"highest_seq", spoolStats.HighestSeq)
 
+	// Collector self-observability (SPEC §15): loopback-only endpoint. A start
+	// failure disables the endpoint but never the telemetry transport.
+	cmet := ctel.New(sp)
+	if err := cmet.Start(cfg.MetricsAddr, logger); err != nil {
+		logger.Warn("collector metrics endpoint disabled", "addr", cfg.MetricsAddr, "error", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := cmet.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("collector metrics shutdown", "error", err)
+		}
+	}()
+
 	keyDER, err := base64.StdEncoding.DecodeString(id.PolicyKeyDERB64)
 	if err != nil || len(keyDER) == 0 {
 		logger.Error("identity is missing the pinned policy signing key")
@@ -172,6 +187,7 @@ func cmdRun(args []string) int {
 	}
 
 	sender := transport.NewSender(sp, filepath.Join(cfg.DataDir, "spool", "deadletter"), logger)
+	sender.SetSendDurationObserver(cmet.ObserveSendDuration)
 	if err := machine.Transition(collector.StateReconnecting); err != nil {
 		logger.Error("state", "error", err)
 		return 1
@@ -189,16 +205,23 @@ func cmdRun(args []string) int {
 		PolicyKeyDER:   keyDER,
 		Telemetry:      sender,
 		Stats: func() stream.TelemetryStats {
-			st := sp.Stats()
+			// Single state source: the same SpoolSnapshot the metrics endpoint
+			// reads, so heartbeat and /metrics can never diverge.
+			snap := cmet.SpoolSnapshot()
 			return stream.TelemetryStats{
-				SpoolBytes:          uint64(st.Bytes),   //nolint:gosec // non-negative by construction
-				SpoolRecords:        uint64(st.Records), //nolint:gosec // non-negative by construction
-				HighestSeq:          st.HighestSeq,
-				AckedSeq:            st.AckedSeq,
-				DroppedRecordsTotal: uint64(st.DroppedRecordsTotal), //nolint:gosec // non-negative by construction
-				CorruptRecordsTotal: uint64(st.CorruptRecordsTotal), //nolint:gosec // non-negative by construction
+				SpoolBytes:          uint64(snap.Bytes),   //nolint:gosec // non-negative by construction
+				SpoolRecords:        uint64(snap.Records), //nolint:gosec // non-negative by construction
+				HighestSeq:          snap.HighestSeq,
+				AckedSeq:            snap.AckedSeq,
+				DroppedRecordsTotal: uint64(snap.DroppedTotal), //nolint:gosec // non-negative by construction
+				CorruptRecordsTotal: uint64(snap.CorruptTotal), //nolint:gosec // non-negative by construction
 			}
 		},
+		OnStreamState: func(connected bool, backoff time.Duration) {
+			cmet.SetStreamConnected(connected)
+			cmet.SetBackoff(backoff)
+		},
+		OnClockSkew: cmet.SetClockSkew,
 		OnPolicyApplied: func(version int64) {
 			if err := idStore.UpdatePolicyVersion(id, version); err != nil {
 				logger.Error("persist policy version", "error", err)
@@ -251,6 +274,9 @@ func cmdRun(args []string) int {
 		metrics.NewCPUSource(),
 		rp.metric,
 		func(s metrics.Sample) {
+			// Mirror the produced sample into the collector's own metrics
+			// (same measurement; single canonical source).
+			cmet.SetCPUPercent(s.Value)
 			select {
 			case sampleCh <- s:
 			case <-runCtx.Done():
