@@ -31,6 +31,21 @@ services:
       timeout: 3s
       retries: 30
 
+  migrate:
+    build:
+      context: ../..
+      dockerfile: deployments/compose/Dockerfile.server
+      args:
+        VERSION: dev
+        COMMIT: none
+        BUILD_DATE: unknown
+    command: ["/argus-server", "migrate"]
+    environment:
+      ARGUS_SERVER_MIGRATE_DSN: "postgres://argus_owner:devpass@db:5432/argus?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+
   server:
     build:
       context: ../..
@@ -60,6 +75,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/argus-server", "healthcheck", "-url", "http://127.0.0.1:8080/v1/healthz"]
       interval: 5s

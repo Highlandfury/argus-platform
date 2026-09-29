@@ -42,5 +42,12 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
     REVOKE USAGE, SELECT ON SEQUENCES FROM argus_app;
 REVOKE SELECT ON organizations, users, sessions FROM argus_auth;
 REVOKE UPDATE (last_seen_at, revoked_at) ON sessions FROM argus_auth;
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'schema_migrations') THEN
+        EXECUTE 'REVOKE SELECT ON TABLE schema_migrations FROM argus_app';
+    END IF;
+END
+$$;
 REVOKE USAGE ON SCHEMA public FROM argus_app;
 REVOKE USAGE ON SCHEMA public FROM argus_auth;

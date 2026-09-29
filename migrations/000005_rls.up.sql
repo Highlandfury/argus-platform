@@ -37,6 +37,18 @@ GRANT USAGE ON SCHEMA public TO argus_auth;
 GRANT SELECT ON organizations, users, sessions TO argus_auth;
 GRANT UPDATE (last_seen_at, revoked_at) ON sessions TO argus_auth;
 
+-- schema_migrations is created by the migration tool (golang-migrate) BEFORE the
+-- first migration runs, so it is not covered by the default privileges set below.
+-- Grant the app role read access explicitly so readiness can verify schema state.
+-- (Guarded: the table may not exist if migrations are applied by other tooling.)
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_tables WHERE schemaname = 'public' AND tablename = 'schema_migrations') THEN
+        EXECUTE 'GRANT SELECT ON TABLE schema_migrations TO argus_app';
+    END IF;
+END
+$$;
+
 -- Hypertable chunks live in _timescaledb_internal. We deliberately DO NOT grant that
 -- schema to argus_app: direct chunk access must remain denied so RLS cannot be bypassed
 -- by querying a chunk. Parent (hypertable) access is governed by the policies below and

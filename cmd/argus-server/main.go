@@ -16,6 +16,7 @@ import (
 	"github.com/argus-platform/argus/internal/api"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
+	"github.com/argus-platform/argus/internal/platform/database"
 	"github.com/argus-platform/argus/internal/platform/logging"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
 )
@@ -38,8 +39,7 @@ func run(args []string) int {
 		fmt.Printf("argus-server %s (commit %s, built %s)\n", buildinfo.Version, buildinfo.Commit, buildinfo.Date)
 		return 0
 	case "migrate":
-		fmt.Fprintln(os.Stderr, "migrate: not implemented yet (arrives in M1 with migrations/ and the owner DSN)")
-		return 1
+		return cmdMigrate(args[1:])
 	case "seed-dev":
 		fmt.Fprintln(os.Stderr, "seed-dev: not implemented yet (arrives in M1)")
 		return 1
@@ -131,6 +131,38 @@ func cmdServe(args []string) int {
 	if runErr != nil {
 		return 1
 	}
+	return 0
+}
+
+func cmdMigrate(args []string) int {
+	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	down := fs.Int("down", 0, "step down N migrations instead of applying all pending")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cfg, err := config.LoadServer()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		return 1
+	}
+	if cfg.MigrateDSN == "" {
+		fmt.Fprintln(os.Stderr, "ARGUS_SERVER_MIGRATE_DSN is required (owner-role DSN)")
+		return 1
+	}
+	if *down > 0 {
+		if err := database.MigrateDown(cfg.MigrateDSN, *down); err != nil {
+			fmt.Fprintln(os.Stderr, "migrate down:", err)
+			return 1
+		}
+		fmt.Printf("migrate: stepped down %d migration(s)\n", *down)
+		return 0
+	}
+	version, err := database.MigrateUp(cfg.MigrateDSN)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "migrate up:", err)
+		return 1
+	}
+	fmt.Printf("migrate: schema at version %d\n", version)
 	return 0
 }
 
