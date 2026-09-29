@@ -282,3 +282,22 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 - CI: `ci.yml` now triggers on `schedule` (daily 03:00 UTC) and `workflow_dispatch`, with a `failure-suite` job running the canonical selector on `ubuntu-latest` (Docker preinstalled for testcontainers).
 - **M6b finding (fixed):** running the suite twice in one process (T8 subtests + the top-level RLS tests) hit fixed-org-slug collisions (`organizations_slug_key`); the RLS fixtures now use unique slugs and the suite is safely composable.
 - Evidence: focused suite run 48 s (T1–T10 green); full `go test ./...` with the suite included — 18 packages green (integration 322 s); lint 0; buf lint/generate/drift clean.
+
+---
+
+# ACCEPTANCE_RUN — M6c (Compose-stack E2E Harness + CI Job)
+
+**Date:** 2026-09-30 · **Commit:** M6c (this commit)
+
+| Gate | Evidence | Result |
+|---|---|---|
+| Harness | `tests/e2e/scenarios_test.go` against the **real compose stack** (API :8080, ops :9090, enrollment :8444, mTLS stream :8443, internal CA, running collector); skipped unless `ARGUS_E2E=1` so `go test ./...` never depends on a running stack | **PASS** |
+| AC-01/AC-02 | `TestE2EAC01EnrollAndRegister`: API-created one-time token → real enrollment client (TLS + CSR proof of possession) → certificate ≥80-day validity → signed policy verified by the client → collector visible in `/v1/collectors` | **PASS** (0.57 s) |
+| AC-03 | `TestE2EAC03StreamActiveAndRevocationT7`: real mTLS stream reaches ACTIVE; `argus_grpc_streams_active` present in ops `/metrics` | **PASS** |
+| T7 (live) | Same test: `POST /v1/collectors/{id}/revoke` → live stream terminates within 15 s with the terminal REVOKED state; registry reports `revoked`; a fresh connection with the revoked identity is rejected pre-hello, promptly and permanently | **PASS** (0.66 s) |
+| AC-08 | `TestE2EAC08MetricQuery`: query API returns stored points for the running `dev-collector` (15 m raw, polled ≤45 s) | **PASS** (0.28 s) |
+| CI job | `ci.yml` job `e2e`: compose `up -d --build --wait` → extract internal CA → `ARGUS_E2E=1 go test ./tests/e2e/... -v` → compose logs on failure → `down -v` (ubuntu-latest, 25 min timeout) | **PASS (wired)** |
+| Harness hygiene | One throwaway collector per run (`e2e-<id>`), revoked during T7; relative CA paths resolve to the repo root; default run skips (0.49 s) | **PASS** |
+| Regression | `go vet ./tests/e2e/...` · lint 0 · harness green twice (fresh + re-run) | **PASS** |
+
+**Scope note (recorded):** T1–T3/T10 are automated against the real control plane in the M6b integration failure suite (containerized DB + in-process gRPC) and were additionally exercised live in M4b/M5d (outage/restart/reconnect evidence). The e2e harness adds the compose-stack AC-01/02/03/08 + T7 live path; compose-orchestrated variants of T2/T3/T10 (container stop/pause driven from Go) remain future work to avoid duplicating the M6b automation.

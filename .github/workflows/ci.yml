@@ -101,6 +101,31 @@ jobs:
       - name: failure suite (T1-T10, testcontainers)
         run: go test ./tests/integration/... -run '^TestFailureSuite$' -count=1 -v
 
+  e2e:
+    name: e2e (compose stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+      - name: compose up (build + wait for healthy)
+        run: docker compose -f deployments/compose/docker-compose.dev.yml up -d --build --wait
+      - name: extract internal CA (pinned trust for the harness)
+        run: docker compose -f deployments/compose/docker-compose.dev.yml cp server:/var/lib/argus/ca/root.pem e2e-ca.pem
+      - name: e2e harness (AC-01/02/03/08, T7)
+        env:
+          ARGUS_E2E: "1"
+          ARGUS_E2E_CA: e2e-ca.pem
+        run: go test ./tests/e2e/... -count=1 -v
+      - name: compose logs (on failure)
+        if: failure()
+        run: docker compose -f deployments/compose/docker-compose.dev.yml logs --tail=100
+      - name: compose down
+        if: always()
+        run: docker compose -f deployments/compose/docker-compose.dev.yml down -v --remove-orphans
+
   compat-matrix:
     name: compat matrix (PG18 + TimescaleDB 2.30.1)
     runs-on: ubuntu-latest
