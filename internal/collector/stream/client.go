@@ -51,6 +51,9 @@ type Config struct {
 	// OnPolicyApplied is invoked after a new policy version is verified and
 	// persisted (used to persist the applied version in collector.json).
 	OnPolicyApplied func(version int64)
+	// OnDisconnect is invoked for every server-ordered disconnect (test/logging
+	// observability; the caller never has to parse error strings).
+	OnDisconnect func(code collectorv1.Disconnect_Code, reason string)
 }
 
 // Client runs the control stream lifecycle.
@@ -69,6 +72,15 @@ func (c *Client) log() *slog.Logger {
 		return c.cfg.Log
 	}
 	return slog.Default()
+}
+
+// disconnectErr centralizes server-ordered disconnect creation + the
+// observability hook.
+func (c *Client) disconnectErr(code collectorv1.Disconnect_Code, reason string) *DisconnectError {
+	if c.cfg.OnDisconnect != nil {
+		c.cfg.OnDisconnect(code, reason)
+	}
+	return &DisconnectError{Code: code, Reason: reason}
 }
 
 // Run drives connect -> active -> reconnect until ctx ends or the identity is
@@ -186,9 +198,9 @@ func (c *Client) runOnce(ctx context.Context) error {
 		case msg.GetDisconnect() != nil:
 			// Revoked (or otherwise terminated) between auth and hello.
 			d := msg.GetDisconnect()
-			return &DisconnectError{Code: d.GetCode(), Reason: d.GetReason()}
+			return c.disconnectErr(d.GetCode(), d.GetReason())
 		default:
-			return &DisconnectError{Code: collectorv1.Disconnect_CODE_PROTOCOL_ERROR, Reason: "expected ServerHello"}
+			return c.disconnectErr(collectorv1.Disconnect_CODE_PROTOCOL_ERROR, "expected ServerHello")
 		}
 	case err := <-recvErr:
 		return normalize(err)
@@ -232,10 +244,10 @@ func (c *Client) runOnce(ctx context.Context) error {
 			case msg.GetBatchResult() != nil:
 				// Batch acknowledgements are M4 functionality; nothing to do.
 			case msg.GetHello() != nil:
-				return &DisconnectError{Code: collectorv1.Disconnect_CODE_PROTOCOL_ERROR, Reason: "duplicate ServerHello"}
+				return c.disconnectErr(collectorv1.Disconnect_CODE_PROTOCOL_ERROR, "duplicate ServerHello")
 			case msg.GetDisconnect() != nil:
 				d := msg.GetDisconnect()
-				return &DisconnectError{Code: d.GetCode(), Reason: d.GetReason()}
+				return c.disconnectErr(d.GetCode(), d.GetReason())
 			}
 		case <-ticker.C:
 			if err := send(&collectorv1.ClientMessage{

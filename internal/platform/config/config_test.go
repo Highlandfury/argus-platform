@@ -39,6 +39,7 @@ func unsetCollectorEnv(t *testing.T) {
 		"ARGUS_LOG_LEVEL", "ARGUS_COLLECTOR_SERVER", "ARGUS_COLLECTOR_STREAM",
 		"ARGUS_COLLECTOR_DATA_DIR", "ARGUS_COLLECTOR_SPOOL_MAX_BYTES",
 		"ARGUS_COLLECTOR_FSYNC_INTERVAL_MS", "ARGUS_ENROLL_TOKEN_FILE",
+		"ARGUS_COLLECTOR_CA_FILE", "ARGUS_COLLECTOR_NAME",
 	)
 }
 
@@ -88,6 +89,7 @@ func TestLoadCollectorDefaults(t *testing.T) {
 	unsetCollectorEnv(t)
 	t.Setenv("ARGUS_COLLECTOR_STREAM", "server:8443")
 	t.Setenv("ARGUS_COLLECTOR_SERVER", "https://server:8444")
+	t.Setenv("ARGUS_COLLECTOR_CA_FILE", "/etc/argus/ca.pem")
 	cfg, err := LoadCollector()
 	if err != nil {
 		t.Fatalf("LoadCollector: %v", err)
@@ -97,6 +99,21 @@ func TestLoadCollectorDefaults(t *testing.T) {
 	}
 	if cfg.FsyncIntervalMS != 1000 {
 		t.Fatalf("unexpected fsync default: %d", cfg.FsyncIntervalMS)
+	}
+	if cfg.CAFile != "/etc/argus/ca.pem" {
+		t.Fatalf("unexpected CA file: %q", cfg.CAFile)
+	}
+	if cfg.Name == "" {
+		t.Fatal("collector name must default to hostname")
+	}
+}
+
+func TestLoadCollectorRequiresCAFile(t *testing.T) {
+	unsetCollectorEnv(t)
+	t.Setenv("ARGUS_COLLECTOR_STREAM", "server:8443")
+	t.Setenv("ARGUS_COLLECTOR_SERVER", "https://server:8444")
+	if _, err := LoadCollector(); err == nil {
+		t.Fatal("expected error when ARGUS_COLLECTOR_CA_FILE is missing")
 	}
 }
 
@@ -120,6 +137,7 @@ func TestLoadCollectorRejectsBadSpool(t *testing.T) {
 	unsetCollectorEnv(t)
 	t.Setenv("ARGUS_COLLECTOR_STREAM", "server:8443")
 	t.Setenv("ARGUS_COLLECTOR_SERVER", "https://server:8444")
+	t.Setenv("ARGUS_COLLECTOR_CA_FILE", "/etc/argus/ca.pem")
 	t.Setenv("ARGUS_COLLECTOR_SPOOL_MAX_BYTES", "-1")
 	if _, err := LoadCollector(); err == nil {
 		t.Fatal("expected error for negative spool size")
