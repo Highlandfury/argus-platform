@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -85,6 +88,18 @@ jobs:
           go-version: "1.27.1"
       - name: spec validity + route alignment
         run: go test ./tests/contract/... -count=1
+
+  failure-suite:
+    name: failure suite (T1-T10; nightly/release)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+      - name: failure suite (T1-T10, testcontainers)
+        run: go test ./tests/integration/... -run '^TestFailureSuite$' -count=1 -v
 
   compat-matrix:
     name: compat matrix (PG18 + TimescaleDB 2.30.1)

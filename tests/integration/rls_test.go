@@ -36,8 +36,10 @@ func assertIsolation(t *testing.T, tn tenant, other tenant) {
 }
 
 func TestTenantIsolationReads(t *testing.T) {
-	a := seedTenant(t, "iso-reads-a")
-	b := seedTenant(t, "iso-reads-b")
+	// Unique slugs so the scenario is re-runnable (it is also executed inside
+	// TestFailureSuite/T8 in the same process).
+	a := seedTenant(t, "iso-reads-a-"+newUUID()[:8])
+	b := seedTenant(t, "iso-reads-b-"+newUUID()[:8])
 
 	assertIsolation(t, a, b)
 	assertIsolation(t, b, a)
@@ -54,8 +56,8 @@ func TestTenantIsolationReads(t *testing.T) {
 
 func TestCrossTenantWritesDenied(t *testing.T) {
 	ctx := context.Background()
-	a := seedTenant(t, "iso-writes-a")
-	b := seedTenant(t, "iso-writes-b")
+	a := seedTenant(t, "iso-writes-a-"+newUUID()[:8])
+	b := seedTenant(t, "iso-writes-b-"+newUUID()[:8])
 	orgA := mustUUID(t, a.OrgID)
 
 	// INSERT with a foreign org_id violates RLS WITH CHECK.

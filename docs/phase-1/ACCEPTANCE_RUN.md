@@ -258,3 +258,27 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 | Post-L-03 regression | build/vet/full `go test ./...` (18 pkgs) · lint 0 · buf lint/generate/drift clean · Playwright 6/6 on the same stack | **PASS** |
 
 **L-03 harness lessons recorded:** (1) the k6 VU cookie jar delivered the `setup()` session cookie only for each VU's first request → 1.5 M fast 401s; the script now sends the session cookie explicitly per request (the 401 run is documented in the report as a harness lesson, not as an L-03 result). (2) The canonical "24 h @ 10 s" workload violates the normative 2000-point cap (422); L-03 issues 24 h @ 1 m, consistent with the recorded AC-08 interpretation.
+
+---
+
+# ACCEPTANCE_RUN — M6b (Failure Suite T1–T10 + nightly CI job)
+
+**Date:** 2026-09-30 · **Commit:** M6b (this commit)
+
+| T-case | Canonical scenario | Automated test (real DB + in-process gRPC) | Result |
+|---|---|---|---|
+| T1 | Normal operation | `TestM4BatchIngestHappyPath` | PASS |
+| T2 | Server unavailable (collector autonomy) | `TestM4CollectorSpoolSurvivesOutageAndDrains` | PASS |
+| T3 | Stream interruption + reconnect | `TestM3StreamLifecycle` | PASS |
+| T4 | Duplicate batch (idempotency, original wins) | `TestM4DuplicateBatchOriginalWins` | PASS |
+| T5 | Malformed / poison metric | `TestM4PoisonBatches` (7 subtests) | PASS |
+| T6 | Expired/used/unknown enrollment token | `TestM3EnrollmentMatrix` | PASS |
+| T7 | Revoked collector (terminal disconnect) | `TestM3StreamLifecycle` | PASS |
+| T8 | Tenant isolation (reads/writes/metric path) | `TestTenantIsolationReads`, `TestCrossTenantWritesDenied`, `TestM4MetricTenantIsolation` | PASS |
+| T9 | Database restart during ingest | `TestDatabaseRestartRecovery` | PASS |
+| T10 | Collector restart (spool/watermark survival) | `TestM4CollectorRestartResumesFromWatermark` | PASS |
+
+- Entry point: `tests/integration/failure_tests_test.go::TestFailureSuite` (canonical selector `go test ./tests/integration/... -run '^TestFailureSuite$'`); every case is a real end-to-end scenario, nothing mocked. Filename note: Go requires `_test.go` for test code (documented deviation from the plan's `failure_tests.go` shorthand).
+- CI: `ci.yml` now triggers on `schedule` (daily 03:00 UTC) and `workflow_dispatch`, with a `failure-suite` job running the canonical selector on `ubuntu-latest` (Docker preinstalled for testcontainers).
+- **M6b finding (fixed):** running the suite twice in one process (T8 subtests + the top-level RLS tests) hit fixed-org-slug collisions (`organizations_slug_key`); the RLS fixtures now use unique slugs and the suite is safely composable.
+- Evidence: focused suite run 48 s (T1–T10 green); full `go test ./...` with the suite included — 18 packages green (integration 322 s); lint 0; buf lint/generate/drift clean.
