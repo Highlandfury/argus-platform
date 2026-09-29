@@ -26,6 +26,20 @@ import (
 
 const protocolVersion = 1
 
+// BatchSource is the telemetry surface of the collector pipeline (implemented
+// by transport.Sender). The stream client pulls batches through it, enforcing
+// the server-advertised in-flight window, and reports results back so the
+// source can advance its durable watermark only on server acknowledgements.
+type BatchSource interface {
+	// SessionStart is called once per (re)connection after ServerHello: the
+	// source resets per-session state and resumes from its spool watermark.
+	SessionStart(hello *collectorv1.ServerHello)
+	// NextBatch returns the next batch to send, or ok=false when idle.
+	NextBatch() (*collectorv1.MetricBatch, bool)
+	// BatchResult consumes a server BatchResult for a previously sent batch.
+	BatchResult(*collectorv1.BatchResult)
+}
+
 // DisconnectError carries a server-ordered disconnect code.
 type DisconnectError struct {
 	Code   collectorv1.Disconnect_Code
@@ -54,6 +68,23 @@ type Config struct {
 	// OnDisconnect is invoked for every server-ordered disconnect (test/logging
 	// observability; the caller never has to parse error strings).
 	OnDisconnect func(code collectorv1.Disconnect_Code, reason string)
+	// Telemetry, when set, supplies metric batches to send and receives server
+	// results. The stream never acks the spool itself: only BatchResult(OK or
+	// DUPLICATE) lets the source retire a durable record.
+	Telemetry BatchSource
+	// Stats, when set, is sampled for every heartbeat so the server sees the
+	// collector's spool accounting (SPEC §15 self-observability).
+	Stats func() TelemetryStats
+}
+
+// TelemetryStats is the spool/sender accounting published in heartbeats.
+type TelemetryStats struct {
+	SpoolBytes          uint64
+	SpoolRecords        uint64
+	HighestSeq          int64
+	AckedSeq            int64
+	DroppedRecordsTotal uint64
+	CorruptRecordsTotal uint64
 }
 
 // Client runs the control stream lifecycle.
@@ -217,6 +248,48 @@ func (c *Client) runOnce(ctx context.Context) error {
 		}
 	}
 
+	// Telemetry: pull batches from the source under the server-advertised
+	// in-flight window. Send errors terminate the session (the reconnect path
+	// rebuilds the source from the durable watermark).
+	var (
+		source   BatchSource
+		inflight int
+		sendErr  error
+	)
+	if c.cfg.Telemetry != nil {
+		source = c.cfg.Telemetry
+		source.SessionStart(hello)
+	}
+	maxInflight := int(hello.GetMaxInflightBatches())
+	if maxInflight <= 0 {
+		maxInflight = 8
+	}
+	pump := func() {
+		if source == nil || sendErr != nil {
+			return
+		}
+		for inflight < maxInflight {
+			batch, ok := source.NextBatch()
+			if !ok || batch == nil {
+				return
+			}
+			if err := send(&collectorv1.ClientMessage{
+				Msg: &collectorv1.ClientMessage_Batch{Batch: batch},
+			}); err != nil {
+				sendErr = err
+				return
+			}
+			inflight++
+		}
+	}
+	pump()
+	var pumpCh <-chan time.Time
+	if source != nil {
+		pumpTicker := time.NewTicker(250 * time.Millisecond)
+		defer pumpTicker.Stop()
+		pumpCh = pumpTicker.C
+	}
+
 	heartbeatEvery := time.Duration(hello.GetHeartbeatIntervalSeconds()) * time.Second
 	if heartbeatEvery <= 0 {
 		heartbeatEvery = 30 * time.Second
@@ -230,6 +303,9 @@ func (c *Client) runOnce(ctx context.Context) error {
 	}
 
 	for {
+		if sendErr != nil {
+			return normalize(sendErr)
+		}
 		select {
 		case msg := <-recvCh:
 			switch {
@@ -242,21 +318,40 @@ func (c *Client) runOnce(ctx context.Context) error {
 					skewMillis = time.Since(st.AsTime()).Milliseconds()
 				}
 			case msg.GetBatchResult() != nil:
-				// Batch acknowledgements are M4 functionality; nothing to do.
+				if inflight > 0 {
+					inflight--
+				}
+				if source != nil {
+					source.BatchResult(msg.GetBatchResult())
+				}
+				pump()
 			case msg.GetHello() != nil:
 				return c.disconnectErr(collectorv1.Disconnect_CODE_PROTOCOL_ERROR, "duplicate ServerHello")
 			case msg.GetDisconnect() != nil:
 				d := msg.GetDisconnect()
 				return c.disconnectErr(d.GetCode(), d.GetReason())
 			}
+			pump()
+		case <-pumpCh:
+			pump()
 		case <-ticker.C:
+			hb := &collectorv1.Heartbeat{
+				SentAt:        timestamppb.Now(),
+				ClockSkewMs:   skewMillis,
+				AgentVersion:  c.cfg.AgentVersion,
+				UptimeSeconds: int64(time.Since(started).Seconds()),
+			}
+			if c.cfg.Stats != nil {
+				st := c.cfg.Stats()
+				hb.SpoolBytes = st.SpoolBytes
+				hb.SpoolRecords = st.SpoolRecords
+				hb.HighestSeq = st.HighestSeq
+				hb.AckedSeq = st.AckedSeq
+				hb.DroppedRecordsTotal = st.DroppedRecordsTotal
+				hb.CorruptRecordsTotal = st.CorruptRecordsTotal
+			}
 			if err := send(&collectorv1.ClientMessage{
-				Msg: &collectorv1.ClientMessage_Heartbeat{Heartbeat: &collectorv1.Heartbeat{
-					SentAt:        timestamppb.Now(),
-					ClockSkewMs:   skewMillis,
-					AgentVersion:  c.cfg.AgentVersion,
-					UptimeSeconds: int64(time.Since(started).Seconds()),
-				}},
+				Msg: &collectorv1.ClientMessage_Heartbeat{Heartbeat: hb},
 			}); err != nil {
 				return normalize(err)
 			}
@@ -289,7 +384,12 @@ func (c *Client) handlePolicy(send func(*collectorv1.ClientMessage) error, p *co
 		return err
 	}
 	if version <= c.cfg.AppliedVersion {
-		ack(version, true, "") // idempotent re-delivery
+		// Idempotent re-delivery. Still (re)persist the document so a missing
+		// policy cache self-heals: identical signed bytes, atomic swap.
+		if _, err := policy.Store(c.cfg.PolicyDir, version, p.GetDocument()); err != nil {
+			c.log().Warn("policy cache refresh failed", "version", version, "error", err)
+		}
+		ack(version, true, "")
 		return nil
 	}
 	if _, err := policy.Store(c.cfg.PolicyDir, version, p.GetDocument()); err != nil {

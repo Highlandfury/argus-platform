@@ -55,30 +55,39 @@ func VerifyAndValidate(document, signature, pubKeyDER []byte) (Document, error) 
 	if err := json.Unmarshal(document, &doc); err != nil {
 		return Document{}, fmt.Errorf("%w: %w", ErrValidation, err)
 	}
+	if err := Validate(doc); err != nil {
+		return Document{}, err
+	}
+	return doc, nil
+}
+
+// Validate bounds-checks a document (shared by the verify path and the
+// producer's load path).
+func Validate(doc Document) error {
 	if doc.HeartbeatIntervalSeconds < 5 || doc.HeartbeatIntervalSeconds > 600 {
-		return Document{}, fmt.Errorf("%w: heartbeat_interval_seconds out of range", ErrValidation)
+		return fmt.Errorf("%w: heartbeat_interval_seconds out of range", ErrValidation)
 	}
 	if doc.ReportIntervalSeconds < 1 || doc.ReportIntervalSeconds > 3600 {
-		return Document{}, fmt.Errorf("%w: report_interval_seconds out of range", ErrValidation)
+		return fmt.Errorf("%w: report_interval_seconds out of range", ErrValidation)
 	}
 	if doc.BatchMaxSamples < 100 || doc.BatchMaxSamples > 10000 {
-		return Document{}, fmt.Errorf("%w: batch_max_samples out of range", ErrValidation)
+		return fmt.Errorf("%w: batch_max_samples out of range", ErrValidation)
 	}
 	if doc.SpoolMaxBytes < 1<<20 || doc.SpoolMaxBytes > 1<<34 {
-		return Document{}, fmt.Errorf("%w: spool_max_bytes out of range", ErrValidation)
+		return fmt.Errorf("%w: spool_max_bytes out of range", ErrValidation)
 	}
 	if len(doc.Metrics) == 0 || len(doc.Metrics) > 100 {
-		return Document{}, fmt.Errorf("%w: metrics list size invalid", ErrValidation)
+		return fmt.Errorf("%w: metrics list size invalid", ErrValidation)
 	}
 	for _, m := range doc.Metrics {
 		if m.Key == "" || m.Unit == "" || m.Source == "" {
-			return Document{}, fmt.Errorf("%w: metric missing key/unit/source", ErrValidation)
+			return fmt.Errorf("%w: metric missing key/unit/source", ErrValidation)
 		}
 		if m.IntervalSeconds < 1 || m.IntervalSeconds > 3600 {
-			return Document{}, fmt.Errorf("%w: metric interval out of range", ErrValidation)
+			return fmt.Errorf("%w: metric interval out of range", ErrValidation)
 		}
 	}
-	return doc, nil
+	return nil
 }
 
 // Store writes a validated policy version atomically under dir.
@@ -95,4 +104,26 @@ func Store(dir string, version int64, document []byte) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// LoadAndValidate reads a stored policy document (signature was verified when
+// it was accepted; structural validation is re-applied) for the producer and
+// batcher wiring.
+func LoadAndValidate(dir string, version int64) (Document, error) {
+	if version <= 0 {
+		return Document{}, fmt.Errorf("%w: no applied policy version", ErrValidation)
+	}
+	path := filepath.Join(dir, fmt.Sprintf("policy-v%d.json", version))
+	raw, err := os.ReadFile(path) //nolint:gosec // path derived from the operator-configured policy dir
+	if err != nil {
+		return Document{}, fmt.Errorf("policy: load v%d: %w", version, err)
+	}
+	var doc Document
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return Document{}, fmt.Errorf("%w: %w", ErrValidation, err)
+	}
+	if err := Validate(doc); err != nil {
+		return Document{}, err
+	}
+	return doc, nil
 }

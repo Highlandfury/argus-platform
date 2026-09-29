@@ -113,3 +113,30 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 - `ServerHello` always carries the latest signed policy; the collector applies only newer versions and acks idempotently (SPEC §9.2 updated).
 - Leaf auto-renewal: surfaced (`doctor`, `cert_not_after`) but not automated; rotation lands with lifecycle hardening.
 - Revocation terminates the collector cleanly; re-enrollment requires a fresh token plus an operator decision (rename/delete flow per SPEC §8.4).
+
+---
+
+# ACCEPTANCE_RUN — M4b (Collector Producer, Durable Spool, Transport)
+
+**Date:** 2026-09-29 · **Commit:** M4b (this commit)
+
+| Gate | Command / evidence | Result |
+|---|---|---|
+| Producer unit | `go test ./internal/collector/metrics/...` | **PASS** — `/proc/stat` golden deltas (50%), deterministic runtime-metrics fallback on non-procfs hosts, parsing errors, producer interval emission |
+| Batcher unit | same | **PASS** — size-cap flush, interval flush, empty-flush no-op, failed flush requeues (no sample loss) |
+| Spool unit | `go test ./internal/collector/spool/...` | **PASS** — append/read/ack, watermark persistence across reopen, fully-acked segment unlink, torn-tail truncation + count, sealed-segment CRC quarantine with readable prefix preserved + `*.corrupt` file, capacity drop-oldest with watermark advance, corrupt `state.json` quarantine, empty-batch rejection |
+| Sender unit | `go test ./internal/collector/transport/...` | **PASS** — contiguous watermark (out-of-order acks never skip gaps), REJECTED → dead-letter JSON + retire, RETRY ordering (backoff gates later batches; same bytes re-sent), new session resumes from watermark |
+| Outage → drain (T2/T3, live + integration) | `TestM4CollectorSpoolSurvivesOutageAndDrains` + compose stop/start | **PASS** — 5 records retained while the stream is down (`acked_seq==0`, `dropped==0`), server returns, spool drains to zero, exactly 5 batches/5 samples in DB; live: server down ~26 s, +10 batches captured and delivered after recovery |
+| Restart durability (T10/AC-13) | `TestM4CollectorRestartResumesFromWatermark` + `docker compose restart collector` | **PASS** — watermark/highest durable across reopen (2→2), sequences 1..4 exactly once, no duplicates; live: 9 unacked records recovered (`acked=10 → highest=19`) and drained after container restart |
+| Lost-ack → duplicate | `TestM4LostAckReplayedAsDuplicate` | **PASS** — server commits, ack never processed, next session re-sends the same bytes → `DUPLICATE` → only then is the record retired; original value authoritative; exactly 1 batch/1 sample row |
+| Heartbeat observability | live `GET /v1/collectors/{id}` | **PASS** — `reported_stats` carries `spool_bytes/records`, `highest_seq`, `acked_seq`, dropped/corrupt counters |
+| Protocol/identity | M3 regression + M4a ingest | **PASS** — no second transport; telemetry rides the same mTLS stream, same identity, server-side allowlist/dedupe unchanged |
+| Regression | `go build ./...` · `go vet ./...` · `go test ./... -count=1` · `golangci-lint run` · `buf lint` · `buf generate` (no drift) · contract | **PASS** (all packages incl. M1–M4a suites) |
+
+**Deviations / decisions (recorded):**
+- **Live-caught stall (fixed):** the spool reader snapshot its segment-file list at session start; once fully-acked segments were purged, the next append opened a *new* segment the long-lived session never discovered — telemetry silently stalled (`acked_seq` frozen) while the spool accumulated. The reader now refreshes its view (lexical cursor over zero-padded segment names) and `TestReaderSeesSegmentsCreatedAfterOpen` locks the regression in. Verified live: the stalled 107-record backlog plus new records drained to `acked==highest`, `spool_records=0`.
+- `state.json` watermark semantics: "retired" = acked **or** dropped under capacity pressure (drops are counted and logged; a dropped sequence can never be acked, so the contiguous watermark must advance past it).
+- Torn/corrupt tails are counted as one corruption event each (`corrupt_records_total`); the salvageable bytes are preserved (`*.corrupt-*` or truncated prefix) and surfaced by `doctor`.
+- Heartbeat `uptime_seconds` / `clock_skew_ms` reset per stream session (per-connection semantics), not process lifetime.
+- Policy-cache self-heal: an idempotent re-delivery of an already-applied version now re-persists the policy document, so a missing cache repairs itself on the next connect.
+- Load evidence for M4b is the outage/restart/drain timings above plus the M4a 3,919/4,000 samples/s server-ceiling smoke; the full L-01 (20 k/s, 10 min) and L-02 (200 collectors) runs remain scheduled for the M4 load phase — no scalability claim is made from these tests.
