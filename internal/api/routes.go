@@ -14,6 +14,12 @@ var routeTable = []Route{
 	{Method: "POST", Path: "/v1/auth/logout", Protected: true, CSRF: true},
 	{Method: "GET", Path: "/v1/me", Protected: true},
 	{Method: "GET", Path: "/v1/sites", Protected: true},
+	{Method: "POST", Path: "/v1/enrollments", Protected: true, CSRF: true},
+	{Method: "GET", Path: "/v1/enrollments", Protected: true},
+	{Method: "GET", Path: "/v1/collectors", Protected: true},
+	{Method: "GET", Path: "/v1/collectors/{id}", Protected: true},
+	{Method: "POST", Path: "/v1/collectors/{id}/revoke", Protected: true, CSRF: true},
+	{Method: "POST", Path: "/v1/collectors/{id}/policy:resync", Protected: true, CSRF: true},
 	{Method: "GET", Path: "/v1/healthz"},
 	{Method: "GET", Path: "/v1/readyz"},
 }

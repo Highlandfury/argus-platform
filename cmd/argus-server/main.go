@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,14 +16,20 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 
+	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
 	"github.com/argus-platform/argus/internal/api"
+	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
 	"github.com/argus-platform/argus/internal/platform/database"
 	"github.com/argus-platform/argus/internal/platform/logging"
+	"github.com/argus-platform/argus/internal/platform/ratelimit"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
 )
 
@@ -126,15 +134,71 @@ func cmdServe(args []string) int {
 		}
 	}
 
+	// Collector control plane (M3): internal CA + both gRPC listeners.
+	ca, err := collectors.LoadOrCreateCA(cfg.CADir, cfg.GRPCSANs)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "collector ca:", err)
+		return 1
+	}
+	var (
+		collectorsSvc  *collectors.Service
+		sessions       *collectors.SessionRegistry
+		enrollGRPC     *grpc.Server
+		streamGRPC     *grpc.Server
+		enrollListener net.Listener
+		streamListener net.Listener
+	)
+	if appPool != nil && authPool != nil {
+		collectorsSvc = collectors.New(appPool, authPool, ca, tel)
+		sessions = collectors.NewSessionRegistry()
+
+		enrollGRPC = grpc.NewServer(
+			grpc.Creds(credentials.NewTLS(&tls.Config{
+				Certificates: []tls.Certificate{*ca.ServerTLS()},
+				MinVersion:   tls.VersionTLS12,
+			})),
+			grpc.MaxRecvMsgSize(1<<20),
+		)
+		collectorv1.RegisterEnrollmentServiceServer(enrollGRPC,
+			collectors.NewEnrollmentServer(collectorsSvc, ratelimit.New(10, 6*time.Second), logger))
+
+		streamGRPC = grpc.NewServer(
+			grpc.Creds(credentials.NewTLS(&tls.Config{
+				Certificates: []tls.Certificate{*ca.ServerTLS()},
+				ClientAuth:   tls.RequireAndVerifyClientCert,
+				ClientCAs:    ca.RootPool(),
+				MinVersion:   tls.VersionTLS12,
+			})),
+			grpc.MaxRecvMsgSize(16<<20),
+			grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
+			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: false}),
+		)
+		collectorv1.RegisterCollectorServiceServer(streamGRPC,
+			collectors.NewStreamServer(collectorsSvc, sessions, logger))
+
+		if enrollListener, err = net.Listen("tcp", cfg.EnrollAddr); err != nil {
+			fmt.Fprintln(os.Stderr, "enrollment listener:", err)
+			return 1
+		}
+		if streamListener, err = net.Listen("tcp", cfg.GRPCAddr); err != nil {
+			fmt.Fprintln(os.Stderr, "collector stream listener:", err)
+			return 1
+		}
+	} else {
+		logger.Warn("collector control plane disabled: database pools not configured")
+	}
+
 	opts := api.Options{
-		Logger:        logger,
-		Telemetry:     tel,
-		Version:       buildinfo.Version,
-		Commit:        buildinfo.Commit,
-		Readiness:     readiness,
-		SecureCookies: cfg.Env == config.EnvProd,
-		Identity:      identitySvc,
-		Tenancy:       tenancySvc,
+		Logger:            logger,
+		Telemetry:         tel,
+		Version:           buildinfo.Version,
+		Commit:            buildinfo.Commit,
+		Readiness:         readiness,
+		SecureCookies:     cfg.Env == config.EnvProd,
+		Identity:          identitySvc,
+		Tenancy:           tenancySvc,
+		Collectors:        collectorsSvc,
+		CollectorSessions: sessions,
 	}
 
 	httpSrv := &http.Server{
@@ -160,7 +224,7 @@ func cmdServe(args []string) int {
 		"ops_addr", cfg.OpsAddr,
 	)
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 4)
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("http listener: %w", err)
@@ -171,6 +235,20 @@ func cmdServe(args []string) int {
 			errCh <- fmt.Errorf("ops listener: %w", err)
 		}
 	}()
+	if enrollGRPC != nil {
+		go func() {
+			logger.Info("enrollment listening", "addr", cfg.EnrollAddr)
+			if err := enrollGRPC.Serve(enrollListener); err != nil {
+				errCh <- fmt.Errorf("enrollment listener: %w", err)
+			}
+		}()
+		go func() {
+			logger.Info("collector stream listening", "addr", cfg.GRPCAddr)
+			if err := streamGRPC.Serve(streamListener); err != nil {
+				errCh <- fmt.Errorf("collector stream listener: %w", err)
+			}
+		}()
+	}
 
 	var runErr error
 	select {
@@ -184,6 +262,30 @@ func cmdServe(args []string) int {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
 	_ = opsSrv.Shutdown(shutdownCtx)
+	if sessions != nil {
+		sessions.DisconnectAll(collectors.DisconnectMsg{
+			Code:   collectorv1.Disconnect_CODE_SERVER_SHUTDOWN,
+			Reason: "server shutting down",
+		})
+	}
+	stopGRPC := func(srv *grpc.Server) {
+		done := make(chan struct{})
+		go func() {
+			srv.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			srv.Stop()
+		}
+	}
+	if enrollGRPC != nil {
+		stopGRPC(enrollGRPC)
+	}
+	if streamGRPC != nil {
+		stopGRPC(streamGRPC)
+	}
 	logger.Info("argus-server stopped")
 	if runErr != nil {
 		return 1

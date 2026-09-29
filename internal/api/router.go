@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/httpx"
@@ -26,21 +27,24 @@ type Check struct {
 // Options configures the routers. Services may be nil in degraded
 // configurations (routes then answer 503 instead of panicking).
 type Options struct {
-	Logger        *slog.Logger
-	Telemetry     *telemetry.Registry
-	Version       string
-	Commit        string
-	Readiness     []Check
-	SecureCookies bool
-	Identity      *identity.Service
-	Tenancy       *tenancy.Service
+	Logger            *slog.Logger
+	Telemetry         *telemetry.Registry
+	Version           string
+	Commit            string
+	Readiness         []Check
+	SecureCookies     bool
+	Identity          *identity.Service
+	Tenancy           *tenancy.Service
+	Collectors        *collectors.Service
+	CollectorSessions *collectors.SessionRegistry
 }
 
 type handlers struct {
-	o            Options
-	limiter      *loginLimiter
-	identityHTTP *identity.HTTP
-	tenancyHTTP  *tenancy.HTTP
+	o              Options
+	limiter        *loginLimiter
+	identityHTTP   *identity.HTTP
+	tenancyHTTP    *tenancy.HTTP
+	collectorsHTTP *collectors.HTTP
 }
 
 func newHandlers(o Options) *handlers {
@@ -63,6 +67,9 @@ func newHandlers(o Options) *handlers {
 	}
 	if o.Tenancy != nil {
 		h.tenancyHTTP = &tenancy.HTTP{Svc: o.Tenancy}
+	}
+	if o.Collectors != nil {
+		h.collectorsHTTP = &collectors.HTTP{Svc: o.Collectors, Registry: o.CollectorSessions}
 	}
 	return h
 }
@@ -133,6 +140,50 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 				return
 			}
 			h.tenancyHTTP.ListSites(w, r)
+		})
+	case "/v1/enrollments":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.collectorsHTTP == nil {
+				serviceUnavailable(w, r, "collectors service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.collectorsHTTP.CreateEnrollment(w, r)
+				return
+			}
+			h.collectorsHTTP.ListEnrollments(w, r)
+		})
+	case "/v1/collectors":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.collectorsHTTP == nil {
+				serviceUnavailable(w, r, "collectors service not configured")
+				return
+			}
+			h.collectorsHTTP.ListCollectors(w, r)
+		})
+	case "/v1/collectors/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.collectorsHTTP == nil {
+				serviceUnavailable(w, r, "collectors service not configured")
+				return
+			}
+			h.collectorsHTTP.GetCollector(w, r)
+		})
+	case "/v1/collectors/{id}/revoke":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.collectorsHTTP == nil {
+				serviceUnavailable(w, r, "collectors service not configured")
+				return
+			}
+			h.collectorsHTTP.RevokeCollector(w, r)
+		})
+	case "/v1/collectors/{id}/policy:resync":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.collectorsHTTP == nil {
+				serviceUnavailable(w, r, "collectors service not configured")
+				return
+			}
+			h.collectorsHTTP.ResyncPolicy(w, r)
 		})
 	case "/v1/healthz":
 		return http.HandlerFunc(h.health)

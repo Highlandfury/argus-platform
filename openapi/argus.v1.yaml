@@ -160,7 +160,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '404': { $ref: '#/components/responses/NotFound' }
 
-  /v1/collectors/{id}:revoke:
+  /v1/collectors/{id}/revoke:
     post:
       tags: [collectors]
       summary: Revoke a collector (idempotent)

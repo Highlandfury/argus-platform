@@ -31,8 +31,9 @@ type Server struct {
 	LogLevel   string
 	HTTPAddr   string
 	OpsAddr    string
-	GRPCAddr   string // reserved for M3 (collector stream, mTLS)
-	EnrollAddr string // reserved for M3 (enrollment, TLS)
+	GRPCAddr   string // collector stream (mTLS)
+	EnrollAddr string // enrollment (token-gated TLS)
+	GRPCSANs   []string
 	DBDSN      string // runtime role (argus_app_login), RLS-enforced
 	AuthDBDSN  string // auth role (argus_auth_login), pre-auth lookups only
 	MigrateDSN string // owner role (argus_owner); used only by `migrate`
@@ -49,10 +50,11 @@ func LoadServer() (Server, error) {
 		OpsAddr:    env("ARGUS_SERVER_OPS_ADDR", ":9090"),
 		GRPCAddr:   env("ARGUS_SERVER_GRPC_ADDR", ":8443"),
 		EnrollAddr: env("ARGUS_SERVER_ENROLL_ADDR", ":8444"),
+		GRPCSANs:   splitCSV(env("ARGUS_SERVER_GRPC_SANS", "localhost,server,127.0.0.1")),
 		DBDSN:      env("ARGUS_SERVER_DB_DSN", ""),
 		AuthDBDSN:  env("ARGUS_SERVER_AUTH_DB_DSN", ""),
 		MigrateDSN: env("ARGUS_SERVER_MIGRATE_DSN", ""),
-		CADir:      env("ARGUS_SERVER_CA_DIR", ""),
+		CADir:      env("ARGUS_SERVER_CA_DIR", "./.dev/ca"),
 		DevSeed:    envBool("ARGUS_DEV_SEED", false),
 	}
 
@@ -166,4 +168,15 @@ func envInt64(key string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }

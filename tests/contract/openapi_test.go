@@ -20,13 +20,7 @@ type routeKey struct{ method, path string }
 // milestones. Every entry must still exist in the spec, so the allowlist
 // cannot rot silently.
 var pending = map[string]string{
-	"POST /v1/enrollments":                   "M3 collectors/enrollment",
-	"GET /v1/enrollments":                    "M3 collectors/enrollment",
-	"GET /v1/collectors":                     "M3 collectors",
-	"GET /v1/collectors/{id}":                "M3 collectors",
-	"POST /v1/collectors/{id}:revoke":        "M3 collectors",
-	"POST /v1/collectors/{id}/policy:resync": "M3 collectors",
-	"GET /v1/collectors/{id}/metrics":        "M4 metrics query",
+	"GET /v1/collectors/{id}/metrics": "M4 metrics query",
 }
 
 func TestOpenAPISpecMatchesRoutes(t *testing.T) {

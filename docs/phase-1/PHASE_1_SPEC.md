@@ -656,13 +656,15 @@ Normative: `../openapi/argus.v1.yaml` (OpenAPI 3.1). Conventions: `problem+json`
 | GET | `/v1/enrollments` | admin | List metadata (never tokens) |
 | GET | `/v1/collectors` | session | List with status/last-heartbeat/version/site; `filter[site_id]`, `filter[status]`, `limit`, `cursor` |
 | GET | `/v1/collectors/{id}` | session | Detail: identity, status, last seen, policy version+acked, connection state, cert expiry, reported spool stats |
-| POST | `/v1/collectors/{id}:revoke` | admin | Revoke (idempotent) |
+| POST | `/v1/collectors/{id}/revoke` | admin | Revoke (idempotent) |
 | POST | `/v1/collectors/{id}/policy:resync` | admin | Issue next policy version |
 | GET | `/v1/collectors/{id}/metrics` | session | Series points for chart: `metric=collector_cpu_percent&from&to&step=10s` |
 | GET | `/v1/healthz` | public | Liveness `{status:"ok", version, commit}` |
 | GET | `/v1/readyz` | public | Readiness (DB ping + migration state) |
 
 Status codes: 200/201/202, 204, 400 `validation.failed`, 401 `auth.unauthenticated`, 403 `auth.forbidden`, 404 for out-of-scope resources (no existence oracle), 409 `state.conflict`, 422 validation-with-fields, 429 with `Retry-After`, 500 `internal`. Idempotency: `:revoke` and `:resync` are naturally idempotent; `POST /v1/enrollments` requires `Idempotency-Key` (24 h replay cache in `platform/httpx`).
+
+**Path correction P2 (recorded 2026-09-29, pre-implementation):** the collector revoke route is `POST /v1/collectors/{id}/revoke` instead of the earlier `{id}:revoke` shorthand — Go's `http.ServeMux` wildcards cannot share a path segment with literal text. No consumers existed at the time of the change; the OpenAPI contract was updated in the same commit.
 
 Metrics query contract: `step` ∈ {`raw`,`10s`,`1m`,`5m`}; server buckets with `time_bucket` over raw samples (Phase 1, no CAGGs); response includes `resolution`, `gaps`, and `meta.truncated`; max 2,000 points.
 
