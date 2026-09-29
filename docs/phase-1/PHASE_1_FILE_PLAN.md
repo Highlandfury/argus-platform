@@ -159,6 +159,12 @@ Companion to `PHASE_1_SPEC.md`. Every file below is created in the listed milest
 
 **Exit criteria:** end-to-end `collector → spool → server → DB → API → chart` visible in browser.
 
+**Delivered (M4c):**
+- `internal/modules/metrics/{query,http,query_test}.go`: tenant-scoped range queries (`time_bucket` + avg/count; step raw/10s/1m/5m; ≤2000 points enforced up front and by row cap for raw; expected/returned/gaps meta; per-series scalar scans so plans are index-deterministic), latest value via `max(ts)` + PK equality with documented freshness semantics, 5 s server-side timeout, catalog-restricted metric keys, 404-without-oracle, no internal-error leakage. OpenAPI extended (`status`, `latest`, `meta.sample_count`, 422/504) and the contract pending-list is now empty.
+- Web: `web/src/features/collectors/MetricChart.tsx` (ECharts 6.1.0 pinned) with 15m/1h/6h/24h → raw/10s/1m/5m mapping, current value/last-updated/fresh-stale, loading/empty/error states, 30 s polling; collector detail embeds the chart and heartbeat spool stats; Playwright `metrics.spec.ts` (real API path + injected loading/error states).
+- Load tooling: `tests/load/query` latency harness; loadgen enrollment backoff; documented `docker-compose.load.yml` override for fleet enrollment.
+- Load results and the query-plan finding are recorded in `ACCEPTANCE_RUN.md` (M4c section): L-01 4,244/20,000 samples/s (DB CPU-bound), L-02 14,934/20,000 samples/s with 200 streams and zero errors/reconnects; post-load query p95 ≈ 20 ms for the reference collector.
+
 ---
 
 ## M5 — Observability & Ops Polish

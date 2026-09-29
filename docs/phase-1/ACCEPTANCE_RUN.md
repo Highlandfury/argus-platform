@@ -140,3 +140,32 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 - Heartbeat `uptime_seconds` / `clock_skew_ms` reset per stream session (per-connection semantics), not process lifetime.
 - Policy-cache self-heal: an idempotent re-delivery of an already-applied version now re-persists the policy document, so a missing cache repairs itself on the next connect.
 - Load evidence for M4b is the outage/restart/drain timings above plus the M4a 3,919/4,000 samples/s server-ceiling smoke; the full L-01 (20 k/s, 10 min) and L-02 (200 collectors) runs remain scheduled for the M4 load phase — no scalability claim is made from these tests.
+
+---
+
+# ACCEPTANCE_RUN — M4c (Metric Query API, Chart UI, M4 Load Phase)
+
+**Date:** 2026-09-29 · **Commit:** M4c (this commit)
+
+| Gate | Command / evidence | Result |
+|---|---|---|
+| Query contract | OpenAPI `/v1/collectors/{id}/metrics`; contract test now has an **empty pending list** (every specified endpoint implemented) | **PASS** |
+| Query unit matrix | `go test ./internal/modules/metrics/...` | **PASS** — step parsing/defaults, interval mapping, expected-bucket math, catalog restriction, 2000-point cap over 24h@10s vs 24h@1m |
+| Query integration (7 tests) | `tests/integration/m4c_query_test.go` vs real TimescaleDB | **PASS** — raw values/order/sample_count; 1m aggregation (avg 20/70, expected=3 gaps=1); empty + omitted latest; malformed/unknown/unsupported metric; bounds (from≥to, >24h, future to); 422 over-cap; tenant isolation (404 cross-tenant, 200 empty own); freshness (stale ≥290 s age vs fresh value); cancellation + unreachable-DB errors; data queryable while the collector stream is down |
+| Chart UI (AC-09/AC-10) | Playwright against the real API | **PASS** — 6/6 specs: current value %, last-updated, fresh/stale badge, canvas rendered, ≥50 points in the 15m raw window (live: 60 points in 5m), range switch to 24h, spool stats + sample count on the detail page; injected slow/failing endpoint shows loading and error states (primary path never mocked) |
+| Live query evidence | curl against the dev stack | **PASS** — 15m raw 180 points, 5m raw 60 points, 24h@5m honest gap accounting; latest fresh (age 1 s) |
+| Query latency (reference dataset) | `go run ./tests/load/query` (25 iterations/shape) | **PASS** — dev-collector (12.4 M-row table): latest p95 20.3 ms, 15m raw 17.3 ms, 1h@10s 15.4 ms, 6h@1m 15.8 ms, 24h@5m 18.8 ms, **24h@1m 22.4 ms**, 0 errors. AC-08 note: 24h@10s is rejected by the normative 2000-point cap (422), so latency is measured at the finest permitted 24h resolution (1m) — far inside the 300 ms target |
+| L-01 | loadgen single-stream, batch 2000, 20k/s offered, 10 min | **FAIL (honest)** — achieved **4,244 samples/s (21%)**; 2,564,000 samples in 1,282 batches; 0 errors/duplicates/rejects/reconnects; ack p50 3.73 s (window saturated). DB CPU-bound: **PostgreSQL avg 98.4%/max 121%** vs server avg 14.8%/max 26.9%; avg commit **435.5 ms** per 2,000-sample batch; target (commit p95 ≤150 ms) not met |
+| L-02 | loadgen fleet, 200 collectors × 100/s, batch 500/5 s, 10 min | **PARTIAL** — 200 streams enrolled in 29.2 s (documented `docker-compose.load.yml` override: enroll rate 1200/min; default 10/min validated by S-01); streams_active max 201; **achieved 14,934 samples/s (75%)**; 19,554 batches / 9,775,470 samples; **0 duplicates/rejects/retries/errors; 0 reconnects**; ack p95 56.6 s under sustained overcommit; DB CPU avg 642%/max 790%. Meets stream/error/reconnect criteria; misses the ≥19k/s and ack-p95 ≤1 s criteria on the same DB write ceiling |
+| Post-load integrity | SQL + `/metrics` | **PASS** — samples == accepted == 12,420,317 rows total; batches ledger consistent; 2.6 GB hypertable; zero drops/corruption/dead-letters throughout |
+| Regression | build · vet · full `go test ./...` · golangci-lint · buf lint/generate (no drift) · contract · Playwright | **PASS** (M0–M4b all green) |
+
+**Observed bottleneck (first real one identified by the load phase):** the PostgreSQL write path — per-batch transactions + `unnest` array inserts into the uncompressed hypertable, single chunk. L-02's 200 concurrent streams write ~400 batches/s and reach 14.9k samples/s while the server keeps CPU headroom; L-01's single 2,000-sample stream at 10 batches/s is limited to 4.2k samples/s at 435 ms/batch. Candidate remedies (documented, not built): larger batch windows, Phase-2 staging + `COPY`/`INSERT…SELECT`, compression/retention and CAGGs for reads. The load-test doc's predicted bottleneck ordering (tx-per-batch → array materialization) is confirmed.
+
+**Key finding fixed during M4c (found by the post-load query measurement, not unit tests):** after the first 12 M-row load, the join/`ANY(array)`-shaped latest-value query let the planner satisfy `ORDER BY ts DESC` through the **(org_id, ts DESC)** index, walking ~10 M newer rows of other series before reaching an older one — worst case 16.7 s, surfacing as 504 timeouts on every chart query for the affected collector. Fixed deterministically in `internal/modules/metrics/query.go`: series are resolved first and every sample access is per-series with a scalar `series_id` (index-condition guaranteed); the latest value uses `max(ts)` (backward index seek) + primary-key equality. Post-fix dev-collector p95 ≈ 20 ms with zero errors, even with a 2.56 M-sample series in the same table. Operational hygiene recorded: `ANALYZE metric_samples` after bulk loads (chunk statistics).
+
+**Deviations / notes (recorded):**
+- L-02 enrollment used the documented load override (above); the default limiter is unchanged in the canonical compose and covered by S-01.
+- AC-08's "24 h @ 10 s" latency leg cannot return points under the normative 2000-point cap; measured at 24h@1m (1440 points). Wide-window queries over a multi-million-sample series are dataset-bound (raw scan; no CAGGs in Phase 1 per G6) and were measured separately (≈1.1 s for a 2.56 M-sample series) — no CAGG/compression work is in scope until Phase 2.
+- L-03 (k6 API leg) and the 2-hour soak (L-05) remain M6 items per the file plan.
+- Environment honesty: single Windows Docker Desktop node (containerized PostgreSQL 18 + TimescaleDB 2.30.1, same host as server/collectors); synthetic `collector_cpu_percent` only; no HA, no compression. Results are direction/architecture evidence, not a production capability claim.

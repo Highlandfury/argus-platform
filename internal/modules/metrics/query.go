@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -106,6 +107,15 @@ type CollectorAuthorizer interface {
 }
 
 // QueryService serves metric range/latest queries over TimescaleDB.
+//
+// Query shape (normative): the series for (collector, metric_key) are resolved
+// FIRST (small metric_series lookup), then metric_samples is queried directly
+// with series_id = ANY(...). The join-shaped alternative is plan-fragile: after
+// the first multi-million-row load, the planner picked a nested loop that
+// full-scanned metric_samples with the join as a post-scan filter (observed
+// 16.7 s for a latest-value query). Resolving series first keeps every query
+// index-driven on metric_samples_series_ts and independent of join estimates.
+// Operational hygiene: ANALYZE metric_samples after bulk loads (chunk stats).
 type QueryService struct {
 	app   *pgxpool.Pool
 	authz CollectorAuthorizer
@@ -191,21 +201,65 @@ func (s *QueryService) QueryRange(ctx context.Context, q RangeQuery) (RangeResul
 
 	var result RangeResult
 	err := database.WithTenant(ctx, s.app, q.OrgID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		if interval > 0 {
-			result, err = queryBucketed(ctx, tx, q, interval)
-		} else {
-			result, err = queryRaw(ctx, tx, q)
-		}
+		seriesIDs, unit, err := resolveSeries(ctx, tx, q)
 		if err != nil {
 			return err
 		}
-		return attachLatest(ctx, tx, q, &result)
+		result = RangeResult{
+			Metric:     q.MetricKey,
+			Unit:       unit,
+			Resolution: string(q.Step),
+			From:       q.From.UTC(),
+			To:         q.To.UTC(),
+		}
+		if interval > 0 {
+			result.Resolution = string(q.Step)
+			if err := queryBucketed(ctx, tx, q, seriesIDs, interval, &result); err != nil {
+				return err
+			}
+		} else {
+			result.Resolution = string(StepRaw)
+			if err := queryRaw(ctx, tx, q, seriesIDs, &result); err != nil {
+				return err
+			}
+		}
+		return attachLatest(ctx, tx, q, seriesIDs, &result)
 	})
 	if err != nil {
 		return RangeResult{}, err
 	}
 	return result, nil
+}
+
+// resolveSeries resolves the (org, collector, metric) series IDs and unit.
+func resolveSeries(ctx context.Context, tx pgx.Tx, q RangeQuery) ([]int64, string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, unit FROM metric_series
+		WHERE org_id = $1 AND collector_id = $2 AND metric_key = $3`,
+		q.OrgID, q.CollectorID, q.MetricKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("metrics: resolve series: %w", err)
+	}
+	defer rows.Close()
+	var (
+		ids  []int64
+		unit string
+	)
+	for rows.Next() {
+		var id int64
+		var u string
+		if err := rows.Scan(&id, &u); err != nil {
+			return nil, "", fmt.Errorf("metrics: scan series: %w", err)
+		}
+		ids = append(ids, id)
+		if unit == "" {
+			unit = u
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", fmt.Errorf("metrics: iterate series: %w", err)
+	}
+	return ids, unit, nil
 }
 
 // expectedBuckets counts bucket-aligned intervals intersecting [from, to].
@@ -216,138 +270,168 @@ func expectedBuckets(from, to time.Time, interval time.Duration) int {
 	return int(to.Sub(alignedStart)/interval) + 1
 }
 
-func queryBucketed(ctx context.Context, tx pgx.Tx, q RangeQuery, interval time.Duration) (RangeResult, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT time_bucket($3::interval, ms.ts) AS bucket,
-		       avg(ms.value)::float8,
-		       count(*)::bigint,
-		       s.unit
-		FROM metric_samples ms
-		JOIN metric_series s ON s.id = ms.series_id
-		WHERE ms.org_id = $1
-		  AND s.collector_id = $2
-		  AND s.metric_key = $4
-		  AND ms.ts >= $5 AND ms.ts <= $6
-		GROUP BY bucket, s.unit
-		ORDER BY bucket`,
-		q.OrgID, q.CollectorID, q.Step.sqlInterval(), q.MetricKey, q.From, q.To)
-	if err != nil {
-		return RangeResult{}, fmt.Errorf("metrics: query buckets: %w", err)
-	}
-	defer rows.Close()
-
-	result := RangeResult{
-		Metric:     q.MetricKey,
-		Resolution: string(q.Step),
-		From:       q.From.UTC(),
-		To:         q.To.UTC(),
-	}
-	for rows.Next() {
-		var (
-			ts    time.Time
-			value float64
-			count int64
-			unit  string
-		)
-		if err := rows.Scan(&ts, &value, &count, &unit); err != nil {
-			return RangeResult{}, fmt.Errorf("metrics: scan bucket: %w", err)
-		}
-		result.Points = append(result.Points, Point{Ts: ts.UTC(), Value: value})
-		result.SampleCount += count
-		result.Unit = unit
-	}
-	if err := rows.Err(); err != nil {
-		return RangeResult{}, fmt.Errorf("metrics: iterate buckets: %w", err)
-	}
+func queryBucketed(ctx context.Context, tx pgx.Tx, q RangeQuery, seriesIDs []int64, interval time.Duration, result *RangeResult) error {
 	result.Expected = expectedBuckets(q.From, q.To, interval)
+	if len(seriesIDs) == 0 {
+		result.Gaps = result.Expected
+		return nil
+	}
+	// Per-series bucketed scan (scalar series_id => the (series_id, ts) index
+	// is used as an index condition; the ANY(array) form let the planner pick
+	// the (org_id, ts DESC) index and walk unrelated rows). Buckets are merged
+	// as weighted averages across series (one series per metric in Phase 1).
+	type bucket struct {
+		sum   float64
+		count int64
+	}
+	buckets := make(map[time.Time]*bucket)
+	for _, seriesID := range seriesIDs {
+		rows, err := tx.Query(ctx, `
+			SELECT time_bucket($1::interval, ts) AS bucket,
+			       sum(value)::float8,
+			       count(*)::bigint
+			FROM metric_samples
+			WHERE org_id = $2 AND series_id = $3 AND ts >= $4 AND ts <= $5
+			GROUP BY bucket`,
+			q.Step.sqlInterval(), q.OrgID, seriesID, q.From, q.To)
+		if err != nil {
+			return fmt.Errorf("metrics: query buckets: %w", err)
+		}
+		for rows.Next() {
+			var (
+				ts    time.Time
+				sum   float64
+				count int64
+			)
+			if err := rows.Scan(&ts, &sum, &count); err != nil {
+				rows.Close()
+				return fmt.Errorf("metrics: scan bucket: %w", err)
+			}
+			b := buckets[ts.UTC()]
+			if b == nil {
+				b = &bucket{}
+				buckets[ts.UTC()] = b
+			}
+			b.sum += sum
+			b.count += count
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return fmt.Errorf("metrics: iterate buckets: %w", err)
+		}
+	}
+	for ts, b := range buckets {
+		result.Points = append(result.Points, Point{Ts: ts, Value: b.sum / float64(b.count)})
+		result.SampleCount += b.count
+	}
+	sort.Slice(result.Points, func(i, j int) bool { return result.Points[i].Ts.Before(result.Points[j].Ts) })
 	result.Returned = len(result.Points)
 	if result.Expected > result.Returned {
 		result.Gaps = result.Expected - result.Returned
 	}
-	return result, nil
+	return nil
 }
 
-func queryRaw(ctx context.Context, tx pgx.Tx, q RangeQuery) (RangeResult, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT ms.ts, ms.value, s.unit
-		FROM metric_samples ms
-		JOIN metric_series s ON s.id = ms.series_id
-		WHERE ms.org_id = $1
-		  AND s.collector_id = $2
-		  AND s.metric_key = $3
-		  AND ms.ts >= $4 AND ms.ts <= $5
-		ORDER BY ms.ts
-		LIMIT $6`,
-		q.OrgID, q.CollectorID, q.MetricKey, q.From, q.To, MaxPoints+1)
-	if err != nil {
-		return RangeResult{}, fmt.Errorf("metrics: query raw: %w", err)
-	}
-	defer rows.Close()
-
-	result := RangeResult{
-		Metric:     q.MetricKey,
-		Resolution: string(StepRaw),
-		From:       q.From.UTC(),
-		To:         q.To.UTC(),
-	}
-	for rows.Next() {
-		var (
-			ts    time.Time
-			value float64
-			unit  string
-		)
-		if err := rows.Scan(&ts, &value, &unit); err != nil {
-			return RangeResult{}, fmt.Errorf("metrics: scan raw: %w", err)
+func queryRaw(ctx context.Context, tx pgx.Tx, q RangeQuery, seriesIDs []int64, result *RangeResult) error {
+	for _, seriesID := range seriesIDs {
+		rows, err := tx.Query(ctx, `
+			SELECT ts, value
+			FROM metric_samples
+			WHERE org_id = $1 AND series_id = $2 AND ts >= $3 AND ts <= $4
+			ORDER BY ts
+			LIMIT $5`,
+			q.OrgID, seriesID, q.From, q.To, MaxPoints+1)
+		if err != nil {
+			return fmt.Errorf("metrics: query raw: %w", err)
 		}
-		result.Points = append(result.Points, Point{Ts: ts.UTC(), Value: value})
-		result.Unit = unit
+		for rows.Next() {
+			var (
+				ts    time.Time
+				value float64
+			)
+			if err := rows.Scan(&ts, &value); err != nil {
+				rows.Close()
+				return fmt.Errorf("metrics: scan raw: %w", err)
+			}
+			result.Points = append(result.Points, Point{Ts: ts.UTC(), Value: value})
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return fmt.Errorf("metrics: iterate raw: %w", err)
+		}
 	}
-	if err := rows.Err(); err != nil {
-		return RangeResult{}, fmt.Errorf("metrics: iterate raw: %w", err)
-	}
+	sort.Slice(result.Points, func(i, j int) bool { return result.Points[i].Ts.Before(result.Points[j].Ts) })
 	// The cap is enforced on the actual row count for raw queries.
 	if len(result.Points) > MaxPoints {
-		return RangeResult{}, ErrPointsExceeded
+		return ErrPointsExceeded
 	}
 	result.SampleCount = int64(len(result.Points))
 	result.Returned = len(result.Points)
 	result.Expected = result.Returned // raw does not synthesize gap expectations
-	return result, nil
+	return nil
 }
 
-// attachLatest loads the most recent sample (native DISTINCT ON over the
-// (series_id, ts DESC) index) and computes freshness. An old "latest" sample is
-// never reported as fresh.
-func attachLatest(ctx context.Context, tx pgx.Tx, q RangeQuery, result *RangeResult) error {
-	var (
-		ts    time.Time
-		value float64
-	)
-	err := tx.QueryRow(ctx, `
-		SELECT ms.ts, ms.value
-		FROM metric_samples ms
-		JOIN metric_series s ON s.id = ms.series_id
-		WHERE ms.org_id = $1 AND s.collector_id = $2 AND s.metric_key = $3
-		ORDER BY ms.ts DESC
-		LIMIT 1`,
-		q.OrgID, q.CollectorID, q.MetricKey).Scan(&ts, &value)
-	if errors.Is(err, pgx.ErrNoRows) {
+// attachLatest loads the most recent sample using planner-deterministic index
+// paths: max(ts) per series (backward index seek on (series_id, ts)) followed
+// by a primary-key equality lookup for the value. The ORDER BY + ANY(array)
+// form is not used here: it let the planner walk the (org_id, ts DESC) index
+// across millions of newer rows of other series before reaching an older one
+// (observed multi-second latest queries under load). A latest sample that is
+// old is never reported as fresh.
+func attachLatest(ctx context.Context, tx pgx.Tx, q RangeQuery, seriesIDs []int64, result *RangeResult) error {
+	if len(seriesIDs) == 0 {
 		result.Status = "no_data"
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("metrics: query latest: %w", err)
+	var (
+		bestTs    time.Time
+		bestValue float64
+	)
+	for _, seriesID := range seriesIDs {
+		var ts time.Time
+		err := tx.QueryRow(ctx, `
+			SELECT max(ts) FROM metric_samples
+			WHERE org_id = $1 AND series_id = $2`,
+			q.OrgID, seriesID).Scan(&ts)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			return fmt.Errorf("metrics: query latest ts: %w", err)
+		}
+		if !ts.After(bestTs) {
+			continue
+		}
+		var value float64
+		// Primary key (series_id, ts) equality: direct index lookup.
+		err = tx.QueryRow(ctx, `
+			SELECT value FROM metric_samples
+			WHERE org_id = $1 AND series_id = $2 AND ts = $3`,
+			q.OrgID, seriesID, ts).Scan(&value)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			return fmt.Errorf("metrics: query latest value: %w", err)
+		}
+		bestTs, bestValue = ts, value
+	}
+	if bestTs.IsZero() {
+		result.Status = "no_data"
+		return nil
 	}
 	window := time.Duration(freshnessMultiplier) * phase1MetricInterval
 	if window < freshnessFloor {
 		window = freshnessFloor
 	}
-	age := time.Since(ts)
+	age := time.Since(bestTs)
 	status := "fresh"
 	if age > window || age < -MaxFutureSkew {
 		status = "stale"
 	}
-	result.Latest = &Latest{Ts: ts.UTC(), Value: value, AgeSeconds: int64(math.Round(age.Seconds())), Status: status}
+	result.Latest = &Latest{Ts: bestTs.UTC(), Value: bestValue, AgeSeconds: int64(math.Round(age.Seconds())), Status: status}
 	result.Status = status
 	return nil
 }
