@@ -183,6 +183,7 @@ func ensureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (map[strin
 	if err != nil {
 		return nil, fmt.Errorf("metrics: upsert series: %w", err)
 	}
+	created := 0
 	for inserted.Next() {
 		var (
 			metricKey string
@@ -194,11 +195,13 @@ func ensureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (map[strin
 			return nil, fmt.Errorf("metrics: scan inserted series: %w", err)
 		}
 		resolved[seriesMapKey(metricKey, dimHash)] = id
+		created++
 	}
 	inserted.Close()
 	if err := inserted.Err(); err != nil {
 		return nil, fmt.Errorf("metrics: iterate inserted series: %w", err)
 	}
+	seriesCreated.Add(float64(created))
 
 	for key := range distinct {
 		if _, ok := resolved[key]; !ok {

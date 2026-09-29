@@ -1,9 +1,11 @@
 package collectors
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -83,6 +85,7 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 	select {
 	case first = <-recvCh:
 	case err := <-recvErr:
+		s.countStreamError(err)
 		return normalizeStreamErr(err)
 	case <-ctx.Done():
 		return nil
@@ -216,6 +219,7 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 				Msg: &collectorv1.ServerMessage_PolicyUpdate{PolicyUpdate: &collectorv1.PolicyUpdate{Policy: policyToProto(sp)}},
 			})
 		case err := <-recvErr:
+			s.countStreamError(err)
 			return normalizeStreamErr(err)
 		case <-ctx.Done():
 			return nil
@@ -276,4 +280,17 @@ func normalizeStreamErr(err error) error {
 		return err
 	}
 	return status.Error(codes.Unavailable, err.Error())
+}
+
+// countStreamError increments argus_grpc_malformed_total for decode/size
+// failures (Internal "failed to unmarshal" or ResourceExhausted). Ordinary
+// disconnects (EOF, cancellation, transport unavailability) are not malformed.
+func (s *StreamServer) countStreamError(err error) {
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
+		return
+	}
+	code := status.Code(err)
+	if code == codes.Internal || code == codes.ResourceExhausted || strings.Contains(err.Error(), "failed to unmarshal") {
+		s.Svc.metrics.malformed.Inc()
+	}
 }

@@ -38,6 +38,7 @@ func NewEnrollmentServer(svc *Service, limiter *ratelimit.Limiter, log *slog.Log
 func (s *EnrollmentServer) Enroll(ctx context.Context, req *collectorv1.EnrollRequest) (*collectorv1.EnrollResponse, error) {
 	if s.Limiter != nil {
 		if ok, retry := s.Limiter.Allow(peerIP(ctx)); !ok {
+			s.Svc.metrics.enrollments.WithLabelValues("rate_limited").Inc()
 			return nil, status.Errorf(codes.ResourceExhausted, "too many enrollment attempts; retry after %s", retry)
 		}
 	}

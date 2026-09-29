@@ -12,6 +12,7 @@ import (
 type metrics struct {
 	enrollments   *prometheus.CounterVec
 	streamsActive prometheus.Gauge
+	malformed     prometheus.Counter
 	connects      *prometheus.CounterVec
 	heartbeats    prometheus.Counter
 	policyAcks    *prometheus.CounterVec
@@ -21,12 +22,16 @@ type metrics struct {
 func newMetrics(tel *telemetry.Registry) *metrics {
 	m := &metrics{
 		enrollments: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: "argus", Subsystem: "collector", Name: "enrollments_total",
-			Help: "Enrollment attempts by result.",
+			Namespace: "argus", Name: "enroll_attempts_total",
+			Help: "Enrollment attempts by result (SPEC §15; extra values beyond ok|invalid|expired|used|rate_limited are documented extensions).",
 		}, []string{"result"}),
 		streamsActive: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: "argus", Subsystem: "collector", Name: "streams_active",
+			Namespace: "argus", Name: "grpc_streams_active",
 			Help: "Currently connected collector streams.",
+		}),
+		malformed: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "argus", Name: "grpc_malformed_total",
+			Help: "Streams terminated by malformed/oversized protobuf or unexpected transport errors.",
 		}),
 		connects: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: "argus", Subsystem: "collector", Name: "stream_connects_total",
@@ -46,7 +51,7 @@ func newMetrics(tel *telemetry.Registry) *metrics {
 		}),
 	}
 	if tel != nil {
-		tel.MustRegister(m.enrollments, m.streamsActive, m.connects, m.heartbeats, m.policyAcks, m.policyPushes)
+		tel.MustRegister(m.enrollments, m.streamsActive, m.malformed, m.connects, m.heartbeats, m.policyAcks, m.policyPushes)
 	}
 	return m
 }

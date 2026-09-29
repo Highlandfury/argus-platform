@@ -53,7 +53,7 @@ func newTestAPIWithQueryService(t *testing.T, qs *metrics.QueryService) (*httpte
 
 func newTestAPIWithMetrics(t *testing.T) (*httptest.Server, *http.Client) {
 	t.Helper()
-	return newTestAPIWithQueryService(t, metrics.NewQueryService(appPool, collectors.New(appPool, authPool, nil, nil)))
+	return newTestAPIWithQueryService(t, metrics.NewQueryService(appPool, collectors.New(appPool, authPool, nil, nil), nil))
 }
 
 // m4cFixture is one tenant with an enrolled collector, a logged-in session,
@@ -171,7 +171,7 @@ func TestM4CQueryHappyRawAggregationOrdering(t *testing.T) {
 		t.Fatalf("raw meta: %v", meta)
 	}
 
-	// Aggregation: 1m buckets → avg 20 (base), 70 (base+1m); one gap bucket.
+	// Aggregation: 1m buckets ??? avg 20 (base), 70 (base+1m); one gap bucket.
 	status, body = f.query(t, map[string]string{
 		"metric": "collector_cpu_percent",
 		"from":   m4cRFC3339(base),
@@ -218,7 +218,7 @@ func TestM4CQueryEmptyAndMalformed(t *testing.T) {
 		t.Fatalf("empty query must omit latest: %v", body)
 	}
 
-	// Unknown collector id → 404 (no existence oracle).
+	// Unknown collector id ??? 404 (no existence oracle).
 	other := "00000000-0000-7000-8000-000000000000"
 	path := fmt.Sprintf("/v1/collectors/%s/metrics?metric=collector_cpu_percent&from=%s&to=%s", other,
 		url.QueryEscape(m4cRFC3339(now.Add(-time.Hour))), url.QueryEscape(m4cRFC3339(now)))
@@ -232,7 +232,7 @@ func TestM4CQueryEmptyAndMalformed(t *testing.T) {
 		t.Fatalf("malformed id: %d", res.Status)
 	}
 
-	// Unspported metric key, malformed timestamps, bad step → 400.
+	// Unspported metric key, malformed timestamps, bad step ??? 400.
 	status, _ = f.query(t, map[string]string{
 		"metric": "ifHCInOctets",
 		"from":   m4cRFC3339(now.Add(-time.Hour)), "to": m4cRFC3339(now),
@@ -280,7 +280,7 @@ func TestM4CQueryBoundsAndPointLimit(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("future to: %d", status)
 	}
-	// 24h @ 10s exceeds the 2000-point cap → 422.
+	// 24h @ 10s exceeds the 2000-point cap ??? 422.
 	status, body := f.query(t, map[string]string{
 		"metric": "collector_cpu_percent", "from": m4cRFC3339(now.Add(-24 * time.Hour)),
 		"to": m4cRFC3339(now), "step": "10s",
@@ -377,7 +377,7 @@ func TestM4CQueryCancellationAndDBUnavailable(t *testing.T) {
 	// Canceled context terminates the query promptly and safely.
 	env, id, _, orgID := m4Env(t, "m4c-cancel-"+newUUID()[:8])
 	_ = env
-	svc := metrics.NewQueryService(appPool, nil)
+	svc := metrics.NewQueryService(appPool, nil, nil)
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()
 	_, err := svc.QueryRange(cctx, metrics.RangeQuery{
@@ -394,7 +394,7 @@ func TestM4CQueryCancellationAndDBUnavailable(t *testing.T) {
 	badPool, err := pgxpool.New(ctx, "postgres://nobody:nopass@127.0.0.1:1/argus?sslmode=disable&connect_timeout=1")
 	must(t, err)
 	t.Cleanup(badPool.Close)
-	badSvc := metrics.NewQueryService(badPool, nil)
+	badSvc := metrics.NewQueryService(badPool, nil, nil)
 	_, err = badSvc.QueryRange(ctx, metrics.RangeQuery{
 		OrgID: mustUUID(t, orgID), CollectorID: mustUUID(t, id.CollectorID),
 		MetricKey: "collector_cpu_percent",

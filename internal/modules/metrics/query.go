@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/argus-platform/argus/internal/platform/database"
+	"github.com/argus-platform/argus/internal/platform/telemetry"
 )
 
 // Query limits (SPEC §13: max 2,000 points; step ∈ {raw, 10s, 1m, 5m}).
@@ -119,11 +120,12 @@ type CollectorAuthorizer interface {
 type QueryService struct {
 	app   *pgxpool.Pool
 	authz CollectorAuthorizer
+	argus *telemetry.Argus
 }
 
-// NewQueryService wires the query service.
-func NewQueryService(app *pgxpool.Pool, authz CollectorAuthorizer) *QueryService {
-	return &QueryService{app: app, authz: authz}
+// NewQueryService wires the query service; argus may be nil in unit contexts.
+func NewQueryService(app *pgxpool.Pool, authz CollectorAuthorizer, argus *telemetry.Argus) *QueryService {
+	return &QueryService{app: app, authz: authz, argus: argus}
 }
 
 // RangeQuery is one validated metric query.
@@ -200,6 +202,7 @@ func (s *QueryService) QueryRange(ctx context.Context, q RangeQuery) (RangeResul
 	}
 
 	var result RangeResult
+	queryStart := time.Now()
 	err := database.WithTenant(ctx, s.app, q.OrgID, func(ctx context.Context, tx pgx.Tx) error {
 		seriesIDs, unit, err := resolveSeries(ctx, tx, q)
 		if err != nil {
@@ -225,6 +228,9 @@ func (s *QueryService) QueryRange(ctx context.Context, q RangeQuery) (RangeResul
 		}
 		return attachLatest(ctx, tx, q, seriesIDs, &result)
 	})
+	if s.argus != nil {
+		s.argus.DBQueryDuration.WithLabelValues("query").Observe(time.Since(queryStart).Seconds())
+	}
 	if err != nil {
 		return RangeResult{}, err
 	}

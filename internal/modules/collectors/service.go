@@ -76,15 +76,19 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (EnrollResult, 
 		return err
 	})
 	if err != nil {
-		s.metrics.enrollments.WithLabelValues("denied").Inc()
+		s.metrics.enrollments.WithLabelValues("invalid").Inc()
 		return EnrollResult{}, ErrEnrollDenied
 	}
-	if token.UsedAt != nil || time.Now().After(token.ExpiresAt) {
-		s.metrics.enrollments.WithLabelValues("denied").Inc()
+	if token.UsedAt != nil {
+		s.metrics.enrollments.WithLabelValues("used").Inc()
+		return EnrollResult{}, ErrEnrollDenied
+	}
+	if time.Now().After(token.ExpiresAt) {
+		s.metrics.enrollments.WithLabelValues("expired").Inc()
 		return EnrollResult{}, ErrEnrollDenied
 	}
 	if token.SiteID == nil {
-		s.metrics.enrollments.WithLabelValues("denied").Inc()
+		s.metrics.enrollments.WithLabelValues("invalid").Inc()
 		return EnrollResult{}, ErrSiteRequired
 	}
 
@@ -161,7 +165,9 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (EnrollResult, 
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrEnrollDenied):
-			s.metrics.enrollments.WithLabelValues("denied").Inc()
+			// A token that slips past the pre-check and loses the atomic claim
+			// race is a used token (no oracle is exposed to the caller).
+			s.metrics.enrollments.WithLabelValues("used").Inc()
 		case errors.Is(err, ErrNameTaken):
 			s.metrics.enrollments.WithLabelValues("name_taken").Inc()
 		case errors.Is(err, ErrInvalidCSR):

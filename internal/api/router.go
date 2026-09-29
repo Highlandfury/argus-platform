@@ -31,6 +31,7 @@ type Check struct {
 type Options struct {
 	Logger            *slog.Logger
 	Telemetry         *telemetry.Registry
+	Argus             *telemetry.Argus
 	Version           string
 	Commit            string
 	Readiness         []Check
@@ -99,7 +100,13 @@ func NewRouter(o Options) http.Handler {
 		}
 		mux.Handle(rt.Method+" "+rt.Path, handler)
 	}
-	return httpx.RequestID(httpx.AccessLog(o.Logger, mux))
+	var handler http.Handler = mux
+	if o.Argus != nil {
+		// §15 HTTP metrics: bounded route label (matched pattern), method,
+		// status class.
+		handler = o.Argus.HTTPMiddleware(handler)
+	}
+	return httpx.RequestID(httpx.AccessLog(o.Logger, handler))
 }
 
 // NewOpsRouter returns the ops router (metrics + health). Intended for a

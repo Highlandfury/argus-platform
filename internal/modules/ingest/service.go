@@ -31,17 +31,29 @@ var (
 type Service struct {
 	app   *pgxpool.Pool
 	store metrics.Store
+	argus *telemetry.Argus
 	log   *slog.Logger
 	m     *metricsSet
 }
 
 // New wires the pipeline. store may be nil (TimescaleStore is used unless a
-// test substitutes one); tel may be nil in unit contexts.
-func New(app *pgxpool.Pool, store metrics.Store, tel *telemetry.Registry, log *slog.Logger) *Service {
+// test substitutes one); argus may be nil in unit contexts.
+func New(app *pgxpool.Pool, store metrics.Store, argus *telemetry.Argus, log *slog.Logger) *Service {
 	if store == nil {
 		store = metrics.TimescaleStore{}
 	}
-	return &Service{app: app, store: store, log: log, m: newMetricsSet(tel)}
+	var reg *telemetry.Registry
+	if argus != nil {
+		reg = argus.Reg
+	}
+	return &Service{app: app, store: store, argus: argus, log: log, m: newMetricsSet(reg)}
+}
+
+// observeDB records one database operation on the shared §15 histogram.
+func (s *Service) observeDB(op string, start time.Time) {
+	if s.argus != nil {
+		s.argus.DBQueryDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	}
 }
 
 // IngestBatch runs the canonical pipeline for one authenticated batch:
@@ -58,7 +70,7 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 		if batch != nil {
 			rejected = uint32(len(batch.GetSamples())) //nolint:gosec // bounded by MaxBatchSamples
 		}
-		s.m.samples.WithLabelValues("dropped").Add(float64(rejected))
+		s.m.samples.WithLabelValues("rejected").Add(float64(rejected))
 		if s.log != nil {
 			s.log.Warn("batch rejected",
 				"reason", rej.Reason, "collector_id", collectorID, "batch_seq", batch.GetBatchSeq())
@@ -68,7 +80,9 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 
 	outcome := BatchOutcome{}
 	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		claimStart := time.Now()
 		receivedAt, claimed, err := s.claimBatch(ctx, tx, orgID, collectorID, batch, validated)
+		s.observeDB("claim", claimStart)
 		if err != nil {
 			return err
 		}
@@ -88,7 +102,9 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 				DimHash:     v.DimHash,
 			})
 		}
+		seriesStart := time.Now()
 		seriesIDs, err := s.store.EnsureSeries(ctx, tx, specs)
+		s.observeDB("series", seriesStart)
 		if err != nil {
 			if errors.Is(err, metrics.ErrSeriesQuota) {
 				return errSeriesQuota
@@ -108,7 +124,7 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 
 		dbStart := time.Now()
 		inserted, err := s.store.InsertSamples(ctx, tx, samples)
-		s.m.dbDuration.WithLabelValues("samples").Observe(time.Since(dbStart).Seconds())
+		s.observeDB("samples", dbStart)
 		if err != nil {
 			return err
 		}
@@ -137,7 +153,7 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 		return outcome
 	case errors.Is(err, errSeriesQuota):
 		s.m.batches.WithLabelValues("rejected").Inc()
-		s.m.samples.WithLabelValues("dropped").Add(float64(len(validated)))
+		s.m.samples.WithLabelValues("rejected").Add(float64(len(validated)))
 		if s.log != nil {
 			s.log.Warn("batch rejected", "reason", "validation.series_quota_exceeded",
 				"collector_id", collectorID, "batch_seq", batch.GetBatchSeq())

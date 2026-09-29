@@ -91,6 +91,8 @@ func cmdServe(args []string) int {
 	}
 
 	tel := telemetry.New("server", buildinfo.Version, buildinfo.Commit)
+	argus := telemetry.NewArgus(tel)
+	metrics.RegisterSeriesMetrics(tel)
 
 	// Pools + readiness (SPEC §17): readyz reflects DB reachability, auth-role
 	// reachability, and schema state.
@@ -165,7 +167,7 @@ func cmdServe(args []string) int {
 	if appPool != nil && authPool != nil {
 		collectorsSvc = collectors.New(appPool, authPool, ca, tel)
 		sessions = collectors.NewSessionRegistry()
-		metricsQuery = metrics.NewQueryService(appPool, collectorsSvc)
+		metricsQuery = metrics.NewQueryService(appPool, collectorsSvc, argus)
 
 		enrollGRPC = grpc.NewServer(
 			grpc.Creds(credentials.NewTLS(&tls.Config{
@@ -189,7 +191,7 @@ func cmdServe(args []string) int {
 			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: false}),
 		)
 		collectorv1.RegisterCollectorServiceServer(streamGRPC,
-			collectors.NewStreamServer(collectorsSvc, sessions, ingest.New(appPool, nil, tel, logger), logger))
+			collectors.NewStreamServer(collectorsSvc, sessions, ingest.New(appPool, nil, argus, logger), logger))
 
 		if enrollListener, err = net.Listen("tcp", cfg.EnrollAddr); err != nil {
 			fmt.Fprintln(os.Stderr, "enrollment listener:", err)
@@ -206,6 +208,7 @@ func cmdServe(args []string) int {
 	opts := api.Options{
 		Logger:            logger,
 		Telemetry:         tel,
+		Argus:             argus,
 		Version:           buildinfo.Version,
 		Commit:            buildinfo.Commit,
 		Readiness:         readiness,
@@ -239,6 +242,13 @@ func cmdServe(args []string) int {
 		"http_addr", cfg.HTTPAddr,
 		"ops_addr", cfg.OpsAddr,
 	)
+
+	// §15 DB-derived collector gauges (30 s cadence; stale computed from
+	// heartbeat age so an idle collector is never reported healthy).
+	if appPool != nil && authPool != nil {
+		gauges := telemetry.NewCollectorGauges(appPool, authPool, tel)
+		go gauges.Run(ctx, 30*time.Second)
+	}
 
 	errCh := make(chan error, 4)
 	go func() {
