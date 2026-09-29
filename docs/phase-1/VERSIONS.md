@@ -23,12 +23,13 @@
 | github.com/jackc/pgx/v5 | v5.11.0 | GitHub release — added M1b (direct pin verified) |
 | github.com/golang-migrate/migrate/v4 | v4.20.1 | GitHub release — added M1a |
 | github.com/testcontainers/testcontainers-go | v0.44.0 | GitHub release — added M1c (integration suite) |
+| github.com/pb33f/libopenapi | v0.41.2 | Go module proxy — added M2b (OpenAPI 3.1 contract test) |
 | golang.org/x/crypto | v0.57.0 | repo tags — added M1e (direct, Argon2id) |
 | google.golang.org/grpc | v1.84.0 | GitHub release — **added in M3** |
 | google.golang.org/protobuf | v1.36.12 (codegen pin; tidy currently resolves v1.36.11 as indirect runtime lib) | GitHub release / proxy | Codegen and runtime pins may diverge; record both when they change. |
 | github.com/stretchr/testify | (indirect via client_golang) | tidy | Direct use begins when needed; add the exact tag then. |
 | golang.org/x/crypto | v0.57.0 | repo tags — added M1e (direct, Argon2id) | x/time pinned in M2.
-| golang.org/x/time | v0.16.0 | repo tags — **added in M2 (rate limiting)** |
+| golang.org/x/time | v0.16.0 | repo tags — added M2b (login rate limiting) |
 | golang.org/x/sync | v0.23.0 | repo tags — **added when errgroup first used** |
 | github.com/google/go-cmp | v0.7.0 (indirect) | tidy |
 

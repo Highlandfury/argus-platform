@@ -42,8 +42,31 @@ Full integration suite: **18/18 test functions green** (~55–90 s, real contain
 ## Reproduce
 
 ```powershell
-.\scripts\dev.ps1 up            # db -> migrate -> seed -> server -> collector
+.\scripts\dev.ps1 up            # db -> migrate -> seed -> server -> collector -> web
 curl.exe -s http://127.0.0.1:8080/v1/readyz
-go test ./tests/integration/... -count=1 -v     # 18/18 green against a real container
+go test ./tests/integration/... -count=1 -v     # green against a real container
 go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 ```
+
+---
+
+# ACCEPTANCE_RUN — M2 (Identity & API Shell)
+
+**Date:** 2026-09-29 · **Commits:** M2a `2ddeda1` · M2b `d4026c7` · M2c `b1bf47d` · M2d (this commit)
+
+| Gate | Command / evidence | Result |
+|---|---|---|
+| Auth primitives | `go test ./internal/platform/security/...` | **PASS** — token format/uniqueness, constant-time compare, full CSRF matrix |
+| API units | `go test ./internal/api/...` | **PASS** — route registry shape, fail-closed protected routes, login 503 without services, limiter burst/deny |
+| OpenAPI contract | `go test ./tests/contract/...` | **PASS** — spec parses as OpenAPI 3.1.0; every implemented `/v1` route exists in the spec; spec-only endpoints limited to the explicit milestone allowlist (stale entries fail) |
+| Session lifecycle (AC-12 API half) | `TestLoginSessionLifecycle` | **PASS** — wrong password 401 `auth.invalid_credentials` + no cookies; login sets HttpOnly session + readable CSRF; `/v1/me`, `/v1/sites` 200; logout without CSRF 403 (session survives); with CSRF 204; `/v1/me` after logout 401; raw token absent from DB (stored hashed) |
+| Login rate limit (S-09) | `TestLoginRateLimitS09` | **PASS** — attempts 1–10 → 401, 11th → 429 + `Retry-After` |
+| Enumeration uniformity (S-16) | `TestLoginEnumerationUniformS16` | **PASS** — identical status/code across unknown-org / unknown-email / wrong-password; timing 118/96/118 ms (dummy-hash equalization), minimum-work assertion enforced |
+| Tenant scoping | `TestSitesAreTenantScoped` | **PASS** — org A's session sees only A's sites |
+| Web E2E (AC-12 UI half) | `playwright test` (containerized web) | **PASS** — `/` → 307 `/login`; login → dashboard (org "Dev Org", site "HQ"); logout → `/login` and revoked; wrong password shows the problem message |
+| Full stack | `docker compose up -d --build --wait` | **PASS** — db → migrate → seed → server → collector → web; API contract verified live by curl (login 200 / me 200 / 401 after logout / CSRF 403↔204) |
+
+**M2 findings (documented):**
+1. **Web runtime env:** Next bakes rewrites at build time but server components read `ARGUS_API_BASE` at runtime; the final image stage must set it (fixed in `web/Dockerfile` + compose, with graceful "API unreachable" panels).
+2. **TypeScript 7.0.2 verified** with Next 16.3.7 (auto-adjusted `jsx: react-jsx`); the VERSIONS fallback note is retired.
+3. **Operational reminder:** the compose stack must be rebuilt (`up --build`) after server code changes — running old images against new UI surfaces 404s that look like UI bugs.

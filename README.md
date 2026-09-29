@@ -9,15 +9,14 @@ Phase-1 engineering specification live alongside this repo:
 
 ## Status
 
-**Phase 1 — Walking Skeleton. M0 (scaffold + compatibility gate) in progress.**
+**Phase 1 — Walking Skeleton. M2 (Identity & API Shell) complete.**
 
 | Milestone | State |
 |---|---|
-| M0 scaffold, health/metrics endpoints, config/logging/telemetry, CI | ✅ implemented & verified locally (Go 1.27.1) |
-| Container builds + compose smoke | ⏳ runs in CI (`compose-smoke` job); pending local Docker |
-| M1 schema + RLS + migrations | next |
-| M2 identity & API shell | |
-| M3 enrollment + collector identity + stream control | |
+| M0 scaffold, health/metrics endpoints, config/logging/telemetry, CI | ✅ |
+| M1 schema + RLS + migrations + idempotency + seed | ✅ |
+| M2 identity API (login/logout/me, CSRF, rate limits) + OpenAPI contract gate + minimal web UI | ✅ |
+| M3 enrollment + collector identity + stream control | next |
 | M4 metric spine (producer → spool → ingest → chart) | |
 | M5 observability polish | |
 | M6 failure/security/load suites + acceptance run | |
