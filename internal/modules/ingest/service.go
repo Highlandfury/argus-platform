@@ -1,0 +1,187 @@
+package ingest
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strconv"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
+	"github.com/argus-platform/argus/internal/modules/metrics"
+	"github.com/argus-platform/argus/internal/platform/database"
+	"github.com/argus-platform/argus/internal/platform/telemetry"
+)
+
+// Sentinel outcomes that unwind the batch transaction without being logged as
+// server errors.
+var (
+	errDuplicateBatch = errors.New("ingest: duplicate batch")
+	errSeriesQuota    = errors.New("ingest: series quota exceeded")
+	errChunkRLS       = errors.New("ingest: chunk RLS sweep failed")
+)
+
+// Service is the ingest pipeline. Durability contract: BatchResult(STATUS_OK)
+// is produced only after the batch transaction has COMMITted.
+type Service struct {
+	app   *pgxpool.Pool
+	store metrics.Store
+	log   *slog.Logger
+	m     *metricsSet
+}
+
+// New wires the pipeline. store may be nil (TimescaleStore is used unless a
+// test substitutes one); tel may be nil in unit contexts.
+func New(app *pgxpool.Pool, store metrics.Store, tel *telemetry.Registry, log *slog.Logger) *Service {
+	if store == nil {
+		store = metrics.TimescaleStore{}
+	}
+	return &Service{app: app, store: store, log: log, m: newMetricsSet(tel)}
+}
+
+// IngestBatch runs the canonical pipeline for one authenticated batch:
+// validate → claim (deduplicate) → resolve series (normalize) → persist →
+// chunk-RLS sweep → COMMIT. Any DB failure yields STATUS_RETRY and rolls the
+// transaction back: nothing is acknowledged.
+func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID, allowlist map[string]MetricDef, batch *collectorv1.MetricBatch) BatchOutcome {
+	start := time.Now()
+
+	validated, rej := ValidateBatch(batch, allowlist, time.Now())
+	if rej != nil {
+		s.m.batches.WithLabelValues("rejected").Inc()
+		rejected := uint32(0)
+		if batch != nil {
+			rejected = uint32(len(batch.GetSamples())) //nolint:gosec // bounded by MaxBatchSamples
+		}
+		s.m.samples.WithLabelValues("dropped").Add(float64(rejected))
+		if s.log != nil {
+			s.log.Warn("batch rejected",
+				"reason", rej.Reason, "collector_id", collectorID, "batch_seq", batch.GetBatchSeq())
+		}
+		return BatchOutcome{Status: collectorv1.BatchResult_STATUS_REJECTED, Reason: rej.Reason, Rejected: rejected}
+	}
+
+	outcome := BatchOutcome{}
+	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		receivedAt, claimed, err := s.claimBatch(ctx, tx, orgID, collectorID, batch, validated)
+		if err != nil {
+			return err
+		}
+		if !claimed {
+			outcome = BatchOutcome{Status: collectorv1.BatchResult_STATUS_DUPLICATE, IngestedAt: time.Now()}
+			return errDuplicateBatch
+		}
+
+		specs := make([]metrics.SeriesSpec, 0, len(validated))
+		for _, v := range validated {
+			specs = append(specs, metrics.SeriesSpec{
+				OrgID:       orgID,
+				CollectorID: collectorID,
+				MetricKey:   v.MetricKey,
+				Unit:        v.Unit,
+				Canonical:   v.Canonical,
+				DimHash:     v.DimHash,
+			})
+		}
+		seriesIDs, err := s.store.EnsureSeries(ctx, tx, specs)
+		if err != nil {
+			if errors.Is(err, metrics.ErrSeriesQuota) {
+				return errSeriesQuota
+			}
+			return err
+		}
+
+		samples := make([]metrics.Sample, 0, len(validated))
+		for _, v := range validated {
+			key := v.MetricKey + "|" + strconv.FormatInt(v.DimHash, 16)
+			seriesID, ok := seriesIDs[key]
+			if !ok {
+				return fmt.Errorf("ingest: series unresolved for %s", key)
+			}
+			samples = append(samples, metrics.Sample{OrgID: orgID, SeriesID: seriesID, Ts: v.Ts, Value: v.Value})
+		}
+
+		dbStart := time.Now()
+		inserted, err := s.store.InsertSamples(ctx, tx, samples)
+		s.m.dbDuration.WithLabelValues("samples").Observe(time.Since(dbStart).Seconds())
+		if err != nil {
+			return err
+		}
+
+		// Zero-window chunk-RLS sweep before COMMIT (migration 000006).
+		if _, err := tx.Exec(ctx, `SELECT public.argus_ensure_chunk_rls()`); err != nil {
+			return fmt.Errorf("%w: %w", errChunkRLS, err)
+		}
+
+		outcome = BatchOutcome{
+			Status:     collectorv1.BatchResult_STATUS_OK,
+			Accepted:   uint32(inserted), //nolint:gosec // bounded by MaxBatchSamples
+			IngestedAt: receivedAt,
+		}
+		return nil
+	})
+
+	switch {
+	case err == nil:
+		s.m.batches.WithLabelValues("ok").Inc()
+		s.m.samples.WithLabelValues("accepted").Add(float64(outcome.Accepted))
+		s.m.batchDuration.Observe(time.Since(start).Seconds())
+		return outcome
+	case errors.Is(err, errDuplicateBatch):
+		s.m.batches.WithLabelValues("duplicate").Inc()
+		return outcome
+	case errors.Is(err, errSeriesQuota):
+		s.m.batches.WithLabelValues("rejected").Inc()
+		s.m.samples.WithLabelValues("dropped").Add(float64(len(validated)))
+		if s.log != nil {
+			s.log.Warn("batch rejected", "reason", "validation.series_quota_exceeded",
+				"collector_id", collectorID, "batch_seq", batch.GetBatchSeq())
+		}
+		return BatchOutcome{
+			Status:   collectorv1.BatchResult_STATUS_REJECTED,
+			Reason:   "validation.series_quota_exceeded",
+			Rejected: uint32(len(validated)), //nolint:gosec // bounded by MaxBatchSamples
+		}
+	default:
+		// No acknowledgment before durability: everything rolled back.
+		s.m.batches.WithLabelValues("retry").Inc()
+		if s.log != nil {
+			s.log.Error("ingest batch failed; collector must retry",
+				"collector_id", collectorID, "batch_seq", batch.GetBatchSeq(), "error", err)
+		}
+		return BatchOutcome{Status: collectorv1.BatchResult_STATUS_RETRY, Reason: "ingest.db_error"}
+	}
+}
+
+// claimBatch inserts the idempotency ledger row. Returns the ledger's
+// received_at (DB clock) and whether this delivery claimed the batch.
+func (s *Service) claimBatch(ctx context.Context, tx pgx.Tx, orgID, collectorID uuid.UUID, batch *collectorv1.MetricBatch, validated []ValidatedSample) (time.Time, bool, error) {
+	firstTs, lastTs := validated[0].Ts, validated[0].Ts
+	for _, v := range validated[1:] {
+		if v.Ts.Before(firstTs) {
+			firstTs = v.Ts
+		}
+		if v.Ts.After(lastTs) {
+			lastTs = v.Ts
+		}
+	}
+	var receivedAt time.Time
+	err := tx.QueryRow(ctx, `
+		INSERT INTO ingested_batches (collector_id, batch_seq, org_id, sample_count, first_ts, last_ts)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (collector_id, batch_seq) DO NOTHING
+		RETURNING received_at`,
+		collectorID, batch.GetBatchSeq(), orgID, len(validated), firstTs, lastTs).Scan(&receivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("ingest: claim batch: %w", err)
+	}
+	return receivedAt, true, nil
+}

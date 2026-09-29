@@ -24,6 +24,7 @@ import (
 	"github.com/argus-platform/argus/internal/api"
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/identity"
+	"github.com/argus-platform/argus/internal/modules/ingest"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
@@ -174,7 +175,7 @@ func cmdServe(args []string) int {
 			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: false}),
 		)
 		collectorv1.RegisterCollectorServiceServer(streamGRPC,
-			collectors.NewStreamServer(collectorsSvc, sessions, logger))
+			collectors.NewStreamServer(collectorsSvc, sessions, ingest.New(appPool, nil, tel, logger), logger))
 
 		if enrollListener, err = net.Listen("tcp", cfg.EnrollAddr); err != nil {
 			fmt.Fprintln(os.Stderr, "enrollment listener:", err)

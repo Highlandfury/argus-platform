@@ -37,6 +37,7 @@ import (
 	"github.com/argus-platform/argus/internal/collector/stream"
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	identitymod "github.com/argus-platform/argus/internal/modules/identity"
+	"github.com/argus-platform/argus/internal/modules/ingest"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/database"
 	"github.com/argus-platform/argus/internal/platform/ratelimit"
@@ -120,7 +121,7 @@ func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collect
 		})),
 		grpc.MaxRecvMsgSize(16<<20),
 	)
-	collectorv1.RegisterCollectorServiceServer(srv, collectors.NewStreamServer(svc, registry, nil))
+	collectorv1.RegisterCollectorServiceServer(srv, collectors.NewStreamServer(svc, registry, ingest.New(appPool, nil, nil, nil), nil))
 	return srv
 }
 

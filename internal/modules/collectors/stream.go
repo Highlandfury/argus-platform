@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
+	"github.com/argus-platform/argus/internal/modules/ingest"
 	"github.com/argus-platform/argus/internal/platform/grpcx"
 )
 
@@ -22,17 +23,21 @@ const (
 // StreamServer implements collectorv1.CollectorService (port 8443, mTLS).
 // It owns the server-side session lifecycle: identity resolution, hello
 // validation, policy delivery, heartbeat/ack handling, deterministic duplicate
-// handling, and revocation/shutdown disconnects.
+// handling, revocation/shutdown disconnects, and delivery of metric batches to
+// the ingest pipeline (M4).
 type StreamServer struct {
 	collectorv1.UnimplementedCollectorServiceServer
 	Svc      *Service
 	Registry *SessionRegistry
+	Ingest   ingest.Ingester
 	Log      *slog.Logger
 }
 
-// NewStreamServer wires the collector stream service.
-func NewStreamServer(svc *Service, registry *SessionRegistry, log *slog.Logger) *StreamServer {
-	return &StreamServer{Svc: svc, Registry: registry, Log: log}
+// NewStreamServer wires the collector stream service. ingester may be nil in
+// degraded configurations (batches are then explicitly rejected, never
+// silently dropped).
+func NewStreamServer(svc *Service, registry *SessionRegistry, ingester ingest.Ingester, log *slog.Logger) *StreamServer {
+	return &StreamServer{Svc: svc, Registry: registry, Ingest: ingester, Log: log}
 }
 
 // Stream is the single bidirectional control/telemetry stream per collector.
@@ -117,6 +122,18 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 	if err != nil && s.Log != nil {
 		s.Log.Error("load latest policy", "collector_id", ident.CollectorID, "error", err)
 	}
+	// Ingest authorization: the batch allowlist tracks the signed policy
+	// currently in effect (refreshed on push and on acks of newer versions).
+	allowlist, allowlistVersion := policyAllowlist(latest)
+	refreshAllowlist := func() {
+		current, err := s.Svc.LatestPolicy(ctx, ident.OrgID, ident.CollectorID)
+		if err != nil || current == nil {
+			return
+		}
+		if m, v := policyAllowlist(current); m != nil {
+			allowlist, allowlistVersion = m, v
+		}
+	}
 	if err := gstream.Send(&collectorv1.ServerMessage{
 		Msg: &collectorv1.ServerMessage_Hello{Hello: &collectorv1.ServerHello{
 			ServerTime:               timestamppb.Now(),
@@ -151,20 +168,37 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 				}
 			case msg.GetPolicyAck() != nil:
 				ack := msg.GetPolicyAck()
+				if ack.GetApplied() && ack.GetPolicyVersion() > allowlistVersion {
+					refreshAllowlist()
+				}
 				if err := s.Svc.RecordPolicyAck(ctx, ident.OrgID, ident.CollectorID, ack.GetPolicyVersion(), ack.GetApplied()); err != nil && s.Log != nil {
 					s.Log.Error("record policy ack", "collector_id", ident.CollectorID, "error", err)
 				}
 			case msg.GetBatch() != nil:
-				// Telemetry ingestion arrives in M4; batches are rejected
-				// explicitly (never silently dropped).
 				batch := msg.GetBatch()
-				_ = gstream.Send(&collectorv1.ServerMessage{
-					Msg: &collectorv1.ServerMessage_BatchResult{BatchResult: &collectorv1.BatchResult{
-						BatchSeq: batch.GetBatchSeq(),
+				outcome := ingest.BatchOutcome{
+					Status: collectorv1.BatchResult_STATUS_REJECTED,
+					Reason: "ingest.unavailable",
+				}
+				switch {
+				case s.Ingest == nil:
+					// Degraded: explicit rejection; never a silent drop.
+				case allowlist == nil:
+					samples := 0
+					if batch != nil {
+						samples = len(batch.GetSamples())
+					}
+					outcome = ingest.BatchOutcome{
 						Status:   collectorv1.BatchResult_STATUS_REJECTED,
-						Reason:   "ingest.not_implemented_before_m4",
-					}},
-				})
+						Reason:   "validation.policy_unavailable",
+						Rejected: uint32(samples), //nolint:gosec // bounded by maxBatchSamples
+					}
+				default:
+					outcome = s.Ingest.IngestBatch(ctx, ident.OrgID, ident.CollectorID, allowlist, batch)
+				}
+				if err := gstream.Send(batchResultMsg(batch.GetBatchSeq(), outcome)); err != nil {
+					return normalizeStreamErr(err)
+				}
 			case msg.GetHello() != nil:
 				return s.protocolError(gstream, "duplicate hello")
 			default:
@@ -175,6 +209,9 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 			return nil
 		case sp := <-session.Policy():
 			metrics.policyPushes.Inc()
+			if m, v := policyAllowlist(sp); m != nil {
+				allowlist, allowlistVersion = m, v
+			}
 			_ = gstream.Send(&collectorv1.ServerMessage{
 				Msg: &collectorv1.ServerMessage_PolicyUpdate{PolicyUpdate: &collectorv1.PolicyUpdate{Policy: policyToProto(sp)}},
 			})
@@ -189,6 +226,37 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 func disconnectMsg(code collectorv1.Disconnect_Code, reason string) *collectorv1.ServerMessage {
 	return &collectorv1.ServerMessage{
 		Msg: &collectorv1.ServerMessage_Disconnect{Disconnect: &collectorv1.Disconnect{Code: code, Reason: reason}},
+	}
+}
+
+// policyAllowlist parses a signed policy document into the ingest allowlist.
+// A nil or unparsable policy yields a nil allowlist (ingest then rejects with
+// validation.policy_unavailable rather than guessing).
+func policyAllowlist(sp *SignedPolicy) (map[string]ingest.MetricDef, int64) {
+	if sp == nil {
+		return nil, 0
+	}
+	allowlist, err := ingest.AllowlistFromPolicy(sp.Document)
+	if err != nil {
+		return nil, 0
+	}
+	return allowlist, sp.Version
+}
+
+// batchResultMsg converts a pipeline outcome into the wire BatchResult.
+func batchResultMsg(seq int64, outcome ingest.BatchOutcome) *collectorv1.ServerMessage {
+	result := &collectorv1.BatchResult{
+		BatchSeq:        seq,
+		Status:          outcome.Status,
+		Reason:          outcome.Reason,
+		AcceptedSamples: outcome.Accepted,
+		RejectedSamples: outcome.Rejected,
+	}
+	if !outcome.IngestedAt.IsZero() {
+		result.IngestedAt = timestamppb.New(outcome.IngestedAt)
+	}
+	return &collectorv1.ServerMessage{
+		Msg: &collectorv1.ServerMessage_BatchResult{BatchResult: result},
 	}
 }
 
