@@ -195,9 +195,13 @@ func cmdRun(args []string) int {
 
 	sender := transport.NewSender(sp, filepath.Join(cfg.DataDir, "spool", "deadletter"), logger)
 	sender.SetSendDurationObserver(cmet.ObserveSendDuration)
-	if err := machine.Transition(collector.StateReconnecting); err != nil {
-		logger.Error("state", "error", err)
-		return 1
+	// A fresh enrollment has already moved the machine to RECONNECTING (inside
+	// enrollWithRetry); only transitions from other states are needed here.
+	if machine.State() != collector.StateReconnecting {
+		if err := machine.Transition(collector.StateReconnecting); err != nil {
+			logger.Error("state", "error", err)
+			return 1
+		}
 	}
 	client := stream.New(stream.Config{
 		StreamAddr:     cfg.StreamAddr,

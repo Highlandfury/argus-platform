@@ -9,7 +9,7 @@ Phase-1 engineering specification live alongside this repo:
 
 ## Status
 
-**Phase 1 — Walking Skeleton. M3 (Enrollment, Collector Identity, Control Plane) complete.**
+**Phase 1 — Walking Skeleton. M0–M5 complete (functional + self-observability + operations).**
 
 | Milestone | State |
 |---|---|
@@ -17,9 +17,14 @@ Phase-1 engineering specification live alongside this repo:
 | M1 schema + RLS + migrations + idempotency + seed | ✅ |
 | M2 identity API (login/logout/me, CSRF, rate limits) + OpenAPI contract gate + minimal web UI | ✅ |
 | M3 enrollment + collector identity + mTLS control plane + collectors UI + live stack bootstrap | ✅ |
-| M4 metric spine (producer → spool → ingest → chart) | next |
-| M5 observability polish | |
-| M6 failure/security/load suites + acceptance run | |
+| M4 metric spine (producer → durable spool → ingest → query API → chart) + load baseline | ✅ |
+| M5 self-observability (§15 metrics, collector :9091), correlation + S-08 log scan, runbook | ✅ |
+| M6 formal acceptance-run closure (e2e harness, k6 L-03, nightly failure suite) | pending |
+
+Operational procedures live in **`docs/phase-1/RUNBOOK.md`** (startup, recovery,
+backup/restore, collector/spool/certificate troubleshooting, operational checklist).
+Phase-1 performance results are **observed test measurements, not product capacity
+guarantees** — see the load section of `docs/phase-1/ACCEPTANCE_RUN.md`.
 
 ## Prerequisites
 
@@ -33,41 +38,57 @@ Phase-1 engineering specification live alongside this repo:
 Docker Desktop (Windows): run `wsl --install` once (admin, may need a reboot), then
 `winget install -e --id Docker.DockerDesktop`. Verify: `docker run --rm hello-world`.
 
-## Quickstart (Windows)
+## Quickstart (fresh machine → running Phase-1 stack)
 
+Prerequisites: Windows 10/11 + WSL2, Docker Desktop running, Git, Node.js 24
+(`node --version`), and the bundled Go toolchain in `.tools\go` (already in the
+repo). For a completely fresh clone:
 ```powershell
-.\scripts\dev.ps1 build     # compile server + collector into bin\
-.\scripts\dev.ps1 test      # go test ./...
-.\scripts\dev.ps1 up        # docker compose up (db + server + collector + web)
-# UI/API:  http://127.0.0.1:8080/v1/healthz   web: http://127.0.0.1:3000
-# ops:     http://127.0.0.1:9090/metrics      agent: collector gRPC :8443 (mTLS) / :8444 (enroll)
-.\scripts\dev.ps1 down
+git clone <repo-url> argus-platform        # or unzip the delivered repo
+cd argus-platform
+docker run --rm hello-world                # Docker Desktop sanity check
+.\scripts\dev.ps1 up                       # db -> migrate -> seed -> server -> collector -> web (waits for healthy)
+start http://127.0.0.1:3000                # browser: login dev / admin@dev.local
+#   password: dev-admin-changeme (ARGUS_DEV_ADMIN_PASSWORD; development only)
 ```
+In the browser: sign in → **Collectors** → **dev-collector** → the metric chart
+shows live `collector_cpu_percent` (current value, freshness, 15m/1h/6h/24h
+ranges). API spot-check: `curl.exe http://127.0.0.1:8080/v1/readyz`.
+Stop with `.\scripts\dev.ps1 down` (keeps data) or `.\scripts\dev.ps1 reset`
+(development-only: destroys all dev volumes).
 
 The dev stack is **self-enrolling**: `seed-dev` mints a one-time enrollment credential into the
 shared CA volume (`ca-data`), the server writes its internal CA there, and the collector container
 pins that CA and enrolls on first start (`dev-collector` appears as `active` in the UI). A pristine
 reset (`dev.ps1 reset` then `up`) re-provisions the whole chain end-to-end.
+Detailed procedures: **`docs/phase-1/RUNBOOK.md`**.
 
-### Troubleshooting: stale dev database volume (PostgreSQL 18 layout)
+## Troubleshooting (lessons from M0–M5)
 
-The dev database mounts its named volume at **`/var/lib/postgresql`** — the PostgreSQL 18
-image layout (the pre-18 path `/var/lib/postgresql/data` is rejected by the PG18
-entrypoint as "foreign data"). If you booted an earlier revision of the stack before this
-fix, delete the stale dev volume **once** (development data only — this is never a
-production migration procedure):
-
-```powershell
-.\scripts\dev.ps1 reset     # docker compose down -v (removes dev volumes only)
-.\scripts\dev.ps1 up
-```
-
-`.\scripts\dev.ps1 check-compose` (also enforced by CI) verifies the PostgreSQL 18
-volume layout and safe init-script mounts so this class of mistake cannot return
-silently.
-
-Linux/WSL: use `make` (`make check`, `make dev`, `make versions`); source
-`scripts/env.sh` to put `.tools` on PATH.
+- **PostgreSQL 18 volume layout:** the db volume must mount `/var/lib/postgresql`
+  (the pre-18 `/var/lib/postgresql/data` is rejected as "foreign data"). Enforced
+  by `.\scripts\dev.ps1 check-compose`.
+- **Init-script mount masking:** `/docker-entrypoint-initdb.d` is mounted as
+  *files*, never as a directory — a directory mount hides the image's own
+  TimescaleDB init/tuning scripts.
+- **TimescaleDB first boot:** the image's temporary init server restarts after
+  tuning; `argus-server migrate` retries connection-class failures (~90 s), so a
+  fresh `up` is stable. If `migrate` still fails: `docker compose … up -d migrate`.
+- **Docker published ports:** `3000/8080/8443/8444/9090/5432` are fixed; a
+  "port is already allocated" error means another stack/process owns one. Stop
+  it (`docker ps`) — do not reconfigure Docker networking to "fix" it.
+- **Collector spool:** inspect with
+  `docker compose … run --rm collector doctor` and the loopback endpoint
+  `127.0.0.1:9091` (see RUNBOOK §8.6). `dropped_total`/`corrupt_total` moving is
+  always logged and counted, never silent.
+- **Enrollment/certificates:** expired/used tokens return one uniform denial
+  (create a fresh token in the UI); revoked collectors terminate permanently
+  (re-enroll requires a fresh token + empty data dir); trust mismatches fail at
+  the TLS layer (distribute `root.pem` from the `ca-data` volume).
+- **Query limits/planner:** `collector_cpu_percent` only, step ∈
+  {raw,10s,1m,5m}, ≤24 h, ≤2000 points, 5 s timeout; after bulk loads run
+  `ANALYZE metric_samples;` (M4c finding). Phase-1 query performance is a
+  measured development baseline, not a scale claim.
 
 ## Repository map
 
@@ -84,8 +105,11 @@ openapi/                 argus.v1.yaml (normative API contract)
 migrations/              schema migrations (000001–000007)
 deployments/compose/     dev stack + Dockerfiles
 scripts/                 dev.ps1, env.sh, install-tools.ps1, db-init
-docs/phase-1/            Phase-1 specification set (SPEC, FILE_PLAN, ACCEPTANCE, …)
+docs/phase-1/            Phase-1 specification set (SPEC, FILE_PLAN, ACCEPTANCE, …) + RUNBOOK.md
 ```
+
+Linux/WSL: use `make` (`make check`, `make dev`, `make versions`); source
+`scripts/env.sh` to put `.tools` on PATH.
 
 ## Environment variables (server)
 
@@ -105,7 +129,8 @@ Collector variables (subset): `ARGUS_COLLECTOR_SERVER` (enrollment URL),
 `ARGUS_COLLECTOR_STREAM` (host:port), `ARGUS_COLLECTOR_CA_FILE` (pinned server CA,
 required), `ARGUS_COLLECTOR_NAME`, `ARGUS_ENROLL_TOKEN` / `ARGUS_ENROLL_TOKEN_FILE`,
 `ARGUS_COLLECTOR_DATA_DIR`, `ARGUS_COLLECTOR_SPOOL_MAX_BYTES`,
-`ARGUS_COLLECTOR_FSYNC_INTERVAL_MS`.
+`ARGUS_COLLECTOR_FSYNC_INTERVAL_MS`, `ARGUS_COLLECTOR_METRICS_ADDR`
+(loopback-only collector metrics, default `127.0.0.1:9091`).
 
 ## Golden rules (from the spec)
 

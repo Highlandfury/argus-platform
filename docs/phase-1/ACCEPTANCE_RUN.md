@@ -218,3 +218,24 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 **Regression:** full `go test ./...` (18 packages incl. integration) PASS · lint 0 · buf lint/generate/drift clean · `-race` green for httpx/grpcx/collectors/collector in the pinned Linux container · Playwright re-run PASS (no web changes).
 
 **Metrics-label review (§12):** M5a/M5b label-policy tests remain green; no secret or unbounded value is promoted into metric labels; correlation IDs are reserved for logs, never metrics.
+
+---
+
+# ACCEPTANCE_RUN — M5d (Runbook, Quickstart, Operational Failure Tests, Fresh-State Smoke)
+
+**Date:** 2026-09-29 · **Commit:** M5d (this commit)
+
+| Gate | Evidence | Result |
+|---|---|---|
+| Runbook | `docs/phase-1/RUNBOOK.md` — service inventory, ports, startup/shutdown, health/readiness/database/collector verification, common failures, recovery, backup/restore (dev scope), migration ops, collector/server ops, observability checklist, security operations, development reset (explicitly destructive), troubleshooting | **PASS** |
+| Quickstart | README fresh-machine path (clone → Docker check → `dev.ps1 up` → login → collector → chart → stop) + troubleshooting section with the M0–M5 lessons; links to the runbook | **PASS** |
+| Operational failure tests | `TestM5OperationalReadinessFailure` (dead DB → healthz 200 / readyz 503 naming `database`), `TestM5OperationalStaleCollectorView` (aged heartbeat → API status `stale`; fresh heartbeat → `active`); plus the existing suites: DB restart (M1), collector outage/restart (M4b), revocation + bad CA (M3), query bounds/timeout/DB-down (M4c), metrics-endpoint failure isolation (M5b), S-08 scan (M5c) | **PASS** |
+| Fresh-development recovery + full smoke | `down -v` → `up --build --wait`: migrate v7, seed, server healthy, collector enrolled → active, 4 samples arriving within ~25 s, `/v1/readyz` 200, API query `status=fresh`, browser suite 6/6 | **PASS** |
+| M5d findings (fresh-state only) | (1) **Fresh-enrollment crash**: after first-time enrollment, `cmdRun` attempted `RECONNECTING → RECONNECTING` (already transitioned by `enrollWithRetry`) → exit 1. Fixed with the state guard; invisible to every earlier test because they reused an enrolled collector. (2) The metrics E2E asserted a warm-stack point count; now requires live points (≥3) from a fresh stack, with AC-09's ≥50-point measurement kept as the warm reference record (M4c). | **PASS (fixed)** |
+| Regression | `go test ./...` 18 packages PASS · lint 0 · buf lint/generate/drift clean · `-race ./internal/...` green (Linux container) · contract PASS · Playwright 6/6 | **PASS** |
+
+**Phase-1 final state (inventory).**
+*Provides:* authentication + sessions + CSRF, tenancy with RLS, admin/viewer API authorization, OpenAPI-contracted API, collector enrollment (one-time tokens), stable collector identity, internal-CA mTLS, signed policy delivery + acknowledgements, reconnect with backoff, durable segmented spool (fsync-before-send, corruption quarantine, capacity policy), batch ingestion with ack-after-commit + idempotency, TimescaleDB storage, tenant-safe query API with bounded ranges, ECharts metric chart, platform + collector self-observability, structured correlated logs with S-08 guarantees, and this runbook.
+*Does not provide:* SNMP/ICMP polling, device discovery, topology, Wi-Fi monitoring, floor-plan heatmaps, network diagnostics/RCA, device configuration management, automation, HA/DR/PITR/zero-downtime upgrades, production scalability claims.
+
+**Performance baseline preserved exactly as measured (M4c):** M4a smoke 3,919/4,000 samples/s; L-01 4,244/20,000; L-02 14,934/20,000 (200 streams, zero errors/duplicates/reconnects); primary observed bottleneck: **PostgreSQL write path**; Phase-1 has had no Phase-2 extraction/optimization work. Observed test results — not product capacity guarantees.
