@@ -1,0 +1,15 @@
+.git
+.gitignore
+.github
+.tools
+.dev
+data
+bin
+gen
+coverage
+docs
+web/node_modules
+web/.next
+node_modules
+*.md
+!docs/phase-1/VERSIONS.md

@@ -1,0 +1,29 @@
+# Build artifacts
+/bin/
+/gen/
+coverage/
+*.exe
+
+# Local toolchain (installed by scripts/install-tools.ps1, never committed)
+/.tools/
+
+# Local dev state and secrets
+/.dev/
+/data/
+.env
+.env.*
+*.pem
+*.key
+!docs/**/*.pem.example
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

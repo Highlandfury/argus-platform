@@ -1,0 +1,140 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  build-test:
+    name: build & test (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+      - name: gofmt
+        run: test -z "$(gofmt -l cmd internal)"
+      - name: vet
+        run: go vet ./...
+      - name: test (race)
+        run: go test -race ./...
+      - name: build
+        run: |
+          go build ./...
+          go build -o /tmp/argus-server ./cmd/argus-server
+          go build -o /tmp/argus-collector ./cmd/argus-collector
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.14.0
+
+  proto:
+    name: proto lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+      - name: install buf (pinned)
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.73.0
+      - name: buf lint
+        run: buf lint
+
+  compat-matrix:
+    name: compat matrix (PG18 + TimescaleDB 2.30.1)
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: timescale/timescaledb:2.30.1-pg18
+        env:
+          POSTGRES_DB: argus
+          POSTGRES_USER: argus_owner
+          POSTGRES_PASSWORD: devpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U argus_owner -d argus"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - name: install postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: verify extension, hypertable, idempotent conflict handling
+        env:
+          PGPASSWORD: devpass
+        run: |
+          psql -h 127.0.0.1 -U argus_owner -d argus -v ON_ERROR_STOP=1 <<'SQL'
+          SELECT version();
+          SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';
+          CREATE TABLE smoke(
+            org uuid NOT NULL,
+            ts  timestamptz NOT NULL,
+            v   double precision NOT NULL,
+            PRIMARY KEY (org, ts)
+          );
+          SELECT create_hypertable('smoke', 'ts',
+            chunk_time_interval => INTERVAL '1 day',
+            create_default_indexes => false);
+          INSERT INTO smoke VALUES ('00000000-0000-0000-0000-000000000001', '2026-01-01T00:00:00Z', 1)
+            ON CONFLICT DO NOTHING;
+          INSERT INTO smoke VALUES ('00000000-0000-0000-0000-000000000001', '2026-01-01T00:00:00Z', 2)
+            ON CONFLICT DO NOTHING;
+          DO $$
+          BEGIN
+            IF (SELECT count(*) FROM smoke) <> 1 THEN
+              RAISE EXCEPTION 'idempotent ON CONFLICT smoke failed: expected 1 row';
+            END IF;
+          END
+          $$;
+          SQL
+
+  compose-smoke:
+    name: compose smoke (db + server + collector)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: build and start stack
+        run: docker compose -f deployments/compose/docker-compose.dev.yml up --build --wait
+      - name: probe healthz
+        run: curl -fsS http://127.0.0.1:8080/v1/healthz
+      - name: probe metrics
+        run: curl -fsS http://127.0.0.1:9090/metrics | grep -q argus_build_info
+      - name: stack logs (on failure)
+        if: failure()
+        run: docker compose -f deployments/compose/docker-compose.dev.yml logs --tail=200
+      - name: teardown
+        if: always()
+        run: docker compose -f deployments/compose/docker-compose.dev.yml down -v --remove-orphans
+
+  web:
+    name: web build (when present)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "24.21.0"
+      - name: build
+        if: ${{ hashFiles('web/package.json') != '' }}
+        working-directory: web
+        run: |
+          npm ci
+          npm run build

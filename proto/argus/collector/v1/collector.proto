@@ -1,0 +1,280 @@
+// Phase 1 collector protocol — Argus Network Observability Platform.
+//
+// Design references:
+//   - Architecture package: argus-platform-spec/docs/27 (Edge Collector), §22 (API), ADR-005, ADR-014
+//   - Phase 1 spec: argus-platform/docs/phase-1/PHASE_1_SPEC.md
+//
+// Two services, two TLS listeners (see PHASE_1_SPEC §7):
+//   - EnrollmentService  @ 0.0.0.0:8444  TLS (server-auth only). Unauthenticated-by-design;
+//     protected by one-time enrollment tokens, rate limiting, and short-lived CSRs.
+//   - CollectorService   @ 0.0.0.0:8443  mTLS (RequireAndVerifyClientCert). Identity = client cert.
+//
+// Wire rules:
+//   - Batch payloads stay <= 1 MiB (compressed); server MaxRecvMsgSize is 16 MiB as a safety net.
+//   - All timestamps are UTC. Server never trusts collector clocks for ordering; only for display
+//     and clock-skew estimation.
+//   - Idempotency: (collector_id, batch_seq) for batch-level dedupe; (series, ts) for sample-level.
+
+syntax = "proto3";
+
+package argus.collector.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/argus-platform/argus/gen/go/argus/collector/v1;collectorv1";
+
+// ---------------------------------------------------------------------------
+// Enrollment (port 8444, server-auth TLS)
+// ---------------------------------------------------------------------------
+
+service EnrollmentService {
+  // One-shot enrollment: exchange a one-time token + CSR for a client certificate
+  // and the initial policy. Fails closed on: unknown/expired/used token, malformed CSR,
+  // duplicate collector name within the org, rate limit.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+}
+
+message EnrollRequest {
+  // One-time enrollment token, format "arg_enr_<base32(16 random bytes)>".
+  // Sent over TLS; server stores only SHA-256(token). Single use, TTL <= 24h.
+  string enrollment_token = 1;
+
+  // PKCS#10 Certificate Signing Request, PEM-encoded. The private key never leaves
+  // the collector. Key type: ECDSA P-256.
+  string csr_pem = 2;
+
+  // Operator-visible name, unique per organization. Used for dashboards and alerts;
+  // never used for identity resolution (that is the certificate fingerprint).
+  string collector_name = 3;
+
+  // Collector build version (semver). Drives fleet version reporting and upgrade gates.
+  string agent_version = 4;
+
+  // Best-effort host facts, informational only (shown in the UI, used for support).
+  string hostname = 5;
+  string os = 6; // e.g. "linux/amd64", "windows/amd64"
+}
+
+message EnrollResponse {
+  // Server-assigned collector ID (UUIDv7). The collector persists this with its key.
+  string collector_id = 1;
+
+  // Issued leaf certificate (PEM). Subject CN = collector_id; SAN = collector_id;
+  // validity = 90 days. Fingerprint (SHA-256) is the mTLS identity map key.
+  string client_cert_pem = 2;
+
+  // Issuing chain (PEM), root last. Pin this in the collector's trust store for
+  // the collector stream connection.
+  string ca_chain_pem = 3;
+
+  // Certificate expiry (server truth) so the collector can schedule renewal.
+  google.protobuf.Timestamp cert_not_after = 4;
+
+  // Initial policy bundle (signed JSON document, see Policy below).
+  Policy policy = 5;
+
+  // Server clock at issuance, for collector clock-skew estimation before the
+  // first ServerPing arrives. Estimate only; never used for ordering.
+  google.protobuf.Timestamp server_time = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Collector stream (port 8443, mTLS)
+// ---------------------------------------------------------------------------
+
+service CollectorService {
+  // Bidirectional stream carrying telemetry up and control down. One stream per
+  // collector; reconnects resume from the collector's spool watermark.
+  rpc Stream(stream ClientMessage) returns (stream ServerMessage);
+}
+
+message ClientMessage {
+  oneof msg {
+    ClientHello hello = 1;      // must be first message on every stream
+    Heartbeat heartbeat = 2;    // periodic liveness + spool/health accounting
+    MetricBatch batch = 3;      // telemetry
+    PolicyAck policy_ack = 4;   // acknowledgement of an applied policy
+  }
+}
+
+message ClientHello {
+  // Redundant with the mTLS certificate on purpose: the server asserts
+  // collector_id == certificate subject. A mismatch terminates the stream
+  // (defense against confused-deputy bugs).
+  string collector_id = 1;
+
+  string agent_version = 2;
+  uint32 protocol_version = 3; // starts at 1; server rejects unknown majors
+
+  // Highest batch_seq the collector has received a durable BatchResult for.
+  // Informational only: the spool watermark is authoritative for what is resent.
+  int64 last_acked_seq = 4;
+
+  // Collector boot time, used to distinguish restarts from network drops in logs.
+  google.protobuf.Timestamp started_at = 5;
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp sent_at = 1;
+
+  // Spool accounting (drives platform self-observability; see PHASE_1_SPEC §15).
+  uint64 spool_bytes = 2;
+  uint64 spool_records = 3;
+  int64 highest_seq = 4;          // newest record written to spool
+  int64 acked_seq = 5;            // contiguous ack watermark
+  uint64 dropped_records_total = 6;
+  uint64 corrupt_records_total = 7;
+
+  // Estimated skew vs server clock (from last ServerPing/ServerHello). Positive = collector behind.
+  int64 clock_skew_ms = 8;
+
+  string agent_version = 9;
+  int64 uptime_seconds = 10;
+}
+
+message MetricSample {
+  // Normalized metric key, e.g. "collector_cpu_percent".
+  // Phase 1 allowlist is policy-driven; unknown keys are rejected (not stored).
+  string metric_key = 1;
+
+  // Low-cardinality dimensions only (guarded server-side; max 8 keys, 64 chars each).
+  // Phase 1: {"cpu": "total"} etc. Never per-process/per-request values.
+  map<string, string> dimensions = 2;
+
+  double value = 3;
+
+  // Canonical unit string, e.g. "percent", "bytes", "seconds".
+  string unit = 4;
+
+  // Observation time (collector clock). Server validates |ts - now| <= 7 days and
+  // stores as-is for idempotency; ingestion time is recorded separately.
+  google.protobuf.Timestamp ts = 5;
+}
+
+message MetricBatch {
+  // Monotonic, per-collector, starts at 1, never reused. Primary idempotency key
+  // together with collector_id (PK of ingested_batches).
+  int64 batch_seq = 1;
+
+  // Ordered by ts within a series. Max 5,000 samples per batch (server-enforced).
+  repeated MetricSample samples = 2;
+
+  // When the batch was sealed on the collector (spool write time).
+  google.protobuf.Timestamp created_at = 3;
+}
+
+message PolicyAck {
+  int64 policy_version = 1;
+  bool applied = 2;
+  string error = 3; // empty when applied
+}
+
+message ServerMessage {
+  oneof msg {
+    ServerHello hello = 1;
+    BatchResult batch_result = 2;
+    PolicyUpdate policy_update = 3;
+    ServerPing ping = 4;
+    Disconnect disconnect = 5;
+  }
+}
+
+message ServerHello {
+  google.protobuf.Timestamp server_time = 1;
+  uint32 protocol_version = 2;
+
+  // Flow control: the collector keeps at most this many batches in flight.
+  uint32 max_inflight_batches = 3;
+
+  // Server-enforced batch size ceiling (rejection above this).
+  uint32 max_batch_samples = 4;
+
+  // Cadence for Heartbeat messages.
+  uint32 heartbeat_interval_seconds = 5;
+
+  // Current policy; present when newer than what the collector reported (or always, after enroll).
+  Policy policy = 6;
+
+  // Fleet management: if the collector's version is below this, the server may
+  // request it to upgrade out-of-band (Phase 2+; field exists so agents can warn).
+  string min_supported_agent_version = 7;
+}
+
+message BatchResult {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_OK = 1;          // durably committed; collector may advance ack watermark
+    STATUS_DUPLICATE = 2;   // already committed; treat exactly like STATUS_OK
+    STATUS_REJECTED = 3;    // permanent; collector must dead-letter the batch (no retry)
+    STATUS_RETRY = 4;       // transient server-side; collector retries with backoff
+  }
+  int64 batch_seq = 1;
+  Status status = 2;
+
+  // Machine-readable rejection reason ("validation.sample_ts_out_of_range", ...).
+  string reason = 3;
+
+  // Per-batch accounting, used by the collector for logs/self-metrics.
+  uint32 accepted_samples = 4;
+  uint32 rejected_samples = 5;
+
+  // Server ingestion time, for end-to-end lag measurement on the collector.
+  google.protobuf.Timestamp ingested_at = 6;
+}
+
+message PolicyUpdate {
+  Policy policy = 1;
+}
+
+message ServerPing {
+  google.protobuf.Timestamp server_time = 1;
+}
+
+message Disconnect {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    CODE_REVOKED = 1;          // collector status is revoked; do not reconnect
+    CODE_SERVER_SHUTDOWN = 2;  // reconnect with backoff after server_time + jitter
+    CODE_PROTOCOL_ERROR = 3;   // bug or incompatible agent; report and stop
+    CODE_SUPERSEDED = 4;       // a newer stream for this collector took over
+    CODE_MAINTENANCE = 5;      // planned; reconnect after jitter
+  }
+  Code code = 1;
+  string reason = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Policy bundle (signed JSON; shared across enroll + updates)
+// ---------------------------------------------------------------------------
+
+message Policy {
+  // Monotonic per collector, starts at 1. Applied atomically and acked.
+  int64 version = 1;
+
+  // Exact UTF-8 JSON bytes of the policy document. Signed as-is (no canonicalization):
+  // the server stores and forwards the identical bytes.
+  //
+  // Phase-1 document schema (illustrative):
+  // {
+  //   "heartbeat_interval_seconds": 30,
+  //   "report_interval_seconds": 5,
+  //   "batch_max_samples": 5000,
+  //   "spool_max_bytes": 67108864,
+  //   "metrics": [
+  //     {"key": "collector_cpu_percent", "unit": "percent", "source": "collector_cpu",
+  //      "interval_seconds": 5, "dimensions": {"cpu": "total"}}
+  //   ]
+  // }
+  bytes document = 2;
+
+  // Ed25519 signature over `document`.
+  bytes signature = 3;
+
+  // Identifies the signing key (rotation): the collector pins the public key from
+  // enrollment and accepts a key switch only inside an already-authenticated stream.
+  string signing_key_id = 4;
+
+  // Hex-encoded 64-byte salt used to derive deterministic initial batch/sequence
+  // jitter on the collector (avoids fleet-synchronized bursts).
+  string jitter_salt = 5;
+}

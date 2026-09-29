@@ -1,0 +1,18 @@
+version: v2
+
+modules:
+  - path: proto
+
+lint:
+  use:
+    - STANDARD
+  except:
+    # The collector stream is bidirectional: messages are not request/response
+    # pairs, so ClientMessage/ServerMessage are deliberately directional names.
+    # Everything else stays on the STANDARD ruleset.
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
+
+breaking:
+  use:
+    - FILE

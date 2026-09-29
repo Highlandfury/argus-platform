@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+# Build: argus-collector (edge agent). Static binary, distroless runtime, with a
+# pre-created data directory owned by the nonroot user so named volumes inherit
+# correct ownership on first use (collector identity + spool live there).
+
+FROM golang:1.27.1 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w \
+      -X github.com/argus-platform/argus/internal/platform/buildinfo.Version=${VERSION} \
+      -X github.com/argus-platform/argus/internal/platform/buildinfo.Commit=${COMMIT} \
+      -X github.com/argus-platform/argus/internal/platform/buildinfo.Date=${BUILD_DATE}" \
+    -o /out/argus-collector ./cmd/argus-collector
+RUN mkdir -p /out/var/lib/argus
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build --chown=65532:65532 /out/var/lib/argus /var/lib/argus
+COPY --from=build /out/argus-collector /argus-collector
+USER nonroot:nonroot
+ENV ARGUS_COLLECTOR_DATA_DIR=/var/lib/argus
+VOLUME ["/var/lib/argus"]
+ENTRYPOINT ["/argus-collector"]
+CMD ["run"]

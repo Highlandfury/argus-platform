@@ -1,0 +1,26 @@
+# golangci-lint configuration (v2 schema; binary pinned in docs/phase-1/VERSIONS.md).
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+  exclusions:
+    generated: lax
+    paths:
+      - gen
+      - web
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

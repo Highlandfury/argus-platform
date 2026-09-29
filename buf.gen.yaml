@@ -1,0 +1,13 @@
+version: v2
+
+# Plugin binaries are installed at pinned versions by scripts/install-tools.ps1
+# (protoc-gen-go v1.36.12, protoc-gen-go-grpc pinned alongside grpc-go v1.84.0).
+# Managed mode is intentionally disabled: the proto files carry explicit go_package
+# options that must not be rewritten.
+plugins:
+  - local: protoc-gen-go
+    out: gen/go
+    opt: paths=source_relative
+  - local: protoc-gen-go-grpc
+    out: gen/go
+    opt: paths=source_relative
