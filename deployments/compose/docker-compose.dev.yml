@@ -60,6 +60,9 @@ services:
       ARGUS_SERVER_DB_DSN: "postgres://argus_app_login:devpass@db:5432/argus?sslmode=disable"
       ARGUS_SERVER_AUTH_DB_DSN: "postgres://argus_auth_login:devpass@db:5432/argus?sslmode=disable"
       ARGUS_DEV_ADMIN_PASSWORD: "dev-admin-changeme"
+      ARGUS_DEV_ENROLLMENT_TOKEN_OUT: /var/lib/argus/ca/enroll-token
+    volumes:
+      - ca-data:/var/lib/argus/ca
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -90,6 +93,8 @@ services:
       - "8443:8443"
       - "8444:8444"
       - "9090:9090"
+    volumes:
+      - ca-data:/var/lib/argus/ca
     depends_on:
       db:
         condition: service_healthy
@@ -131,11 +136,15 @@ services:
       ARGUS_LOG_LEVEL: info
       ARGUS_COLLECTOR_SERVER: "https://server:8444"
       ARGUS_COLLECTOR_STREAM: "server:8443"
+      ARGUS_COLLECTOR_CA_FILE: /var/lib/argus/ca-ro/root.pem
+      ARGUS_ENROLL_TOKEN_FILE: /var/lib/argus/ca-ro/enroll-token
+      ARGUS_COLLECTOR_NAME: dev-collector
       ARGUS_COLLECTOR_DATA_DIR: /var/lib/argus
       ARGUS_COLLECTOR_SPOOL_MAX_BYTES: "67108864"
       ARGUS_COLLECTOR_FSYNC_INTERVAL_MS: "1000"
     volumes:
       - collector-data:/var/lib/argus
+      - ca-data:/var/lib/argus/ca-ro:ro
     depends_on:
       server:
         condition: service_healthy
@@ -143,3 +152,4 @@ services:
 volumes:
   db-data:
   collector-data:
+  ca-data:

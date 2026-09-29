@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/config"
 	"github.com/argus-platform/argus/internal/platform/database"
@@ -97,5 +100,30 @@ func cmdSeedDev(args []string) int {
 
 	fmt.Printf("seed-dev: org=%s site=%s admin=%s (created: org=%t site=%t user=%t)\n",
 		res.OrgID, res.SiteID, res.Email, res.CreatedOrg, res.CreatedSite, res.CreatedUser)
+
+	// M3: provision a development enrollment token for the seeded site. The raw
+	// token is written to the requested path (shared CA volume in compose) and
+	// never printed.
+	if outPath := os.Getenv("ARGUS_DEV_ENROLLMENT_TOKEN_OUT"); outPath != "" {
+		orgID, orgErr := uuid.Parse(res.OrgID)
+		siteID, siteErr := uuid.Parse(res.SiteID)
+		userID, userErr := uuid.Parse(res.UserID)
+		if orgErr != nil || siteErr != nil || userErr != nil {
+			fmt.Fprintln(os.Stderr, "warning: cannot provision enrollment token:", orgErr, siteErr, userErr)
+			return 0
+		}
+		svc := collectors.New(appPool, authPool, nil, nil)
+		raw, _, expiresAt, err := svc.CreateEnrollmentToken(ctx, orgID, siteID, 24*time.Hour, &userID)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "warning: enrollment token:", err)
+			return 0
+		}
+		if err := os.WriteFile(outPath, []byte(raw+"\n"), 0o600); err != nil { //nolint:gosec // operator-configured dev path
+			fmt.Fprintln(os.Stderr, "warning: write enrollment token:", err)
+			return 0
+		}
+		fmt.Printf("seed-dev: wrote development enrollment token to %s (site %s, expires %s)\n",
+			outPath, res.SiteID, expiresAt.UTC().Format(time.RFC3339))
+	}
 	return 0
 }

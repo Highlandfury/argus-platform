@@ -5,19 +5,24 @@
 //   - app pool  (argus_app_login → argus_app): RLS-enforced; every tenant query
 //     must run inside WithTenant.
 //   - auth pool (argus_auth_login → argus_auth): pre-authentication lookups only
-//     (organizations/users/sessions); no grants on collector or metric tables.
+//     (organizations/users/sessions + enrollment-token SELECT + the fixed
+//     certificate-resolver function); no grants on collector rows or metrics.
 package database
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"strings"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres" // database driver
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lib/pq"
 
 	"github.com/argus-platform/argus/migrations"
 )
@@ -44,7 +49,28 @@ func CheckSchema(ctx context.Context, pool *pgxpool.Pool) error {
 
 // MigrateUp applies all pending migrations. Already-current schema is not an error.
 // Returns the schema version in effect afterwards.
+//
+// Fresh-database resilience: during first-boot initialization the PostgreSQL
+// image starts a temporary server, restarts it after tuning, and only then
+// settles. Connection-class failures during that window (57P03 "the database
+// system is starting up/shutting down", connection resets) are retried for up
+// to ~90 seconds so short-lived migration jobs are not flaky on fresh volumes.
 func MigrateUp(dsn string) (uint, error) {
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		version, err := migrateUpOnce(dsn)
+		if err == nil {
+			return version, nil
+		}
+		if !isRetryableMigrateErr(err) || time.Now().After(deadline) {
+			return version, err
+		}
+		slog.Debug("migration retry after connection-class failure", "error", err, "component", "migrate")
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func migrateUpOnce(dsn string) (uint, error) {
 	m, err := newMigrator(dsn)
 	if err != nil {
 		return 0, err
@@ -63,6 +89,24 @@ func MigrateUp(dsn string) (uint, error) {
 		return version, errors.New("migration state is dirty; manual intervention required")
 	}
 	return version, nil
+}
+
+func isRetryableMigrateErr(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		switch pqErr.Code {
+		case "57P03", "08006", "08001", "08004": // cannot_connect_now, connection failures
+			return true
+		}
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "the database system is")
 }
 
 // MigrateDown steps down by n migrations (n > 0). Stepping below zero is treated

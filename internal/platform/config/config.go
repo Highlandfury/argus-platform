@@ -88,12 +88,14 @@ func LoadServer() (Server, error) {
 // Collector holds argus-collector configuration.
 type Collector struct {
 	LogLevel        string
-	EnrollURL       string // e.g. https://server:8444 (enrollment, M3)
-	StreamAddr      string // e.g. server:8443 (mTLS stream, M3)
+	EnrollURL       string // e.g. https://server:8444 (enrollment)
+	StreamAddr      string // e.g. server:8443 (mTLS stream)
 	DataDir         string
+	CAFile          string // pinned server CA (operator-distributed)
+	Name            string
 	SpoolMaxBytes   int64
 	FsyncIntervalMS int
-	EnrollTokenFile string // read once when enrolling (M3); never persisted
+	EnrollTokenFile string // read once when enrolling; never persisted
 }
 
 // LoadCollector reads collector configuration from the environment.
@@ -103,6 +105,8 @@ func LoadCollector() (Collector, error) {
 		EnrollURL:       env("ARGUS_COLLECTOR_SERVER", ""),
 		StreamAddr:      env("ARGUS_COLLECTOR_STREAM", ""),
 		DataDir:         env("ARGUS_COLLECTOR_DATA_DIR", defaultCollectorDataDir()),
+		CAFile:          env("ARGUS_COLLECTOR_CA_FILE", ""),
+		Name:            env("ARGUS_COLLECTOR_NAME", defaultCollectorName()),
 		SpoolMaxBytes:   envInt64("ARGUS_COLLECTOR_SPOOL_MAX_BYTES", 64<<20),
 		FsyncIntervalMS: int(envInt64("ARGUS_COLLECTOR_FSYNC_INTERVAL_MS", 1000)),
 		EnrollTokenFile: env("ARGUS_ENROLL_TOKEN_FILE", ""),
@@ -124,6 +128,9 @@ func LoadCollector() (Collector, error) {
 	if u.Scheme != "https" {
 		return cfg, fmt.Errorf("ARGUS_COLLECTOR_SERVER: scheme must be https, got %q", u.Scheme)
 	}
+	if strings.TrimSpace(cfg.CAFile) == "" {
+		return cfg, errors.New("ARGUS_COLLECTOR_CA_FILE must be set (pinned server CA)")
+	}
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		return cfg, errors.New("ARGUS_COLLECTOR_DATA_DIR must not be empty")
 	}
@@ -134,6 +141,14 @@ func LoadCollector() (Collector, error) {
 		return cfg, fmt.Errorf("ARGUS_COLLECTOR_FSYNC_INTERVAL_MS must be within [0,10000], got %d", cfg.FsyncIntervalMS)
 	}
 	return cfg, nil
+}
+
+func defaultCollectorName() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		return "collector"
+	}
+	return host
 }
 
 func defaultCollectorDataDir() string {
