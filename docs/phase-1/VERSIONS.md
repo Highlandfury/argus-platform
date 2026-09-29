@@ -11,7 +11,7 @@
 | Go | **go1.27.1** | `go.dev/dl` JSON (stable) | Local dev copy: `.tools\go` (user-local). `go.mod` uses `go 1.27`, `toolchain go1.27.1`. |
 | Node.js | **24.21.0 (LTS)** | endoflife.date API | Node 26 becomes LTS 2026-10-28; deliberately not adopted before then. |
 | git | ≥ 2.40 | host | |
-| Docker Engine / Compose | ≥ 27 / Compose v2 | requirement | **Pending on dev host** (user action: Docker Desktop). CI uses ubuntu-latest runners (Docker 27+). |
+| Docker Engine / Compose | ≥ 27 / Compose v2 | requirement | Dev host installed & verified: Engine 29.8.1 / Compose v5.5.1 (2026-09-29). CI uses ubuntu-latest runners (Docker 27+). |
 
 ## Go module pins (direct)
 
@@ -19,12 +19,14 @@
 |---|---|---|
 | github.com/prometheus/client_golang | v1.24.1 | GitHub release |
 | github.com/prometheus/client_model | v0.6.2 (indirect, resolved by tidy) | Go module proxy |
-| github.com/google/uuid | v1.6.0 | GitHub release — **added in M1** |
-| github.com/jackc/pgx/v5 | v5.11.0 | GitHub release — **added in M1** |
+| github.com/google/uuid | v1.6.0 | GitHub release — added M1b (direct) |
+| github.com/jackc/pgx/v5 | v5.11.0 | GitHub release — added M1b (direct pin verified) |
+| github.com/golang-migrate/migrate/v4 | v4.20.1 | GitHub release — added M1a |
+| github.com/testcontainers/testcontainers-go | v0.44.0 | GitHub release — added M1c (integration suite) |
 | google.golang.org/grpc | v1.84.0 | GitHub release — **added in M3** |
 | google.golang.org/protobuf | v1.36.12 (codegen pin; tidy currently resolves v1.36.11 as indirect runtime lib) | GitHub release / proxy | Codegen and runtime pins may diverge; record both when they change. |
 | github.com/stretchr/testify | (indirect via client_golang) | tidy | Direct use begins when needed; add the exact tag then. |
-| golang.org/x/crypto | v0.57.0 | repo tags — **added in M2 (Argon2id)** |
+| golang.org/x/crypto | v0.57.0 | repo tags — plan: direct pin in M1e (Argon2id); currently resolved v0.54.0 as an indirect dependency of testcontainers |
 | golang.org/x/time | v0.16.0 | repo tags — **added in M2 (rate limiting)** |
 | golang.org/x/sync | v0.23.0 | repo tags — **added when errgroup first used** |
 | github.com/google/go-cmp | v0.7.0 (indirect) | tidy |

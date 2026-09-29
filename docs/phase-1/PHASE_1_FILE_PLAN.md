@@ -41,6 +41,7 @@ Companion to `PHASE_1_SPEC.md`. Every file below is created in the listed milest
 | `migrations/000003_metrics.up.sql/.down.sql` | create | `metric_series` (+partial unique index), `metric_samples` hypertable (`create_hypertable` 1-day chunks), index `(org_id, ts DESC)` | hypertable + ON CONFLICT smoke (in `compat-matrix`) |
 | `migrations/000004_ingestion.up.sql/.down.sql` | create | `ingested_batches` PK + indexes | duplicate-claim test |
 | `migrations/000005_rls.up.sql/.down.sql` | create | roles `argus_app` + `argus_auth` (pre-auth, BYPASSRLS, 3-table grants), grants + default privileges, enable+force RLS, all policies, `app.current_org` contract comment | RLS suite (T8 core); S-07 variant (auth-role restrictions, chunk access denied) |
+| `migrations/000006_chunk_access_guard.up.sql/.down.sql` | create (M1 finding) | Chunk-level RLS: `SECURITY DEFINER` sweep function + 1-minute TimescaleDB backstop job + migration backfill; M4 ingest calls the sweep pre-commit (zero window). Event trigger and schema-revocation approaches were implemented, tested, and rejected (documented in the migration header). | `TestChunkAccessIsRLSProtected` + all isolation tests |
 | `internal/platform/database/pool.go` | create | pgx pool (app role); health ping | integration test |
 | `internal/platform/database/tenant.go` | create | `WithTenant(ctx, orgID, fn)` — BEGIN, `SET LOCAL`, commit/rollback; error if called without tx | unit + leak test |
 | `internal/platform/database/migrate.go` | create | golang-migrate runner (owner DSN) invoked by `argus-server migrate` | up/down/up job |
@@ -99,7 +100,7 @@ Companion to `PHASE_1_SPEC.md`. Every file below is created in the listed milest
 
 | File | Action | Purpose | Tests / verification |
 |---|---|---|---|
-| `internal/modules/ingest/service.go` | create | Pipeline stages per SPEC §12.1; tx-per-batch; ack-after-commit | T4, T5; S-06 |
+| `internal/modules/ingest/service.go` | create | Pipeline stages per SPEC §12.1; tx-per-batch; ack-after-commit; calls `public.argus_ensure_chunk_rls()` pre-commit (chunk-RLS zero-window requirement from migration 000006) | T4, T5; S-06 |
 | `internal/modules/ingest/validate.go` | create | Bounds: ts ±7d, dims ≤8/64ch, batch ≤5000, value finite, policy allowlist | unit + S-08 |
 | `internal/modules/ingest/stream_service.go` | create | Wire stream handler → pipeline; BatchResult emission | integration |
 | `internal/modules/metrics/series.go` | create | dim canonicalization + FNV-1a dim_hash; series resolve/create (partial-unique ON CONFLICT + SELECT map); quota 1000/collector | unit + integration |
