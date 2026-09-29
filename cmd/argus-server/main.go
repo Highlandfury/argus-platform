@@ -13,7 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/argus-platform/argus/internal/api"
+	"github.com/argus-platform/argus/internal/modules/identity"
+	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
 	"github.com/argus-platform/argus/internal/platform/database"
@@ -69,13 +73,18 @@ func cmdServe(args []string) int {
 
 	// Pools + readiness (SPEC §17): readyz reflects DB reachability, auth-role
 	// reachability, and schema state.
-	var readiness []api.Check
+	var (
+		readiness []api.Check
+		appPool   *pgxpool.Pool
+		authPool  *pgxpool.Pool
+	)
 	if cfg.DBDSN == "" {
 		readiness = append(readiness, api.Check{Name: "database", Fn: func(context.Context) error {
 			return errors.New("ARGUS_SERVER_DB_DSN is not configured")
 		}})
 	} else {
-		appPool, poolErr := database.NewPool(context.Background(), cfg.DBDSN, "argus-server", database.DefaultPoolConfig())
+		var poolErr error
+		appPool, poolErr = database.NewPool(context.Background(), cfg.DBDSN, "argus-server", database.DefaultPoolConfig())
 		if poolErr != nil {
 			fmt.Fprintln(os.Stderr, "database:", poolErr)
 			return 1
@@ -90,7 +99,8 @@ func cmdServe(args []string) int {
 			return errors.New("ARGUS_SERVER_AUTH_DB_DSN is not configured")
 		}})
 	} else {
-		authPool, poolErr := database.NewPool(context.Background(), cfg.AuthDBDSN, "argus-server-auth", database.DefaultPoolConfig())
+		var poolErr error
+		authPool, poolErr = database.NewPool(context.Background(), cfg.AuthDBDSN, "argus-server-auth", database.DefaultPoolConfig())
 		if poolErr != nil {
 			fmt.Fprintln(os.Stderr, "auth database:", poolErr)
 			return 1
@@ -101,12 +111,30 @@ func cmdServe(args []string) int {
 		}})
 	}
 
+	// Domain services (M2). Without both pools the API runs degraded: routes
+	// answer 503 instead of failing at startup.
+	var (
+		tenancySvc  *tenancy.Service
+		identitySvc *identity.Service
+	)
+	if appPool != nil && authPool != nil {
+		tenancySvc = tenancy.New(appPool, authPool)
+		identitySvc, err = identity.New(appPool, authPool, tenancySvc)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "identity:", err)
+			return 1
+		}
+	}
+
 	opts := api.Options{
-		Logger:    logger,
-		Telemetry: tel,
-		Version:   buildinfo.Version,
-		Commit:    buildinfo.Commit,
-		Readiness: readiness,
+		Logger:        logger,
+		Telemetry:     tel,
+		Version:       buildinfo.Version,
+		Commit:        buildinfo.Commit,
+		Readiness:     readiness,
+		SecureCookies: cfg.Env == config.EnvProd,
+		Identity:      identitySvc,
+		Tenancy:       tenancySvc,
 	}
 
 	httpSrv := &http.Server{

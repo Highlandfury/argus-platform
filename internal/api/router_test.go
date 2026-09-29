@@ -78,3 +78,58 @@ func TestOpsRouterServesMetrics(t *testing.T) {
 		t.Fatal("metrics body missing argus_build_info")
 	}
 }
+
+func TestProtectedRoutesFailClosedWithoutServices(t *testing.T) {
+	// Without configured services the middleware fails closed (503) rather
+	// than allowing access; the real 401/403 paths are integration-tested.
+	router := NewRouter(testOptions())
+	for _, tc := range []struct {
+		method, path string
+	}{
+		{http.MethodGet, "/v1/me"},
+		{http.MethodGet, "/v1/sites"},
+		{http.MethodPost, "/v1/auth/logout"},
+	} {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s %s: status %d, want 503 (fail closed)", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+func TestLoginWithoutServiceReturns503(t *testing.T) {
+	router := NewRouter(testOptions())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/login",
+		strings.NewReader(`{"org_slug":"dev","email":"a@b.c","password":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "service.unavailable") {
+		t.Fatalf("unexpected problem body: %s", rec.Body.String())
+	}
+}
+
+func TestRouteRegistryShape(t *testing.T) {
+	routes := Routes()
+	if len(routes) == 0 {
+		t.Fatal("route registry is empty")
+	}
+	seen := map[string]bool{}
+	for _, rt := range routes {
+		key := rt.Method + " " + rt.Path
+		if seen[key] {
+			t.Fatalf("duplicate route registration: %s", key)
+		}
+		seen[key] = true
+		if rt.CSRF && !rt.Protected {
+			t.Fatalf("CSRF route must be protected: %s", key)
+		}
+	}
+	if routes[0].Method != "POST" || routes[0].Path != "/v1/auth/login" {
+		t.Fatalf("unexpected first route: %+v", routes[0])
+	}
+}

@@ -88,13 +88,17 @@ func upsertAdminUser(ctx ctxType, tx pgx.Tx, orgID, email, passwordHash string) 
 	return outID, inserted, err
 }
 
-func listSites(ctx ctxType, tx pgx.Tx) ([]Site, error) {
-	rows, err := tx.Query(ctx, `SELECT id, name FROM sites ORDER BY name`)
+func listSitesPage(ctx ctxType, tx pgx.Tx, orgID uuid.UUID, after *uuid.UUID, limit int) ([]Site, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, name FROM sites
+		WHERE org_id = $1 AND ($2::uuid IS NULL OR id > $2)
+		ORDER BY id
+		LIMIT $3`, orgID, after, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	sites := make([]Site, 0, 4)
+	sites := make([]Site, 0, limit)
 	for rows.Next() {
 		var s Site
 		if err := rows.Scan(&s.ID, &s.Name); err != nil {
