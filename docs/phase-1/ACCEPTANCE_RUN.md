@@ -239,3 +239,22 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 *Does not provide:* SNMP/ICMP polling, device discovery, topology, Wi-Fi monitoring, floor-plan heatmaps, network diagnostics/RCA, device configuration management, automation, HA/DR/PITR/zero-downtime upgrades, production scalability claims.
 
 **Performance baseline preserved exactly as measured (M4c):** M4a smoke 3,919/4,000 samples/s; L-01 4,244/20,000; L-02 14,934/20,000 (200 streams, zero errors/duplicates/reconnects); primary observed bottleneck: **PostgreSQL write path**; Phase-1 has had no Phase-2 extraction/optimization work. Observed test results — not product capacity guarantees.
+
+---
+
+# ACCEPTANCE_RUN — M6a (Load Report, k6 L-03)
+
+**Date:** 2026-09-29 · **Commit:** M6a (this commit)
+
+| Requirement | Evidence | Result |
+|---|---|---|
+| L-01 historical baseline | `LOAD_TEST_REPORT.md` §L-01 (4,244/20,000; DB CPU 98–121%; 435 ms/batch) — preserved verbatim from M4c | **preserved** |
+| L-02 historical baseline | `LOAD_TEST_REPORT.md` §L-02 (14,934/20,000; 200 streams; 0 errors/reconnects) — preserved verbatim from M4c | **preserved** |
+| L-03 k6 API leg | `tests/load/k6/api.js` run with k6 v2.3.0: 50 VUs / 5 m / 18,875 requests / 0.00% errors / checks 100% — **latency thresholds FAILED** (p95 1,860 ms, p99 3,890 ms vs 300 ms/1 s) | **FAIL (honest)** |
+| L-03 classification | Idle 22–34 ms → 50 VUs 785–803 ms avg on **both routes**, DB query time 11 ms avg / 50 ms p95, CPU low at rest → server-side concurrency/request-path (or Docker Desktop networking), **not SQL**; recorded for Phase-2 profiling; no production code changed | recorded |
+| Load report | `docs/phase-1/LOAD_TEST_REPORT.md` (environment, methodology, all four results, bottleneck, limitations, interpretation; no fabricated percentiles) | **PASS** |
+| Load instructions | `tests/load/README.md` (prerequisites, stack start, setup, exact L-03 command, PASS/FAIL interpretation, dev-only cleanup) | **PASS** |
+| Security at load | Non-production credentials only; no secrets in Git; session auth/tenant isolation/rate limits left intact (login once in setup); the k6 jar bug fixed by explicit cookie, not by bypassing auth | **PASS** |
+| Post-L-03 regression | build/vet/full `go test ./...` (18 pkgs) · lint 0 · buf lint/generate/drift clean · Playwright 6/6 on the same stack | **PASS** |
+
+**L-03 harness lessons recorded:** (1) the k6 VU cookie jar delivered the `setup()` session cookie only for each VU's first request → 1.5 M fast 401s; the script now sends the session cookie explicitly per request (the 401 run is documented in the report as a harness lesson, not as an L-03 result). (2) The canonical "24 h @ 10 s" workload violates the normative 2000-point cap (422); L-03 issues 24 h @ 1 m, consistent with the recorded AC-08 interpretation.
