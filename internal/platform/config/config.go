@@ -34,28 +34,33 @@ type Server struct {
 	GRPCAddr   string // collector stream (mTLS)
 	EnrollAddr string // enrollment (token-gated TLS)
 	GRPCSANs   []string
-	DBDSN      string // runtime role (argus_app_login), RLS-enforced
-	AuthDBDSN  string // auth role (argus_auth_login), pre-auth lookups only
-	MigrateDSN string // owner role (argus_owner); used only by `migrate`
-	CADir      string // internal CA material; required from M3
-	DevSeed    bool
+	// EnrollRatePerMin relaxes the enrollment limiter for load environments
+	// (default 10 attempts/min/IP per SPEC §8.1; the S-01 test still validates
+	// the default). Recorded whenever non-default.
+	EnrollRatePerMin int
+	DBDSN            string // runtime role (argus_app_login), RLS-enforced
+	AuthDBDSN        string // auth role (argus_auth_login), pre-auth lookups only
+	MigrateDSN       string // owner role (argus_owner); used only by `migrate`
+	CADir            string // internal CA material; required from M3
+	DevSeed          bool
 }
 
 // LoadServer reads server configuration from the environment.
 func LoadServer() (Server, error) {
 	cfg := Server{
-		Env:        env("ARGUS_ENV", EnvDev),
-		LogLevel:   env("ARGUS_LOG_LEVEL", "info"),
-		HTTPAddr:   env("ARGUS_SERVER_HTTP_ADDR", ":8080"),
-		OpsAddr:    env("ARGUS_SERVER_OPS_ADDR", ":9090"),
-		GRPCAddr:   env("ARGUS_SERVER_GRPC_ADDR", ":8443"),
-		EnrollAddr: env("ARGUS_SERVER_ENROLL_ADDR", ":8444"),
-		GRPCSANs:   splitCSV(env("ARGUS_SERVER_GRPC_SANS", "localhost,server,127.0.0.1")),
-		DBDSN:      env("ARGUS_SERVER_DB_DSN", ""),
-		AuthDBDSN:  env("ARGUS_SERVER_AUTH_DB_DSN", ""),
-		MigrateDSN: env("ARGUS_SERVER_MIGRATE_DSN", ""),
-		CADir:      env("ARGUS_SERVER_CA_DIR", "./.dev/ca"),
-		DevSeed:    envBool("ARGUS_DEV_SEED", false),
+		Env:              env("ARGUS_ENV", EnvDev),
+		LogLevel:         env("ARGUS_LOG_LEVEL", "info"),
+		HTTPAddr:         env("ARGUS_SERVER_HTTP_ADDR", ":8080"),
+		OpsAddr:          env("ARGUS_SERVER_OPS_ADDR", ":9090"),
+		GRPCAddr:         env("ARGUS_SERVER_GRPC_ADDR", ":8443"),
+		EnrollAddr:       env("ARGUS_SERVER_ENROLL_ADDR", ":8444"),
+		GRPCSANs:         splitCSV(env("ARGUS_SERVER_GRPC_SANS", "localhost,server,127.0.0.1")),
+		EnrollRatePerMin: int(envInt64("ARGUS_SERVER_ENROLL_RATE_PER_MIN", 10)),
+		DBDSN:            env("ARGUS_SERVER_DB_DSN", ""),
+		AuthDBDSN:        env("ARGUS_SERVER_AUTH_DB_DSN", ""),
+		MigrateDSN:       env("ARGUS_SERVER_MIGRATE_DSN", ""),
+		CADir:            env("ARGUS_SERVER_CA_DIR", "./.dev/ca"),
+		DevSeed:          envBool("ARGUS_DEV_SEED", false),
 	}
 
 	if cfg.Env != EnvDev && cfg.Env != EnvProd {

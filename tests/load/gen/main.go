@@ -157,6 +157,27 @@ func run() int {
 			OS:           "loadgen",
 			Timeout:      cfg.enrollTimeout,
 		})
+		// The per-IP enrollment limiter may throttle large fleets; back off and
+		// retry rather than failing the run (the limiter itself is by design).
+		for attempt := 0; err != nil && strings.Contains(err.Error(), "ResourceExhausted") && attempt < 240; attempt++ {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(3 * time.Second):
+			}
+			enrollCtx2, cancel2 := context.WithTimeout(ctx, cfg.enrollTimeout)
+			res, err = enrollclient.Enroll(enrollCtx2, enrollclient.Config{
+				EnrollURL:    enrollURL(cfg.api),
+				CAFile:       cfg.caFile,
+				Token:        token,
+				Name:         fmt.Sprintf("%s-%04d", cfg.namePrefix, i),
+				AgentVersion: "loadgen",
+				Hostname:     "loadgen",
+				OS:           "loadgen",
+				Timeout:      cfg.enrollTimeout,
+			})
+			cancel2()
+		}
 		if err != nil {
 			return fmt.Errorf("enroll %d: %w", i, err)
 		}

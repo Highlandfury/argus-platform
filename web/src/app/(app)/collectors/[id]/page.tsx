@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { notFound } from "next/navigation";
 
 import CollectorActions from "@/components/CollectorActions";
+import MetricChart from "@/features/collectors/MetricChart";
 import { serverFetch } from "@/lib/api";
 
 interface CollectorDetail {
@@ -27,6 +28,15 @@ interface MeResponse {
 
 function shortTime(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "—";
+}
+
+function spoolSummary(stats: Record<string, unknown> | null): string {
+  if (!stats) return "—";
+  const records = stats["spool_records"] ?? 0;
+  const bytes = stats["spool_bytes"] ?? 0;
+  const dropped = stats["dropped_records_total"] ?? 0;
+  const corrupt = stats["corrupt_records_total"] ?? 0;
+  return `${records} records · ${bytes} bytes · dropped ${dropped} · corrupt ${corrupt}`;
 }
 
 export default async function CollectorDetailPage({
@@ -105,6 +115,12 @@ export default async function CollectorDetailPage({
               </td>
             </tr>
             <tr>
+              <th>Spool</th>
+              <td data-testid="collector-spool">
+                {spoolSummary(collector.reported_stats)}
+              </td>
+            </tr>
+            <tr>
               <th>Certificate expires</th>
               <td>{shortTime(collector.certificate.not_after)}</td>
             </tr>
@@ -128,6 +144,10 @@ export default async function CollectorDetailPage({
           <CollectorActions collectorID={collector.id} status={collector.status} />
         </div>
       )}
+      <div className="panel" style={{ marginTop: 16 }}>
+        <h2 style={{ marginTop: 0 }}>Metrics</h2>
+        <MetricChart collectorID={collector.id} />
+      </div>
     </section>
   );
 }

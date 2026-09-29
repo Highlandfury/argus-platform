@@ -25,6 +25,7 @@ import (
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/ingest"
+	"github.com/argus-platform/argus/internal/modules/metrics"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
@@ -36,6 +37,17 @@ import (
 
 func main() {
 	os.Exit(run(os.Args[1:]))
+}
+
+// enrollLimiter builds the enrollment token bucket: burst 10, then one token
+// per 60s/rate (default 10/min/IP per SPEC §8.1). Load environments may raise
+// the sustained rate explicitly via ARGUS_SERVER_ENROLL_RATE_PER_MIN; every
+// load report states when that override was active.
+func enrollLimiter(perMin int) *ratelimit.Limiter {
+	if perMin <= 0 {
+		perMin = 10
+	}
+	return ratelimit.New(10, time.Minute/time.Duration(perMin))
 }
 
 func run(args []string) int {
@@ -144,6 +156,7 @@ func cmdServe(args []string) int {
 	var (
 		collectorsSvc  *collectors.Service
 		sessions       *collectors.SessionRegistry
+		metricsQuery   *metrics.QueryService
 		enrollGRPC     *grpc.Server
 		streamGRPC     *grpc.Server
 		enrollListener net.Listener
@@ -152,6 +165,7 @@ func cmdServe(args []string) int {
 	if appPool != nil && authPool != nil {
 		collectorsSvc = collectors.New(appPool, authPool, ca, tel)
 		sessions = collectors.NewSessionRegistry()
+		metricsQuery = metrics.NewQueryService(appPool, collectorsSvc)
 
 		enrollGRPC = grpc.NewServer(
 			grpc.Creds(credentials.NewTLS(&tls.Config{
@@ -161,7 +175,7 @@ func cmdServe(args []string) int {
 			grpc.MaxRecvMsgSize(1<<20),
 		)
 		collectorv1.RegisterEnrollmentServiceServer(enrollGRPC,
-			collectors.NewEnrollmentServer(collectorsSvc, ratelimit.New(10, 6*time.Second), logger))
+			collectors.NewEnrollmentServer(collectorsSvc, enrollLimiter(cfg.EnrollRatePerMin), logger))
 
 		streamGRPC = grpc.NewServer(
 			grpc.Creds(credentials.NewTLS(&tls.Config{
@@ -200,6 +214,7 @@ func cmdServe(args []string) int {
 		Tenancy:           tenancySvc,
 		Collectors:        collectorsSvc,
 		CollectorSessions: sessions,
+		MetricsQuery:      metricsQuery,
 	}
 
 	httpSrv := &http.Server{

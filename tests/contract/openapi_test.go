@@ -19,9 +19,7 @@ type routeKey struct{ method, path string }
 // pending lists endpoints that are specified but scheduled for later
 // milestones. Every entry must still exist in the spec, so the allowlist
 // cannot rot silently.
-var pending = map[string]string{
-	"GET /v1/collectors/{id}/metrics": "M4 metrics query",
-}
+var pending = map[string]string{}
 
 func TestOpenAPISpecMatchesRoutes(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "openapi", "argus.v1.yaml"))

@@ -216,6 +216,16 @@ paths:
         '400': { $ref: '#/components/responses/Validation' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: Query would exceed the 2000-point limit (query.points_exceeded)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '504':
+          description: Query timeout
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /v1/healthz:
     get:
@@ -440,13 +450,25 @@ components:
                 last_sample_at: { type: [string, 'null'], format: date-time }
     MetricSeries:
       type: object
-      required: [metric, unit, resolution, from, to, points, meta]
+      required: [metric, unit, resolution, from, to, points, meta, status]
       properties:
         metric: { type: string }
         unit: { type: string }
         resolution: { type: string, enum: [raw, 10s, 1m, 5m] }
         from: { type: string, format: date-time }
         to: { type: string, format: date-time }
+        status:
+          type: string
+          enum: [no_data, fresh, stale]
+          description: "Freshness of the latest sample (M4c addition): fresh when age <= max(3x policy interval, 30s)."
+        latest:
+          type: object
+          description: Most recent stored sample; omitted when the series has no data.
+          properties:
+            ts: { type: string, format: date-time }
+            value: { type: number }
+            age_seconds: { type: integer }
+            status: { type: string, enum: [fresh, stale] }
         points:
           type: array
           items:
@@ -462,6 +484,9 @@ components:
             returned_points: { type: integer }
             gaps: { type: integer }
             truncated: { type: boolean }
+            sample_count:
+              type: integer
+              description: Raw samples matched in range (M4c addition).
 
 security:
   - sessionCookie: []

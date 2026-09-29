@@ -14,6 +14,7 @@ import (
 
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/identity"
+	"github.com/argus-platform/argus/internal/modules/metrics"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/httpx"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
@@ -38,6 +39,7 @@ type Options struct {
 	Tenancy           *tenancy.Service
 	Collectors        *collectors.Service
 	CollectorSessions *collectors.SessionRegistry
+	MetricsQuery      *metrics.QueryService
 }
 
 type handlers struct {
@@ -46,6 +48,7 @@ type handlers struct {
 	identityHTTP   *identity.HTTP
 	tenancyHTTP    *tenancy.HTTP
 	collectorsHTTP *collectors.HTTP
+	metricsHTTP    *metrics.HTTP
 }
 
 func newHandlers(o Options) *handlers {
@@ -75,6 +78,9 @@ func newHandlers(o Options) *handlers {
 			Registry:    o.CollectorSessions,
 			Idempotency: httpx.NewIdempotencyCache(24*time.Hour, 4096),
 		}
+	}
+	if o.MetricsQuery != nil {
+		h.metricsHTTP = &metrics.HTTP{Svc: o.MetricsQuery}
 	}
 	return h
 }
@@ -189,6 +195,14 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 				return
 			}
 			h.collectorsHTTP.ResyncPolicy(w, r)
+		})
+	case "/v1/collectors/{id}/metrics":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.metricsHTTP == nil {
+				serviceUnavailable(w, r, "metrics query service not configured")
+				return
+			}
+			h.metricsHTTP.QueryCollectorMetric(w, r)
 		})
 	case "/v1/healthz":
 		return http.HandlerFunc(h.health)

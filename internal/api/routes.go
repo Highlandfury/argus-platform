@@ -20,6 +20,7 @@ var routeTable = []Route{
 	{Method: "GET", Path: "/v1/collectors/{id}", Protected: true},
 	{Method: "POST", Path: "/v1/collectors/{id}/revoke", Protected: true, CSRF: true},
 	{Method: "POST", Path: "/v1/collectors/{id}/policy:resync", Protected: true, CSRF: true},
+	{Method: "GET", Path: "/v1/collectors/{id}/metrics", Protected: true},
 	{Method: "GET", Path: "/v1/healthz"},
 	{Method: "GET", Path: "/v1/readyz"},
 }

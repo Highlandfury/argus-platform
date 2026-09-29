@@ -283,6 +283,17 @@ func (s *Service) GetCollector(ctx context.Context, orgID, id uuid.UUID) (Collec
 	return row, err
 }
 
+// CollectorExists reports whether the collector exists in the org (RLS-scoped).
+// Used by the metrics query path for 404-without-oracle semantics.
+func (s *Service) CollectorExists(ctx context.Context, orgID, collectorID uuid.UUID) (bool, error) {
+	var exists bool
+	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM collectors WHERE id = $1)`, collectorID).Scan(&exists)
+	})
+	return exists, err
+}
+
 // RevokeCollector marks a collector and its certificates revoked. changed=false
 // when it was already revoked (idempotent).
 func (s *Service) RevokeCollector(ctx context.Context, orgID, id uuid.UUID) (bool, error) {

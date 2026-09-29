@@ -1,0 +1,16 @@
+# M4c load-test override (NOT the default dev configuration).
+#
+# The default per-IP enrollment limiter (10/min per SPEC §8.1) is validated by
+# S-01 and stays the default. The L-02 fleet harness enrolls 200 collectors
+# from one host, which the default limiter would stretch to ~19 minutes; this
+# override raises the sustained rate for the load run only. Every load report
+# states that this override was active.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml -f docker-compose.load.yml up -d server
+# Restore:
+#   docker compose -f docker-compose.dev.yml up -d server
+services:
+  server:
+    environment:
+      ARGUS_SERVER_ENROLL_RATE_PER_MIN: "1200"
