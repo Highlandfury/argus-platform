@@ -733,7 +733,7 @@ main branch: same + publish images to GHCR (tag: git SHA), nightly load test (L-
 
 # 17. LOCAL DEVELOPMENT
 
-**One command:** `make dev` (= `docker compose -f deployments/compose/docker-compose.dev.yml up --build --wait`). First run: migrations execute as a one-shot `argus-server migrate` service; `seed-dev` creates Org "Dev Org", Site "HQ", admin user; a dev enrollment token is printed to the server log and written to `./.dev/enroll-token`.
+**One command:** `make dev` (= `docker compose -f deployments/compose/docker-compose.dev.yml up --build --wait`, chain: db → migrate → seed → server → collector). `seed-dev` converges Org "Dev Org", Site "HQ" and admin `admin@dev.local` (password from `ARGUS_DEV_ADMIN_PASSWORD`, default documented) and writes `./.dev/seed.json`; enrollment tokens arrive with the collectors module (M3). `/v1/readyz` reflects database, auth-role, and schema state.
 
 **PostgreSQL 18 volume layout (normative):** the database volume mounts **`/var/lib/postgresql`** — the declared volume target of the PostgreSQL 18 images, where `PGDATA` is `/var/lib/postgresql/18/docker`. The pre-18 path `/var/lib/postgresql/data` makes the PG18 entrypoint detect "foreign" data and refuse to start. Init scripts are mounted as **files** into `/docker-entrypoint-initdb.d`, **never as a directory mount** — a directory mount hides the image's own initialization scripts (`000_install_timescaledb.sh`, `001_timescaledb_tune.sh`) and silently skips TimescaleDB extension installation and tuning. Both properties are enforced by `scripts/check-compose.ps1` (mirrored in CI). Dev recovery after booting a pre-fix revision: one-time `docker compose down -v` (dev data only — never a production procedure).
 

@@ -9,6 +9,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,9 +17,30 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres" // database driver
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/argus-platform/argus/migrations"
 )
+
+// CheckSchema verifies database reachability and that the schema is current and
+// clean. Used by readiness; the app role has SELECT on schema_migrations.
+func CheckSchema(ctx context.Context, pool *pgxpool.Pool) error {
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("database ping: %w", err)
+	}
+	var version uint
+	var dirty bool
+	if err := pool.QueryRow(ctx, `SELECT version, dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
+		return fmt.Errorf("schema state unreadable: %w", err)
+	}
+	if dirty {
+		return errors.New("schema is dirty (interrupted migration)")
+	}
+	if version != migrations.Latest {
+		return fmt.Errorf("schema version %d, expected %d (run migrations)", version, migrations.Latest)
+	}
+	return nil
+}
 
 // MigrateUp applies all pending migrations. Already-current schema is not an error.
 // Returns the schema version in effect afterwards.

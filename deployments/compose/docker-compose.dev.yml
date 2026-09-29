@@ -39,12 +39,30 @@ services:
         VERSION: dev
         COMMIT: none
         BUILD_DATE: unknown
-    command: ["/argus-server", "migrate"]
+    command: ["migrate"]
     environment:
       ARGUS_SERVER_MIGRATE_DSN: "postgres://argus_owner:devpass@db:5432/argus?sslmode=disable"
     depends_on:
       db:
         condition: service_healthy
+
+  seed:
+    build:
+      context: ../..
+      dockerfile: deployments/compose/Dockerfile.server
+      args:
+        VERSION: dev
+        COMMIT: none
+        BUILD_DATE: unknown
+    command: ["seed-dev"]
+    environment:
+      ARGUS_ENV: dev
+      ARGUS_SERVER_DB_DSN: "postgres://argus_app_login:devpass@db:5432/argus?sslmode=disable"
+      ARGUS_SERVER_AUTH_DB_DSN: "postgres://argus_auth_login:devpass@db:5432/argus?sslmode=disable"
+      ARGUS_DEV_ADMIN_PASSWORD: "dev-admin-changeme"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   server:
     build:
@@ -76,6 +94,8 @@ services:
       db:
         condition: service_healthy
       migrate:
+        condition: service_completed_successfully
+      seed:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/argus-server", "healthcheck", "-url", "http://127.0.0.1:8080/v1/healthz"]

@@ -129,6 +129,17 @@ jobs:
         run: docker compose -f deployments/compose/docker-compose.dev.yml up --build --wait
       - name: probe healthz
         run: curl -fsS http://127.0.0.1:8080/v1/healthz
+      - name: probe readyz (database + schema + auth-role checks)
+        run: |
+          curl -fsS http://127.0.0.1:8080/v1/readyz -o /tmp/readyz.json
+          cat /tmp/readyz.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('/tmp/readyz.json'))
+          assert d['checks']['database'] == 'ok', d
+          assert d['checks']['auth_database'] == 'ok', d
+          print('readyz checks OK')
+          PY
       - name: probe metrics
         run: curl -fsS http://127.0.0.1:9090/metrics | grep -q argus_build_info
       - name: stack logs (on failure)

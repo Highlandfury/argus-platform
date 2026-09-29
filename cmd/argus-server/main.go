@@ -41,8 +41,7 @@ func run(args []string) int {
 	case "migrate":
 		return cmdMigrate(args[1:])
 	case "seed-dev":
-		fmt.Fprintln(os.Stderr, "seed-dev: not implemented yet (arrives in M1)")
-		return 1
+		return cmdSeedDev(args[1:])
 	default:
 		usage()
 		return 2
@@ -68,9 +67,39 @@ func cmdServe(args []string) int {
 
 	tel := telemetry.New("server", buildinfo.Version, buildinfo.Commit)
 
-	// M1 replaces this with the real pool ping + migration-state check.
+	// Pools + readiness (SPEC §17): readyz reflects DB reachability, auth-role
+	// reachability, and schema state.
 	var readiness []api.Check
-	_ = cfg
+	if cfg.DBDSN == "" {
+		readiness = append(readiness, api.Check{Name: "database", Fn: func(context.Context) error {
+			return errors.New("ARGUS_SERVER_DB_DSN is not configured")
+		}})
+	} else {
+		appPool, poolErr := database.NewPool(context.Background(), cfg.DBDSN, "argus-server", database.DefaultPoolConfig())
+		if poolErr != nil {
+			fmt.Fprintln(os.Stderr, "database:", poolErr)
+			return 1
+		}
+		defer appPool.Close()
+		readiness = append(readiness, api.Check{Name: "database", Fn: func(ctx context.Context) error {
+			return database.CheckSchema(ctx, appPool)
+		}})
+	}
+	if cfg.AuthDBDSN == "" {
+		readiness = append(readiness, api.Check{Name: "auth_database", Fn: func(context.Context) error {
+			return errors.New("ARGUS_SERVER_AUTH_DB_DSN is not configured")
+		}})
+	} else {
+		authPool, poolErr := database.NewPool(context.Background(), cfg.AuthDBDSN, "argus-server-auth", database.DefaultPoolConfig())
+		if poolErr != nil {
+			fmt.Fprintln(os.Stderr, "auth database:", poolErr)
+			return 1
+		}
+		defer authPool.Close()
+		readiness = append(readiness, api.Check{Name: "auth_database", Fn: func(ctx context.Context) error {
+			return authPool.Ping(ctx)
+		}})
+	}
 
 	opts := api.Options{
 		Logger:    logger,

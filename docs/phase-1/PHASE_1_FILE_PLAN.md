@@ -45,7 +45,10 @@ Companion to `PHASE_1_SPEC.md`. Every file below is created in the listed milest
 | `internal/platform/database/pool.go` | create | pgx pool (app role); health ping | integration test |
 | `internal/platform/database/tenant.go` | create | `WithTenant(ctx, orgID, fn)` — BEGIN, `SET LOCAL`, commit/rollback; error if called without tx | unit + leak test |
 | `internal/platform/database/migrate.go` | create | golang-migrate runner (owner DSN) invoked by `argus-server migrate` | up/down/up job |
-| `internal/modules/tenancy/{service,repo,http}.go` | create | orgs/sites read paths; org resolution for sessions | tenant-scoped read tests |
+| `internal/modules/tenancy/{service,repo}.go` (+ `devseed.go`) | create | orgs/sites read paths; pre-auth slug resolution; idempotent dev seed. (`http.go` deferred to M2 — no unauthenticated endpoints exist in M1.) | tenant-scoped read tests; `TestSeedDevIdempotentAndIsolated` |
+| `internal/platform/security/argon2.go` (+ test) | create (M1e) | Argon2id PHC hash/verify for the seeded admin credential (originally sequenced for M2; seed-dev needed it earlier) | unit tests |
+| `tests/integration/seed_test.go` | create (M1e) | Seed idempotence, per-org email uniqueness, cross-tenant isolation, pre-auth slug resolution | M1 acceptance evidence |
+| `docs/phase-1/ACCEPTANCE_RUN.md` | create (M1e) | Executed M1 acceptance evidence (commands + results + findings) | sign-off |
 | `cmd/argus-server/seed_dev.go` | create | dev seed: org, site, admin user, dev token file | idempotent seed test |
 | `tests/integration/migrations_test.go` | create | up→down→up; schema assertions | CI job 9 |
 | `tests/integration/rls_test.go` | create | cross-tenant read/write denial; pooled-connection leak test (SPEC §7.2) | T8; S-06, S-07 |
@@ -59,7 +62,7 @@ Companion to `PHASE_1_SPEC.md`. Every file below is created in the listed milest
 | File | Action | Purpose | Tests / verification |
 |---|---|---|---|
 | `internal/modules/identity/{service,repo,http}.go` | create | Argon2id verify, session create/revoke, `GET /v1/me` | unit + integration |
-| `internal/platform/security/argon2.go` | create | Argon2id params (m=64MiB, t=3, p=4), PHC string format | unit + vectors |
+| `internal/platform/security/argon2.go` | create | Argon2id params (m=64MiB, t=3, p=4), PHC string format — *delivered in M1e; consumed here* | unit + vectors |
 | `internal/platform/security/tokens.go` | create | Random token mint, SHA-256 hash, constant-compare helper | unit |
 | `internal/platform/security/csrf.go` | create | Double-submit cookie issue/verify | unit + integration |
 | `internal/api/auth_routes.go` | create | `/v1/auth/login|logout`, rate limit (x/time/rate, 10/min/IP) | S-09, S-10 |
