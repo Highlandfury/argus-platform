@@ -25,19 +25,17 @@
 | github.com/testcontainers/testcontainers-go | v0.44.0 | GitHub release — added M1c (integration suite) |
 | github.com/pb33f/libopenapi | v0.41.2 | Go module proxy — added M2b (OpenAPI 3.1 contract test) |
 | golang.org/x/crypto | v0.57.0 | repo tags — added M1e (direct, Argon2id) |
-| google.golang.org/grpc | v1.84.0 | GitHub release — **added in M3** |
-| google.golang.org/protobuf | v1.36.12 (codegen pin; tidy currently resolves v1.36.11 as indirect runtime lib) | GitHub release / proxy | Codegen and runtime pins may diverge; record both when they change. |
+| google.golang.org/grpc | v1.84.0 | GitHub release — added M3a (generated stubs; collector + server transports) |
+| google.golang.org/protobuf | v1.36.12 (codegen and runtime aligned as of M3a) | GitHub release | Generated code is committed under `gen/`; CI checks drift via regenerate+diff. |
 | github.com/stretchr/testify | (indirect via client_golang) | tidy | Direct use begins when needed; add the exact tag then. |
 | golang.org/x/crypto | v0.57.0 | repo tags — added M1e (direct, Argon2id) | x/time pinned in M2.
 | golang.org/x/time | v0.16.0 | repo tags — added M2b (login rate limiting) |
 | golang.org/x/sync | v0.23.0 | repo tags — **added when errgroup first used** |
 | github.com/google/go-cmp | v0.7.0 (indirect) | tidy |
 
-> Note: `go mod tidy` resolved protobuf **v1.36.11** as an indirect runtime dependency
-> (pulled by client_model); the *codegen* `protoc-gen-go` pin is **v1.36.12**. This
-> divergence is expected and re-checked in the M0 compat gate.
-
-## Protocol / codegen tooling (installed into .tools/bin by scripts/install-tools.ps1)
+> Note (M3a): protobuf codegen and runtime are aligned at **v1.36.12**; the older
+> divergence note is retired. Generated stubs are committed under `gen/` and
+> drift-checked in CI (`buf generate` + `git diff --exit-code -- gen`).## Protocol / codegen tooling (installed into .tools/bin by scripts/install-tools.ps1)
 
 | Tool | Pin | Verified via |
 |---|---|---|

@@ -45,17 +45,35 @@ jobs:
           version: v2.14.0
 
   proto:
-    name: proto lint
+    name: proto (lint, drift, breaking)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27.1"
-      - name: install buf (pinned)
-        run: go install github.com/bufbuild/buf/cmd/buf@v1.73.0
+      - name: install pinned buf + protoc plugins
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@v1.73.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
       - name: buf lint
         run: buf lint
+      - name: drift check (regenerate + diff against committed gen/)
+        run: |
+          buf generate
+          git diff --exit-code -- gen
+      - name: build generated code
+        run: go build ./gen/...
+      - name: breaking changes (vs origin/main, when available)
+        run: |
+          if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            buf breaking --against '.git#branch=origin/main'
+          else
+            echo "origin/main not present; skipping breaking check (pre-first-push)"
+          fi
 
   contract:
     name: OpenAPI contract

@@ -5,7 +5,6 @@
 .dev
 data
 bin
-gen
 coverage
 docs
 web/node_modules

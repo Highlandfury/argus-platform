@@ -1,8 +1,10 @@
-# Build artifacts
+# Build outputs
 /bin/
-/gen/
 coverage/
 *.exe
+
+# Generated protobuf code is COMMITTED (gen/go). Regenerate with `make proto`;
+# CI verifies no drift (`buf generate` + git diff --exit-code -- gen).
 
 # Local toolchain (installed by scripts/install-tools.ps1, never committed)
 /.tools/

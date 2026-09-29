@@ -14,7 +14,7 @@ LDFLAGS := -s -w \
   -X github.com/argus-platform/argus/internal/platform/buildinfo.Commit=$(COMMIT) \
   -X github.com/argus-platform/argus/internal/platform/buildinfo.Date=$(DATE)
 
-.PHONY: help build build-server build-collector test test-race vet fmt fmt-check lint proto tidy \
+.PHONY: help build build-server build-collector test test-race vet fmt fmt-check lint proto check-proto tidy \
         dev up down reset logs ps check versions doctor check-compose
 
 help:
@@ -67,6 +67,12 @@ check-compose:
 proto:
 	.tools/bin/buf lint
 	.tools/bin/buf generate
+
+check-proto:
+	.tools/bin/buf lint
+	.tools/bin/buf generate
+	git diff --exit-code -- gen || { echo "ERROR: generated code drift — run 'make proto' and commit gen/"; exit 1; }
+	@echo "generated code up to date"
 
 tidy:
 	$(GO) mod tidy

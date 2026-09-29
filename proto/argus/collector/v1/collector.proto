@@ -76,6 +76,12 @@ message EnrollResponse {
   // Server clock at issuance, for collector clock-skew estimation before the
   // first ServerPing arrives. Estimate only; never used for ordering.
   google.protobuf.Timestamp server_time = 6;
+
+  // PROTOCOL CHANGE P1 (2026-09-29): Ed25519 public key the collector pins for
+  // policy verification, per SPEC §27.3 ("collector pins the server public key
+  // from enrollment"). Delivered inline (not only keyed by id) so the initial
+  // policy can be verified before the collector trusts anything else.
+  bytes policy_signing_public_key = 7;
 }
 
 // ---------------------------------------------------------------------------
