@@ -126,6 +126,18 @@ jobs:
         if: always()
         run: docker compose -f deployments/compose/docker-compose.dev.yml down -v --remove-orphans
 
+  security-suite:
+    name: security suite (S-01..S-16; release gate)
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.1"
+      - name: security suite (S-01..S-16, testcontainers)
+        run: go test ./tests/integration/... -run '^TestSecuritySuite$' -count=1 -v
+
   compat-matrix:
     name: compat matrix (PG18 + TimescaleDB 2.30.1)
     runs-on: ubuntu-latest

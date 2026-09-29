@@ -301,3 +301,79 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 | Regression | `go vet ./tests/e2e/...` · lint 0 · harness green twice (fresh + re-run) | **PASS** |
 
 **Scope note (recorded):** T1–T3/T10 are automated against the real control plane in the M6b integration failure suite (containerized DB + in-process gRPC) and were additionally exercised live in M4b/M5d (outage/restart/reconnect evidence). The e2e harness adds the compose-stack AC-01/02/03/08 + T7 live path; compose-orchestrated variants of T2/T3/T10 (container stop/pause driven from Go) remain future work to avoid duplicating the M6b automation.
+
+---
+
+# ACCEPTANCE_RUN — M6d (Security Release Gate, Phase-1 Sign-Off, Final Gate)
+
+**Date:** 2026-09-30 · **Commit:** M6d (this commit)
+
+## Security suite (S-01…S-16 direction) — release gate
+
+Entry point `tests/integration/security_suite_test.go::TestSecuritySuite`
+(`go test ./tests/integration/... -run '^TestSecuritySuite$' -count=1 -v`);
+CI job `security-suite` runs on push to main / manual dispatch.
+
+| ID | Scenario | Delegated real test | Result |
+|---|---|---|---|
+| S-01 | Invalid token + per-IP enrollment limit | `TestM3EnrollmentMatrix`, `TestM3EnrollmentRateLimit` | PASS |
+| S-02 | Expired / already-used token (uniform denial) | `TestM3EnrollmentMatrix` | PASS |
+| S-03 | Cert from unknown CA (TLS-layer reject) | `TestM3UnknownIdentityRejected` | PASS |
+| S-04 | Cert/claim confusion (hello ≠ cert) | `TestM3StreamLifecycle` | PASS |
+| S-05 | Policy verification + ack (tamper unit-matrix in `internal/modules/collectors`/collector policy) | `TestM3StreamLifecycle` | PASS |
+| S-06 | Cross-tenant API access (404, no oracle) | `TestTenantIsolationReads`, `TestCrossTenantWritesDenied`, `TestM4MetricTenantIsolation` | PASS |
+| S-07 | RLS bypass / role escalation boundaries | `TestAuthRoleBoundaries`, `TestAppCannotEscalateRole`, `TestUnscopedAccessSeesNothing` | PASS |
+| S-08 | Secret leakage (automated log scan + hashed at rest) | `TestM5LogScanNoSecretLeakage` | PASS |
+| S-09 | Login brute force (429 threshold) | `TestLoginRateLimitS09` | PASS |
+| S-10 | CSRF double-submit | `TestLoginSessionLifecycle` | PASS |
+| S-11 | Revoked identity (terminal; reconnect rejected) | `TestM3StreamLifecycle` (+ live `TestE2EAC03StreamActiveAndRevocationT7`) | PASS |
+| S-12 | Oversized/malformed payload rejection (64 KiB CSR, 5001-sample batch, 16 MiB gRPC cap, `argus_grpc_malformed_total`) | `TestM4PoisonBatches` (+ ingest/validate unit matrices) | PASS |
+| S-13 | Replay attempts (batch + token) | `TestM4DuplicateBatchOriginalWins`, `TestM4LostAckReplayedAsDuplicate` | PASS |
+| S-14 | Injection: parameterized SQL + dimension canonicalization unit tests; all queries bound-parameter based | unit evidence (`internal/modules/metrics`, `internal/modules/ingest`) | documented |
+| S-15 | Ingest flood: server credit window + collector spool backpressure | `LOAD_TEST_REPORT.md` (L-01/L-02 backpressure, zero loss) | documented |
+| S-16 | Auth enumeration uniformity (shape + timing) | `TestLoginEnumerationUniformS16` | PASS |
+
+**M6d finding (fixed):** with three suites running shared scenarios in one
+process, remaining fixed-slug RLS fixtures (`iso-auth-*`, `iso-token-*`,
+`iso-resolver-*`, `iso-escalate`, `iso-unscoped`, `iso-chunk-*`) collided on
+`organizations_slug_key`; all now use unique slugs and the suites are safely
+composable (focused composability run green; full suite green).
+
+## Acceptance sign-off (AC-01…AC-24)
+
+| AC | Status | Evidence |
+|---|---|---|
+| AC-01…AC-04 enrollment/identity/policy/stream | PASS | M3 run; M6c e2e (AC-01/02/03) |
+| AC-05/06/07 spool autonomy, drain, exactly-once | PASS | M4b run; failure suite T2/T4 |
+| AC-08 metric query latency/coverage | PASS | M4c run (24h@1m p95 ≈ 22 ms; interpretation recorded); M6c AC-08 |
+| AC-09/10/11 chart, detail, registry UI | PASS | Playwright 6/6 (M5d fresh stack) |
+| AC-12 login/session/CSRF/limits | PASS | M2 run + Playwright |
+| AC-13 collector restart durability | PASS | M4b run; T10 |
+| AC-14 DB restart recovery | PASS | M1 `TestDatabaseRestartRecovery`; T9 |
+| AC-15 tenant isolation | PASS | RLS suites; T8; S-06/S-07 |
+| AC-16 revocation | PASS | M3 run; M6c live T7 |
+| AC-17 expired token | PASS | T6 |
+| AC-18 poison batch | PASS | T5 |
+| AC-19 no secret leakage | PASS | S-08 log scan (M5c) |
+| AC-20 self-observability | PASS | M5a/M5b metric tests + live `/metrics` |
+| AC-21 L-01 executed, p95 recorded | PASS (target not met — honest baseline) | `LOAD_TEST_REPORT.md` |
+| AC-22 L-02 executed, streams/reconnects criteria | PASS (throughput target not met — honest) | `LOAD_TEST_REPORT.md` |
+| AC-23 failure suite T1–T10 + nightly job | PASS | M6b (suite green; CI job wired) |
+| AC-24 security suite + release gate | PASS | M6d (suite green; CI job wired) |
+
+## Phase-1 final state
+
+*Provides:* authentication/sessions/CSRF, tenancy + RLS, admin/viewer
+authorization, OpenAPI-contracted API, collector enrollment + identity, internal
+CA + mTLS, signed policy + acks, reconnect/backoff, durable segmented spool,
+ack-after-commit idempotent ingestion, TimescaleDB storage, tenant-safe bounded
+query API, metric chart, platform + collector self-observability, correlated
+secret-safe logging, runbook, failure/security/e2e proof suites.
+*Does not provide:* SNMP/ICMP polling, discovery, topology, Wi-Fi, heatmaps,
+network diagnostics/RCA, device automation, HA/DR/PITR/zero-downtime upgrades,
+production scalability claims.
+
+*Performance baseline (unchanged):* M4a smoke 3,919/4,000 samples/s; L-01
+4,244/20,000; L-02 14,934/20,000 (200 streams, 0 errors/reconnects); L-03 FAIL
+(classified server-side concurrency path — tracked Phase-2 item); primary
+bottleneck PostgreSQL write path. Observed test results, not capacity guarantees.

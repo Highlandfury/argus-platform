@@ -120,7 +120,7 @@ func TestCrossTenantWritesDenied(t *testing.T) {
 
 func TestUnscopedAccessSeesNothing(t *testing.T) {
 	ctx := context.Background()
-	seedTenant(t, "iso-unscoped")
+	seedTenant(t, "iso-unscoped-"+newUUID()[:8])
 
 	tables := []string{
 		"organizations", "sites", "users", "sessions", "collectors",
@@ -225,8 +225,8 @@ func runJob(ctx context.Context, jobID int) error {
 // lookups on three tables, nothing else — even though the role holds BYPASSRLS.
 func TestAuthRoleBoundaries(t *testing.T) {
 	ctx := context.Background()
-	seedTenant(t, "iso-auth-a")
-	seedTenant(t, "iso-auth-b")
+	seedTenant(t, "iso-auth-a-"+newUUID()[:8])
+	seedTenant(t, "iso-auth-b-"+newUUID()[:8])
 
 	t.Run("allowed-reads", func(t *testing.T) {
 		var orgs, users, sessions, tokens int
@@ -305,7 +305,7 @@ func TestAuthRoleBoundaries(t *testing.T) {
 	})
 
 	t.Run("enrollment-token-select-only", func(t *testing.T) {
-		tn := seedTenant(t, "iso-token-a")
+		tn := seedTenant(t, "iso-token-a-"+newUUID()[:8])
 		tokenID := newUUID()
 		_, err := ownerPool.Exec(ctx,
 			`INSERT INTO enrollment_tokens (id, org_id, site_id, token_hash, expires_at)
@@ -324,7 +324,7 @@ func TestAuthRoleBoundaries(t *testing.T) {
 	})
 
 	t.Run("certificate-resolver-function", func(t *testing.T) {
-		tn := seedTenant(t, "iso-resolver-a")
+		tn := seedTenant(t, "iso-resolver-a-"+newUUID()[:8])
 		fp := []byte("fp-" + tn.Slug)
 
 		// The auth role may execute the fixed resolver...
@@ -353,7 +353,7 @@ func TestAuthRoleBoundaries(t *testing.T) {
 // anything else) via SET ROLE.
 func TestAppCannotEscalateRole(t *testing.T) {
 	ctx := context.Background()
-	err := database.WithTenant(ctx, appPool, mustUUID(t, seedTenant(t, "iso-escalate").OrgID), func(ctx context.Context, tx pgx.Tx) error {
+	err := database.WithTenant(ctx, appPool, mustUUID(t, seedTenant(t, "iso-escalate-"+newUUID()[:8]).OrgID), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, "SET LOCAL ROLE argus_owner")
 		return err
 	})
@@ -370,8 +370,8 @@ func TestAppCannotEscalateRole(t *testing.T) {
 // row-filtered by app.current_org instead.
 func TestChunkAccessIsRLSProtected(t *testing.T) {
 	ctx := context.Background()
-	a := seedTenant(t, "iso-chunk-a")
-	b := seedTenant(t, "iso-chunk-b")
+	a := seedTenant(t, "iso-chunk-a-"+newUUID()[:8])
+	b := seedTenant(t, "iso-chunk-b-"+newUUID()[:8])
 
 	// Production mechanism: the backstop job (1-minute cadence) runs the sweep.
 	// Force one run now so the assertion is deterministic instead of timing-based.
