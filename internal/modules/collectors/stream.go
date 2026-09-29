@@ -65,6 +65,7 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 
 	recvCh := make(chan *collectorv1.ClientMessage, 16)
 	recvErr := make(chan error, 1)
+	reqID := grpcx.RequestIDFrom(ctx)
 	go func() {
 		for {
 			msg, err := gstream.Recv()
@@ -104,7 +105,14 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 
 	agentVersion := strPtr(hello.GetAgentVersion())
 	if err := s.Svc.MarkConnected(ctx, ident.OrgID, ident.CollectorID, agentVersion); err != nil && s.Log != nil {
-		s.Log.Error("mark collector connected", "collector_id", ident.CollectorID, "error", err)
+		s.Log.Error("mark collector connected", "request_id", reqID, "collector_id", ident.CollectorID, "error", err)
+	}
+	if s.Log != nil {
+		s.Log.Info("collector stream connected",
+			"request_id", reqID,
+			"collector_id", ident.CollectorID,
+			"agent_version", hello.GetAgentVersion(),
+			"protocol_version", hello.GetProtocolVersion())
 	}
 
 	session, superseded := s.Registry.Register(ident.CollectorID)
@@ -167,7 +175,7 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 					UptimeSeconds:       hb.GetUptimeSeconds(),
 				}
 				if err := s.Svc.RecordHeartbeat(ctx, ident.OrgID, ident.CollectorID, stats); err != nil && s.Log != nil {
-					s.Log.Error("record heartbeat", "collector_id", ident.CollectorID, "error", err)
+					s.Log.Error("record heartbeat", "request_id", reqID, "collector_id", ident.CollectorID, "error", err)
 				}
 			case msg.GetPolicyAck() != nil:
 				ack := msg.GetPolicyAck()
@@ -175,7 +183,7 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 					refreshAllowlist()
 				}
 				if err := s.Svc.RecordPolicyAck(ctx, ident.OrgID, ident.CollectorID, ack.GetPolicyVersion(), ack.GetApplied()); err != nil && s.Log != nil {
-					s.Log.Error("record policy ack", "collector_id", ident.CollectorID, "error", err)
+					s.Log.Error("record policy ack", "request_id", reqID, "collector_id", ident.CollectorID, "error", err)
 				}
 			case msg.GetBatch() != nil:
 				batch := msg.GetBatch()
@@ -208,6 +216,13 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 				return s.protocolError(gstream, "unsupported message")
 			}
 		case dm := <-session.Notify():
+			if s.Log != nil {
+				s.Log.Info("collector stream disconnected by server",
+					"request_id", reqID,
+					"collector_id", ident.CollectorID,
+					"code", dm.Code.String(),
+					"reason", dm.Reason)
+			}
 			_ = gstream.Send(disconnectMsg(dm.Code, dm.Reason))
 			return nil
 		case sp := <-session.Policy():
@@ -266,6 +281,11 @@ func batchResultMsg(seq int64, outcome ingest.BatchOutcome) *collectorv1.ServerM
 
 func (s *StreamServer) protocolError(gstream collectorv1.CollectorService_StreamServer, reason string) error {
 	s.Svc.metrics.connects.WithLabelValues("protocol_error").Inc()
+	if s.Log != nil {
+		s.Log.Error("collector stream protocol error",
+			"request_id", grpcx.RequestIDFrom(gstream.Context()),
+			"reason", reason)
+	}
 	_ = gstream.Send(disconnectMsg(collectorv1.Disconnect_CODE_PROTOCOL_ERROR, reason))
 	return status.Error(codes.InvalidArgument, reason)
 }

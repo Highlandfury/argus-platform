@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -176,6 +178,11 @@ func cmdRun(args []string) int {
 		logger.Error("identity is missing the pinned policy signing key")
 		return 1
 	}
+	corrBuf := make([]byte, 8)
+	_, _ = rand.Read(corrBuf)
+	corrID := hex.EncodeToString(corrBuf)
+	logger.Info("collector correlation established",
+		"correlation_id", corrID, "collector_id", id.CollectorID)
 	certPath, keyPath, _, _ := idStore.Paths()
 	policyDir := filepath.Join(cfg.DataDir, "policy")
 
@@ -203,6 +210,7 @@ func cmdRun(args []string) int {
 		Log:            logger,
 		AppliedVersion: id.PolicyVersion,
 		PolicyKeyDER:   keyDER,
+		CorrelationID:  corrID,
 		Telemetry:      sender,
 		Stats: func() stream.TelemetryStats {
 			// Single state source: the same SpoolSnapshot the metrics endpoint

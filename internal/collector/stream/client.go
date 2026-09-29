@@ -17,6 +17,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
@@ -72,6 +73,10 @@ type Config struct {
 	// results. The stream never acks the spool itself: only BatchResult(OK or
 	// DUPLICATE) lets the source retire a durable record.
 	Telemetry BatchSource
+	// CorrelationID is attached to the stream as x-request-id metadata so the
+	// collector's logs and the server's stream logs share one identifier
+	// (SPEC §15 correlation chain).
+	CorrelationID string
 	// Stats, when set, is sampled for every heartbeat so the server sees the
 	// collector's spool accounting (SPEC §15 self-observability).
 	Stats func() TelemetryStats
@@ -222,7 +227,11 @@ func (c *Client) runOnce(ctx context.Context) error {
 	defer func() { _ = conn.Close() }()
 
 	client := collectorv1.NewCollectorServiceClient(conn)
-	gstream, err := client.Stream(ctx)
+	streamCtx := ctx
+	if c.cfg.CorrelationID != "" {
+		streamCtx = metadata.AppendToOutgoingContext(ctx, "x-request-id", c.cfg.CorrelationID)
+	}
+	gstream, err := client.Stream(streamCtx)
 	if err != nil {
 		return fmt.Errorf("stream: open: %w", err)
 	}

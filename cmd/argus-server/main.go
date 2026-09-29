@@ -30,6 +30,7 @@ import (
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
 	"github.com/argus-platform/argus/internal/platform/database"
+	"github.com/argus-platform/argus/internal/platform/grpcx"
 	"github.com/argus-platform/argus/internal/platform/logging"
 	"github.com/argus-platform/argus/internal/platform/ratelimit"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
@@ -175,6 +176,8 @@ func cmdServe(args []string) int {
 				MinVersion:   tls.VersionTLS12,
 			})),
 			grpc.MaxRecvMsgSize(1<<20),
+			grpc.ChainUnaryInterceptor(grpcx.UnaryServerInterceptor()),
+			grpc.ChainStreamInterceptor(grpcx.StreamServerInterceptor()),
 		)
 		collectorv1.RegisterEnrollmentServiceServer(enrollGRPC,
 			collectors.NewEnrollmentServer(collectorsSvc, enrollLimiter(cfg.EnrollRatePerMin), logger))
@@ -187,6 +190,8 @@ func cmdServe(args []string) int {
 				MinVersion:   tls.VersionTLS12,
 			})),
 			grpc.MaxRecvMsgSize(16<<20),
+			grpc.ChainUnaryInterceptor(grpcx.UnaryServerInterceptor()),
+			grpc.ChainStreamInterceptor(grpcx.StreamServerInterceptor()),
 			grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
 			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: false}),
 		)

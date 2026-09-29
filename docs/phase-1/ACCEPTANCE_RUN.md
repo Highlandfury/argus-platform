@@ -194,3 +194,27 @@ go test ./... -count=1 && .tools\bin\golangci-lint.exe run
 | Regression | Full `go test ./...` (17 packages) · lint 0 · buf lint/generate/drift clean · M0–M5a suites green | **PASS** |
 
 **Deviations / notes:** `ARGUS_COLLECTOR_METRICS_ADDR` added (default `127.0.0.1:9091`) — env surface extension beyond the §3.6 table, recorded here; README/RUNBOOK references land in M5d per slice discipline; the spool family is emitted at scrape time (single snapshot per scrape) while the heartbeat remains a 30 s periodic publish — same source, different sampling instants.
+
+---
+
+# ACCEPTANCE_RUN — M5c (Logging Conventions, Correlation, S-08 Log Scan)
+
+**Date:** 2026-09-29 · **Commit:** M5c (this commit)
+
+**Logging schema (required / optional / forbidden).** Required on server lifecycle events: `time, level, msg, component, request_id`. Required where the event is scoped: `collector_id` (collector/stream ops), `operation`/`error` on failures, machine-readable `code`/`reason`/`error_code` on stream/error events (e.g. `CODE_PROTOCOL_ERROR`, `CODE_REVOKED`, `validation.series_quota_exceeded`). Optional: `dur_ms`, `status`, `path`, `method`. Forbidden in every log: enrollment tokens, private keys/cert material, passwords, session/CSRF cookie values, authorization headers, DB/mTLS credentials, raw auth payloads, tenant payload data.
+
+**Request-ID policy:** HTTP `X-Request-ID` accepted only when ≤64 chars of `[A-Za-z0-9._:+-]`; anything else (missing, oversized, whitespace, newline/control injection) is replaced with a 128-bit random ID, echoed on the response, and stored in the request context. Same policy for the gRPC metadata `x-request-id`. This bounds log amplification and makes field/newline injection structurally impossible.
+
+**gRPC interceptor:** unary + stream interceptors on both listeners (enrollment unary, collector stream). Verified live: caller `X-Request-ID: m5c-live-1` → echoed header + server access log `"request_id":"m5c-live-1"`; `bad id with spaces` → replaced (`861ffc…`) and echoed as generated. The stream interceptor echoes the session ID in response headers; it cannot fail an RPC (observability-only).
+
+**Stream correlation model:** one correlation ID per stream session (from the collector's `x-request-id` metadata, generated otherwise). The collector logs its `correlation_id` once at startup and attaches it to every reconnection; server stream lifecycle logs carry `request_id` + `collector_id` (`collector stream connected`, `disconnected by server` with `code`/`reason`, `protocol error` with reason code). Per-message/batch logging is deliberately absent (heartbeat/batch/retry paths log only lifecycle/errors) — no per-sample log amplification.
+
+**S-08 automated log scan (`TestM5LogScanNoSecretLeakage`):** exercises failed login (wrong-password fixture), successful login (session+CSRF cookies), enrollment-token creation (raw token fixture), successful enrollment, denied replay, stream connect, a good batch, and a protocol violation — with server/gRPC/ingest logs captured to a buffer. The scan asserts nine forbidden patterns (token, both private-key markers, password fixture, session/CSRF cookie names, `devpass`, `Authorization:`, `Bearer `) are absent, and fails with the **pattern name only** (fixtures never printed). Anti-vacuous: the capture must contain `request_id`, the connect event, the collector ID, and the protocol-error event. **Result: PASS.**
+
+**Log structure test:** representative success/error events parse as JSON and carry the required fields; `error_code` preserved verbatim (`CODE_PROTOCOL_ERROR`). **PASS.**
+
+**Live verification:** echoed/sanitized request IDs (above); wrong-password login → `401`, password string absent from server logs; collector correlation ID present in collector logs; live server+collector log scan: `arg_enr_`, `BEGIN EC PRIVATE KEY`, `BEGIN PRIVATE KEY`, `devpass`, `argus_session=`, `argus_csrf=` — **none present**.
+
+**Regression:** full `go test ./...` (18 packages incl. integration) PASS · lint 0 · buf lint/generate/drift clean · `-race` green for httpx/grpcx/collectors/collector in the pinned Linux container · Playwright re-run PASS (no web changes).
+
+**Metrics-label review (§12):** M5a/M5b label-policy tests remain green; no secret or unbounded value is promoted into metric labels; correlation IDs are reserved for logs, never metrics.

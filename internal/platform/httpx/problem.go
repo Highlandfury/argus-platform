@@ -4,8 +4,6 @@ package httpx
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 )
@@ -52,20 +50,13 @@ func WriteProblem(w http.ResponseWriter, r *http.Request, status int, code, deta
 
 type requestIDKey struct{}
 
-// RequestID ensures every request carries an X-Request-ID: it reuses a caller
-// supplied value or generates a 128-bit random one, stores it in the context,
-// and echoes it on the response.
+// RequestID ensures every request carries an X-Request-ID: a caller-supplied
+// value is accepted only when it satisfies the log-safety policy (bounded
+// length, restricted charset); otherwise a 128-bit ID is generated. The ID is
+// stored in the context and echoed on the response.
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
-		if id == "" || len(id) > 128 {
-			buf := make([]byte, 16)
-			if _, err := rand.Read(buf); err != nil {
-				id = "unavailable"
-			} else {
-				id = hex.EncodeToString(buf)
-			}
-		}
+		id := SanitizeRequestID(r.Header.Get("X-Request-ID"))
 		w.Header().Set("X-Request-ID", id)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
 	})

@@ -1,6 +1,7 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -55,6 +56,7 @@ type m3Env struct {
 	streamAddr string
 
 	streamSrv *grpc.Server
+	log       *slog.Logger
 	mu        sync.Mutex
 }
 
@@ -63,6 +65,10 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 	cfg := m3EnvConfig{}
 	for _, o := range opts {
 		o(&cfg)
+	}
+	var log *slog.Logger
+	if cfg.logBuffer != nil {
+		log = slog.New(slog.NewJSONHandler(cfg.logBuffer, nil))
 	}
 
 	dir := t.TempDir()
@@ -84,12 +90,12 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 		})),
 		grpc.MaxRecvMsgSize(1<<20),
 	)
-	collectorv1.RegisterEnrollmentServiceServer(enrollSrv, collectors.NewEnrollmentServer(svc, limiter, nil))
+	collectorv1.RegisterEnrollmentServiceServer(enrollSrv, collectors.NewEnrollmentServer(svc, limiter, log))
 	go func() { _ = enrollSrv.Serve(enrollTCP) }()
 
 	streamTCP, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
-	streamSrv := newStreamGRPC(ca, svc, registry)
+	streamSrv := newStreamGRPC(ca, svc, registry, log)
 	go func() { _ = streamSrv.Serve(streamTCP) }()
 
 	t.Cleanup(func() {
@@ -108,10 +114,11 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 		enrollAddr: enrollTCP.Addr().String(),
 		streamAddr: streamTCP.Addr().String(),
 		streamSrv:  streamSrv,
+		log:        log,
 	}
 }
 
-func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collectors.SessionRegistry) *grpc.Server {
+func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collectors.SessionRegistry, log *slog.Logger) *grpc.Server {
 	srv := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{
 			Certificates: []tls.Certificate{*ca.ServerTLS()},
@@ -121,7 +128,7 @@ func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collect
 		})),
 		grpc.MaxRecvMsgSize(16<<20),
 	)
-	collectorv1.RegisterCollectorServiceServer(srv, collectors.NewStreamServer(svc, registry, ingest.New(appPool, nil, nil, nil), nil))
+	collectorv1.RegisterCollectorServiceServer(srv, collectors.NewStreamServer(svc, registry, ingest.New(appPool, nil, nil, log), log))
 	return srv
 }
 
@@ -142,18 +149,25 @@ func (e *m3Env) restartStream(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	must(t, err)
-	e.streamSrv = newStreamGRPC(e.ca, e.svc, e.registry)
+	e.streamSrv = newStreamGRPC(e.ca, e.svc, e.registry, e.log)
 	go func() { _ = e.streamSrv.Serve(ln) }()
 }
 
 type m3EnvConfig struct {
-	limiter bool
+	limiter   bool
+	logBuffer *bytes.Buffer
 }
 
 type m3Option func(*m3EnvConfig)
 
 func withEnrollLimiter() m3Option {
 	return func(c *m3EnvConfig) { c.limiter = true }
+}
+
+// withLogBuffer routes the in-process gRPC/ingest server logs into buf (used
+// by the S-08 log-scan test).
+func withLogBuffer(buf *bytes.Buffer) m3Option {
+	return func(c *m3EnvConfig) { c.logBuffer = buf }
 }
 
 // enrollIdentity performs a full enrollment and writes the identity to disk.
