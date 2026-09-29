@@ -30,7 +30,10 @@ import (
 
 const timescaleImage = "timescale/timescaledb:2.30.1-pg18@sha256:9dede0e3ccc071cf71935b17f76bf243331df0b1575338c8ac294640fcf12a36"
 
-const sqlstateInsufficientPrivilege = "42501"
+const (
+	sqlstateInsufficientPrivilege = "42501"
+	sqlstateCheckViolation        = "23514"
+)
 
 var (
 	ownerDSN string
@@ -58,37 +61,15 @@ func TestMain(m *testing.M) {
 func runSuite(m *testing.M) (int, error) {
 	ctx := context.Background()
 
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image: timescaleImage,
-			Env: map[string]string{
-				"POSTGRES_DB":       "argus",
-				"POSTGRES_USER":     "argus_owner",
-				"POSTGRES_PASSWORD": "devpass",
-			},
-			ExposedPorts: []string{"5432/tcp"},
-			WaitingFor:   wait.ForListeningPort("5432/tcp").WithStartupTimeout(5 * time.Minute),
-		},
-		Started: true,
-	})
+	c, base, err := startTimescaleContainer(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("start timescaledb container (is Docker running?): %w", err)
+		return 0, err
 	}
 	defer func() { _ = testcontainers.TerminateContainer(c) }()
 
-	host, err := c.Host(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("container host: %w", err)
-	}
-	port, err := c.MappedPort(ctx, "5432/tcp")
-	if err != nil {
-		return 0, fmt.Errorf("container port: %w", err)
-	}
-
-	base := fmt.Sprintf("postgres://argus_owner:devpass@%s:%s/argus?sslmode=disable", host, port.Port())
 	ownerDSN = base
-	appDSN = strings.Replace(base, "argus_owner:devpass", "argus_app_login:devpass", 1)
-	authDSN = strings.Replace(base, "argus_owner:devpass", "argus_auth_login:devpass", 1)
+	appDSN = appDSNFor(base)
+	authDSN = authDSNFor(base)
 
 	if err := waitStable(ctx, base); err != nil {
 		return 0, err
@@ -120,8 +101,13 @@ func runSuite(m *testing.M) (int, error) {
 // apart. The TimescaleDB image restarts the server once during first-boot
 // initialization (extension install + tune), so plain port readiness races.
 func waitStable(ctx context.Context, dsn string) error {
-	deadline := time.Now().Add(4 * time.Minute)
+	return waitStableFor(ctx, dsn, 4*time.Minute)
+}
+
+func waitStableFor(ctx context.Context, dsn string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	var firstOK time.Time
+	var lastErr error
 	for time.Now().Before(deadline) {
 		conn, err := pgx.Connect(ctx, dsn)
 		if err == nil {
@@ -136,11 +122,17 @@ func waitStable(ctx context.Context, dsn string) error {
 				}
 			} else {
 				firstOK = time.Time{}
+				lastErr = err
 			}
+		} else {
+			lastErr = err
 		}
 		time.Sleep(2 * time.Second)
 	}
-	return errors.New("database not stably ready within deadline")
+	if lastErr == nil {
+		lastErr = errors.New("no connection attempt succeeded")
+	}
+	return fmt.Errorf("database not stably ready within %s: last error: %w", timeout, lastErr)
 }
 
 // applyDevRolesScript executes the same SQL used by the dev compose stack so
@@ -161,6 +153,45 @@ func applyDevRolesScript(ctx context.Context, dsn string) error {
 		return fmt.Errorf("apply roles script: %w", err)
 	}
 	return nil
+}
+
+// startTimescaleContainer launches the digest-pinned TimescaleDB image and
+// returns the container plus the owner DSN. Used by TestMain and by tests that
+// need their own isolated database (e.g., restart recovery).
+func startTimescaleContainer(ctx context.Context) (testcontainers.Container, string, error) {
+	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image: timescaleImage,
+			Env: map[string]string{
+				"POSTGRES_DB":       "argus",
+				"POSTGRES_USER":     "argus_owner",
+				"POSTGRES_PASSWORD": "devpass",
+			},
+			ExposedPorts: []string{"5432/tcp"},
+			WaitingFor:   wait.ForListeningPort("5432/tcp").WithStartupTimeout(5 * time.Minute),
+		},
+		Started: true,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("start timescaledb container (is Docker running?): %w", err)
+	}
+	host, err := c.Host(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("container host: %w", err)
+	}
+	port, err := c.MappedPort(ctx, "5432/tcp")
+	if err != nil {
+		return nil, "", fmt.Errorf("container port: %w", err)
+	}
+	return c, fmt.Sprintf("postgres://argus_owner:devpass@%s:%s/argus?sslmode=disable", host, port.Port()), nil
+}
+
+func appDSNFor(base string) string {
+	return strings.Replace(base, "argus_owner:devpass", "argus_app_login:devpass", 1)
+}
+
+func authDSNFor(base string) string {
+	return strings.Replace(base, "argus_owner:devpass", "argus_auth_login:devpass", 1)
 }
 
 func must(t *testing.T, err error) {
