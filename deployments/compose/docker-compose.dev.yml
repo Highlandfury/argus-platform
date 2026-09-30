@@ -90,6 +90,11 @@ services:
       ARGUS_SERVER_MIGRATE_DSN: "postgres://argus_owner:${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}@db:5432/argus?sslmode=disable"
       ARGUS_SERVER_CA_DIR: /var/lib/argus/ca
       ARGUS_DEV_SEED: "true"
+      # M7-S2 (P2-D2): dev file-backed KMS binding for credential envelope
+      # encryption. The key file lives on a named volume so it survives
+      # restarts; in dev the vault generates it on first use.
+      ARGUS_SECRETS_KEY_FILE: /var/lib/argus/secrets/master.key
+      ARGUS_SECRETS_KEY_ID: argus-local
     ports:
       - "8080:8080"
       - "8443:8443"
@@ -97,6 +102,7 @@ services:
       - "9090:9090"
     volumes:
       - ca-data:/var/lib/argus/ca
+      - secrets-data:/var/lib/argus/secrets
     depends_on:
       db:
         condition: service_healthy
@@ -155,3 +161,4 @@ volumes:
   db-data:
   collector-data:
   ca-data:
+  secrets-data:

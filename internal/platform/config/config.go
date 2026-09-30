@@ -43,6 +43,13 @@ type Server struct {
 	MigrateDSN       string // owner role (argus_owner); used only by `migrate`
 	CADir            string // internal CA material; required from M3
 	DevSeed          bool
+	// SecretsKeyFile is the master-key file backing the SecretsVault
+	// envelope encryption (M7-S2, P2-D2: local file KMS binding for Phase 2;
+	// an external KMS/HSM arrives in V2 behind the same interface).
+	SecretsKeyFile string
+	// SecretsKeyID is the wrapping key identifier recorded in the
+	// kms_key_id column of every sealed credential envelope.
+	SecretsKeyID string
 }
 
 // LoadServer reads server configuration from the environment.
@@ -61,6 +68,8 @@ func LoadServer() (Server, error) {
 		MigrateDSN:       env("ARGUS_SERVER_MIGRATE_DSN", ""),
 		CADir:            env("ARGUS_SERVER_CA_DIR", "./.dev/ca"),
 		DevSeed:          envBool("ARGUS_DEV_SEED", false),
+		SecretsKeyFile:   env("ARGUS_SECRETS_KEY_FILE", "./.dev/secrets/master.key"),
+		SecretsKeyID:     env("ARGUS_SECRETS_KEY_ID", "argus-local"),
 	}
 
 	if cfg.Env != EnvDev && cfg.Env != EnvProd {
@@ -78,6 +87,15 @@ func LoadServer() (Server, error) {
 		if strings.TrimSpace(addr) == "" {
 			return cfg, fmt.Errorf("%s: must not be empty", name)
 		}
+	}
+	// M7-S2 secrets vault wiring: a path/key id that is explicitly set to
+	// blank is invalid; the key file itself is verified (fail closed) by the
+	// vault when the credentials module starts using it.
+	if strings.TrimSpace(cfg.SecretsKeyFile) == "" {
+		return cfg, errors.New("ARGUS_SECRETS_KEY_FILE: must not be empty")
+	}
+	if strings.TrimSpace(cfg.SecretsKeyID) == "" {
+		return cfg, errors.New("ARGUS_SECRETS_KEY_ID: must not be empty")
 	}
 	if cfg.Env == EnvProd {
 		if cfg.DBDSN == "" {
