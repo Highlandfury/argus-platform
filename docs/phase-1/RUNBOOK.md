@@ -328,8 +328,12 @@ docker run -d --name argus-runner --restart unless-stopped `
   -e RUNNER_WORKDIR="/tmp/runner/work" `
   -v //var/run/docker.sock:/var/run/docker.sock `
   -v argus-runner-work:/tmp/runner `
-  myoung34/github-runner:ubuntu-24.04
+  myoung34/github-runner:ubuntu-noble
 ```
+
+Base tags: `ubuntu-noble` (24.04, current), `ubuntu-jammy` (22.04); runner-version
+pins such as `2.337.0-ubuntu-noble` exist and are preferable when the exact
+agent version matters.
 
 `ACCESS_TOKEN=<PAT>` instead of `RUNNER_TOKEN` makes restarts survive token
 expiry.
