@@ -101,7 +101,7 @@ func newHarness(t *testing.T) *harness {
 		caFile:    env("ARGUS_E2E_CA", filepath.Join(".dev", "ca-root.pem")),
 		org:       env("ARGUS_E2E_ORG", "dev"),
 		email:     env("ARGUS_E2E_EMAIL", "admin@dev.local"),
-		password:  env("ARGUS_E2E_PASSWORD", env("ARGUS_DEV_ADMIN_PASSWORD", "dev-admin-changeme")),
+		password:  env("ARGUS_E2E_PASSWORD", env("ARGUS_DEV_ADMIN_PASSWORD", "dev-admin-change-me")),
 		slug:      fmt.Sprintf("e2e-%d", time.Now().UnixNano()),
 	}
 	// Relative CA paths are resolved against the working directory and then

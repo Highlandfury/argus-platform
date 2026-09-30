@@ -1,4 +1,4 @@
-// Command query measures metric-query API latency (M4c §12): it logs in and
+// Command query measures metric-query API latency (M4c Â§12): it logs in and
 // runs N iterations of each query shape against one collector, reporting
 // p50/p95/max and error counts. It is a baseline tool, not a scalability
 // claim: results depend on dataset size and the host.
@@ -47,7 +47,7 @@ func main() {
 	iterations := flag.Int("iterations", 40, "iterations per query shape")
 	flag.Parse()
 	if *password == "" {
-		*password = "dev-admin-changeme"
+		*password = "dev-admin-change-me"
 	}
 
 	jar, err := cookiejar.New(nil)

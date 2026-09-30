@@ -10,7 +10,7 @@ Conventions used below:
 - `<repo>` is the repository root (e.g. `C:\Users\you\Desktop\argus-platform`).
 - `.\scripts\dev.ps1 <action>` = Windows entrypoint; `make <target>` = Linux/WSL.
 - Compose file: `deployments/compose/docker-compose.dev.yml` (project `argus-dev`).
-- `ARGUS_DEV_ADMIN_PASSWORD` defaults to `dev-admin-changeme` (dev only).
+- `ARGUS_DEV_ADMIN_PASSWORD` defaults to `dev-admin-change-me` (dev only).
 
 ---
 
@@ -22,7 +22,7 @@ Conventions used below:
 | `migrate` | one-shot migration job (`argus-server migrate`), retries PostgreSQL first-boot races |
 | `seed` | one-shot dev seed (org `dev`, site `HQ`, admin login, dev enrollment token) |
 | `server` | API `:8080`, ops `:9090`, enrollment gRPC `:8444`, collector stream mTLS `:8443` |
-| `collector` | edge agent: enrollment, signed policy, CPU metric → durable spool → mTLS stream; loopback metrics `127.0.0.1:9091` |
+| `collector` | edge agent: enrollment, signed policy, CPU metric â†’ durable spool â†’ mTLS stream; loopback metrics `127.0.0.1:9091` |
 | `web` | Next.js UI `:3000` (login, collectors, detail + metric chart) |
 
 Data lives in Docker volumes: `db-data`, `collector-data` (identity + spool),
@@ -37,7 +37,7 @@ Data lives in Docker volumes: `db-data`, `collector-data` (identity + spool),
 | `http://127.0.0.1:3000` | web UI | login `dev` / `admin@dev.local` / env password |
 | `http://127.0.0.1:8080/v1/healthz` | API liveness | process alive |
 | `http://127.0.0.1:8080/v1/readyz` | API readiness | DB + auth role + schema current; 503 otherwise |
-| `http://127.0.0.1:9090/metrics` | ops | §15 platform metrics |
+| `http://127.0.0.1:9090/metrics` | ops | Â§15 platform metrics |
 | `8443` / `8444` | published | collector stream (mTLS) / enrollment (token-gated TLS) |
 | `5432` | published | PostgreSQL (dev credentials in compose; never production) |
 | `127.0.0.1:9091` | **loopback inside the collector container only** | collector self-observability; not published, not reachable from other containers |
@@ -86,8 +86,8 @@ curl.exe http://127.0.0.1:8080/v1/readyz      # DB + auth + schema; 503 when not
   Select-String '^argus_collectors|^argus_grpc_streams_active|^argus_ingest_batches_total'
 ```
 Readiness answers a different question than liveness: `healthz` = process,
-`readyz` = dependencies. **Failure symptoms:** `readyz` 503 → read the body
-check names; `database` failing → section 8.
+`readyz` = dependencies. **Failure symptoms:** `readyz` 503 â†’ read the body
+check names; `database` failing â†’ section 8.
 
 ## 6. Database verification
 
@@ -98,7 +98,7 @@ docker compose -f deployments\compose\docker-compose.dev.yml exec db psql -U arg
    SELECT status, count(*) FROM collectors GROUP BY status;"
 ```
 Expected: `version = 7`, `dirty = f`. Dev credentials: owner `argus_owner`,
-app `argus_app_login`, auth `argus_auth_login`, password `devpass` (dev only).
+app `argus_app_login`, auth `argus_auth_login`, password `dev-db-change-me` (dev only).
 
 ## 7. Collector verification
 
@@ -123,7 +123,7 @@ makes the PG18 entrypoint refuse the "foreign" data. Enforced by
 ### 8.2 Init-script mount masking
 `/docker-entrypoint-initdb.d` must be mounted as **files**
 (`../../scripts/db-init/01-roles.sql:/docker-entrypoint-initdb.d/01-roles.sql`),
-never as a directory — a directory mount hides the image's own init scripts
+never as a directory â€” a directory mount hides the image's own init scripts
 (TimescaleDB install/tuning). Also enforced by `check-compose`.
 
 ### 8.3 TimescaleDB first-boot readiness
@@ -143,7 +143,7 @@ locally. Do not disable Docker Desktop networking.
 
 ### 8.5 Server/unreachable database
 `readyz` returns 503 with the failing check; API routes answer 503 for
-unavailable services; ingest returns `STATUS_RETRY` (no ack — the collector
+unavailable services; ingest returns `STATUS_RETRY` (no ack â€” the collector
 keeps the data). Recovery: restore the `db` container, then `up -d --wait`.
 
 ### 8.6 Collector spool troubleshooting
@@ -151,39 +151,39 @@ Spool lives in the `collector-data` volume (`/var/lib/argus/spool`):
 `state.json` (watermark counters), `seg-*.wal` (framed records),
 `deadletter/` (server-rejected batches), `*.corrupt-*` (quarantined segments).
 Use `doctor` for the summary. Distinguish states:
-- **pending** — `spool_records > 0`, `acked < highest`: normal transport lag;
+- **pending** â€” `spool_records > 0`, `acked < highest`: normal transport lag;
   drains when the server is reachable.
-- **acked** — watermark advances; segments are unlinked when fully acked.
-- **dropped** — `dropped_records_total > 0`: capacity pressure dropped the
+- **acked** â€” watermark advances; segments are unlinked when fully acked.
+- **dropped** â€” `dropped_records_total > 0`: capacity pressure dropped the
   oldest segment (loud log line, counted, never silent). Investigate spool
   growth: is the server up? is the query/stream healthy?
-- **corrupt** — `corrupt_records_total > 0`: torn tail truncated or a sealed
+- **corrupt** â€” `corrupt_records_total > 0`: torn tail truncated or a sealed
   segment quarantined (`*.corrupt-*` preserved for inspection). Repeated
   corruption on the same host suggests storage problems.
 
 ### 8.7 Certificate / enrollment issues
-- **expired enrollment token** — server answers uniform `PERMISSION_DENIED`
-  ("enrollment failed"); create a fresh token in the UI (Collectors → Create
+- **expired enrollment token** â€” server answers uniform `PERMISSION_DENIED`
+  ("enrollment failed"); create a fresh token in the UI (Collectors â†’ Create
   enrollment).
-- **already-used token** — same uniform denial; tokens are one-time. Operator
+- **already-used token** â€” same uniform denial; tokens are one-time. Operator
   flow: fresh token; collector name must be free (rename/delete pending record
   if it collides).
-- **revoked collector** — the live stream terminates with `CODE_REVOKED`; the
+- **revoked collector** â€” the live stream terminates with `CODE_REVOKED`; the
   collector stops permanently (by design) and exits 0. Re-enrollment requires a
   fresh token and removing the collector's data dir (dev: section 12).
-- **bad CA / trust mismatch** — collector logs a TLS failure and never streams;
+- **bad CA / trust mismatch** â€” collector logs a TLS failure and never streams;
   distribute the server's `root.pem` (compose: `ca-data` volume) and set
   `ARGUS_COLLECTOR_CA_FILE`.
-- **certificate mismatch** — the server rejects hello/claim mismatches with
+- **certificate mismatch** â€” the server rejects hello/claim mismatches with
   `CODE_PROTOCOL_ERROR` and logs both IDs.
 
 ### 8.8 Query issues
 Phase-1 query bounds: `metric` restricted to the catalog
-(`collector_cpu_percent`), `step ∈ {raw,10s,1m,5m}`, window ≤ 24 h, ≤ 2000
+(`collector_cpu_percent`), `step âˆˆ {raw,10s,1m,5m}`, window â‰¤ 24 h, â‰¤ 2000
 points (422 `query.points_exceeded`), 5 s server timeout (504 `query.timeout`).
 Known lessons: wide-window queries over multi-million-sample series are
 raw-scan bound (no continuous aggregates in Phase 1); the planner needs fresh
-statistics after bulk loads — run `ANALYZE metric_samples;` (documented M4c
+statistics after bulk loads â€” run `ANALYZE metric_samples;` (documented M4c
 finding). This is not a production-scale database architecture.
 
 ## 9. Collector operations
@@ -196,7 +196,7 @@ docker compose -f deployments\compose\docker-compose.dev.yml run --rm collector 
 ... stop collector
 # inspect
 ... run --rm collector doctor
-# revoke (UI: collector detail → Revoke; API shown in §11)
+# revoke (UI: collector detail â†’ Revoke; API shown in Â§11)
 ```
 Identity inspection (no secrets printed): `doctor` shows collector id, cert
 expiry, policy version. Re-enroll requires a fresh token and an empty data dir.
@@ -208,15 +208,15 @@ docker compose -f deployments\compose\docker-compose.dev.yml up -d --build serve
 docker compose -f deployments\compose\docker-compose.dev.yml logs -f server
 ... exec server /argus-server version        # optional
 ```
-Migration state: §6. Graceful shutdown: `stop server` (see §4).
+Migration state: Â§6. Graceful shutdown: `stop server` (see Â§4).
 
 ## 11. Security operations
 
 - **Dev credentials** (never in production): admin `admin@dev.local` /
-  `dev-admin-changeme` (`ARGUS_DEV_ADMIN_PASSWORD`), DB password `devpass`.
-- **Enrollment tokens** (`arg_enr_…`): shown exactly once at creation; stored
+  `dev-admin-change-me` (`ARGUS_DEV_ADMIN_PASSWORD`), DB password `dev-db-change-me`.
+- **Enrollment tokens** (`arg_enr_â€¦`): shown exactly once at creation; stored
   server-side only as SHA-256. The dev seed writes one to the shared
-  `ca-data` volume for the dev collector — delete the file after use.
+  `ca-data` volume for the dev collector â€” delete the file after use.
 - **Certificates / CA**: `ca-data` holds `root.pem`, root key, policy signing
   key, server cert (0600 keys). Distribute only `root.pem` to collectors.
 - **Revocation**: UI/API revocation is terminal for the stream and marks the
@@ -233,12 +233,12 @@ Migration state: §6. Graceful shutdown: `stop server` (see §4).
 
 ## 12. Development reset (DEVELOPMENT ONLY)
 
-`.\scripts\dev.ps1 reset` (`docker compose … down -v --remove-orphans`)
+`.\scripts\dev.ps1 reset` (`docker compose â€¦ down -v --remove-orphans`)
 **destroys all dev Docker volumes**: the database (`db-data`), the collector's
 identity + spool (`collector-data`), and the internal CA + dev token
 (`ca-data`). It is not a production recovery procedure and cannot be used to
 recover production data. After reset, `.\scripts\dev.ps1 up` re-bootstraps
-everything (migrate → seed → server → collector self-enroll).
+everything (migrate â†’ seed â†’ server â†’ collector self-enroll).
 
 ## 13. Backup / restore (Phase-1 scope)
 
@@ -254,14 +254,14 @@ docker cp .\argus.dump argus-dev-db-1:/tmp/argus.dump
 docker compose -f deployments\compose\docker-compose.dev.yml exec -T db `
   pg_restore -U argus_owner -d argus --clean --if-exists /tmp/argus.dump
 ```
-Expected: row counts match §6. **No PITR, no replication, no HA, no
-zero-downtime restore** — those are not implemented in Phase 1. Collectors
+Expected: row counts match Â§6. **No PITR, no replication, no HA, no
+zero-downtime restore** â€” those are not implemented in Phase 1. Collectors
 re-upload unacked spool data after a restore; server-side idempotency makes
 replays safe.
 
 ## 14. Migration operations
 
-Apply: `docker compose … up -d migrate` (or `docker compose … run --rm migrate`).
+Apply: `docker compose â€¦ up -d migrate` (or `docker compose â€¦ run --rm migrate`).
 Inspect: `SELECT version, dirty FROM schema_migrations;`. Recovery of a dirty
 state is a development procedure: inspect the failing migration output, fix the
 cause, then use the pinned `golang-migrate` CLI (v4.20.1) against `migrations/`
@@ -270,11 +270,11 @@ schema objects outside the migration files.
 
 ## 15. Observability checklist (run before debugging a customer network)
 
-- [ ] `healthz` 200 · `readyz` 200
+- [ ] `healthz` 200 Â· `readyz` 200
 - [ ] `argus_collectors{status="active"}` counts the expected collectors;
       no unexpected `stale`
 - [ ] `argus_grpc_streams_active` matches connected collectors
-- [ ] heartbeat age for each active collector ≤ 90 s
+- [ ] heartbeat age for each active collector â‰¤ 90 s
       (`argus_collector_last_heartbeat_age_seconds`)
 - [ ] `argus_ingest_batches_total{status="ok"}` advancing;
       `samples_total{status="accepted"}` advancing
@@ -300,8 +300,8 @@ tests green (login, registry, metrics chart, failure states, enrollment token).
 ## 17. CI runner (self-hosted)
 
 **Status note (2026-09-30):** this repository's GitHub account is
-billing-locked; GitHub refuses to start *any* Actions job — including on
-self-hosted runners — until the payment issue is resolved in *Settings →
+billing-locked; GitHub refuses to start *any* Actions job â€” including on
+self-hosted runners â€” until the payment issue is resolved in *Settings â†’
 Billing & plans* (or the repository is made public, where Actions usage is not
 billed; publishing is a separate decision and requires a secret-hygiene pass).
 Until then, run the identical gates locally:
@@ -322,19 +322,19 @@ in `.github/workflows/ci.yml` target the labels **`self-hosted, linux, x64,
 argus`**.
 
 **Prerequisites:** Docker Desktop running; the repository exists on GitHub; you
-can open *Repo → Settings → Actions → Runners*.
+can open *Repo â†’ Settings â†’ Actions â†’ Runners*.
 
 **Why a Linux-in-Docker runner:** the workflows are Bash/Docker-based
 (gofmt checks, testcontainers integration suites, `docker compose` smoke/e2e).
 A native Windows runner would require rewriting those steps; a Linux runner
 container reuses them unchanged.
 
-**Step 1 — registration token.** Repo → Settings → Actions → Runners → *New
-self-hosted runner* → Linux → copy the `--token` value (valid ~1 hour) **or**
+**Step 1 â€” registration token.** Repo â†’ Settings â†’ Actions â†’ Runners â†’ *New
+self-hosted runner* â†’ Linux â†’ copy the `--token` value (valid ~1 hour) **or**
 create a classic PAT with `repo` scope (the runner image uses it to fetch fresh
 tokens at every start; store it only on your machine).
 
-**Step 2 — start the runner (PowerShell):**
+**Step 2 â€” start the runner (PowerShell):**
 
 ```powershell
 docker run -d --name argus-runner --restart unless-stopped `
@@ -355,24 +355,24 @@ agent version matters.
 `ACCESS_TOKEN=<PAT>` instead of `RUNNER_TOKEN` makes restarts survive token
 expiry.
 
-**Step 3 — verify.** Repo → Settings → Actions → Runners shows
-`argus-runner-1` (Idle). Then trigger any workflow (push, or *Actions →
-security-suite → Run workflow*). Inside the runner, both must work:
+**Step 3 â€” verify.** Repo â†’ Settings â†’ Actions â†’ Runners shows
+`argus-runner-1` (Idle). Then trigger any workflow (push, or *Actions â†’
+security-suite â†’ Run workflow*). Inside the runner, both must work:
 `docker version` and `docker compose version`.
 
 **Caution / implications**
 - Mounting `/var/run/docker.sock` gives the runner root-equivalent access to
-  the host Docker daemon — acceptable on a development machine, never on a
+  the host Docker daemon â€” acceptable on a development machine, never on a
   shared host.
 - The nightly `failure-suite` (03:00 UTC) only runs when this machine and the
   runner container are up; if the runner is offline the scheduled run waits for
   a matching runner.
 - Runner disk usage grows with compose builds and testcontainers images; prune
   with `docker system prune` when idle.
-- Secrets: the registration token/PAT stays in the local container env — it is
+- Secrets: the registration token/PAT stays in the local container env â€” it is
   never committed. Revoke the PAT and delete the runner in Settings when you
   stop using it.
 - **Revert:** if hosted minutes are restored, replace every `runs-on:
   [self-hosted, linux, x64, argus]` in `ci.yml` with `ubuntu-latest`.
-- Uninstall: `docker rm -f argus-runner` and remove the runner entry in Repo →
-  Settings → Actions → Runners.
+- Uninstall: `docker rm -f argus-runner` and remove the runner entry in Repo â†’
+  Settings â†’ Actions â†’ Runners.

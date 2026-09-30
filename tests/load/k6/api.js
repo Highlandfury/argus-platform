@@ -9,7 +9,7 @@
 //     grafana/k6:2.3.0 run - < tests/load/k6/api.js
 //
 // Authentication is performed ONCE in setup() (the session cookie is shared
-// with the VUs), which also keeps the documented login rate limiter intact —
+// with the VUs), which also keeps the documented login rate limiter intact â€”
 // the measured request path is only reads.
 //
 // Dev-only default credential: when K6_PASSWORD is unset, the documented
@@ -18,7 +18,7 @@
 // Deviation note: the canonical workload says "24 h @ 10 s step", but the
 // normative query contract caps results at 2000 points (24 h @ 10 s = 8641
 // points -> 422 query.points_exceeded, recorded in ACCEPTANCE_RUN M4c).
-// L-03 therefore issues 24 h @ 1 m — the finest permitted 24 h resolution.
+// L-03 therefore issues 24 h @ 1 m â€” the finest permitted 24 h resolution.
 import http from "k6/http";
 import { check } from "k6";
 
@@ -26,7 +26,7 @@ const BASE_URL = __ENV.BASE_URL || "http://127.0.0.1:8080";
 const ORG = __ENV.K6_ORG || "dev";
 const EMAIL = __ENV.K6_EMAIL || "admin@dev.local";
 const PASSWORD =
-  __ENV.K6_PASSWORD || __ENV.ARGUS_DEV_ADMIN_PASSWORD || "dev-admin-changeme";
+  __ENV.K6_PASSWORD || __ENV.ARGUS_DEV_ADMIN_PASSWORD || "dev-admin-change-me";
 
 export const options = {
   vus: 50,

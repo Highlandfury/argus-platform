@@ -139,8 +139,8 @@ func TestPartialBatchIsAtomicAndReplayable(t *testing.T) {
 // (equivalent to compose down/up or container replacement). An in-place restart
 // of a container created with an EPHEMERAL host port is unreliable on Docker
 // Desktop 4.93: the published-port proxy is not re-established after `start`
-// (observed empirically; containers with explicit bindings — which is what the
-// dev compose stack uses — are unaffected). The recreate variant is also the
+// (observed empirically; containers with explicit bindings ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â which is what the
+// dev compose stack uses ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â are unaffected). The recreate variant is also the
 // stronger test: the data must survive a brand-new container.
 func TestDatabaseRestartRecovery(t *testing.T) {
 	ctx := context.Background()
@@ -157,10 +157,10 @@ func TestDatabaseRestartRecovery(t *testing.T) {
 		c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 			ContainerRequest: testcontainers.ContainerRequest{
 				Image: timescaleImage,
-				Env: map[string]string{
+				Env: map[string]string{ //nolint:gosec // testcontainer placeholder values
 					"POSTGRES_DB":       "argus",
 					"POSTGRES_USER":     "argus_owner",
-					"POSTGRES_PASSWORD": "devpass",
+					"POSTGRES_PASSWORD": "dev-db-change-me", //nolint:gosec // testcontainer placeholder value
 				},
 				ExposedPorts: []string{"5432/tcp"},
 				// PostgreSQL 18 image layout: the data lives under /var/lib/postgresql.
@@ -183,7 +183,7 @@ func TestDatabaseRestartRecovery(t *testing.T) {
 		if err != nil {
 			return nil, "", err
 		}
-		return c, fmt.Sprintf("postgres://argus_owner:devpass@%s:%s/argus?sslmode=disable", host, port.Port()), nil
+		return c, fmt.Sprintf("postgres://argus_owner:dev-db-change-me@%s:%s/argus?sslmode=disable", host, port.Port()), nil //nolint:gosec // testcontainer placeholder value
 	}
 
 	// Boot #1: initialize schema and write tenant data.

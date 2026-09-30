@@ -6,7 +6,7 @@ async function login(page: Page) {
   await page.getByTestId("login-email").fill("admin@dev.local");
   await page
     .getByTestId("login-password")
-    .fill(process.env.ARGUS_DEV_ADMIN_PASSWORD ?? "dev-admin-changeme");
+    .fill(process.env.ARGUS_DEV_ADMIN_PASSWORD ?? "dev-admin-change-me");
   await page.getByTestId("login-submit").click();
   await expect(page).toHaveURL(/\/$/);
 }
@@ -29,7 +29,7 @@ test("metric chart renders live telemetry and switches ranges", async ({ page })
 
   // Current value + freshness + last-updated from the real API.
   await expect(page.getByTestId("metric-current")).toContainText("%", { timeout: 15_000 });
-  await expect(page.getByTestId("metric-last-updated")).not.toHaveText("—");
+  await expect(page.getByTestId("metric-last-updated")).not.toHaveText("â€”");
   await expect(page.getByTestId("metric-freshness")).toContainText(/Fresh|Stale/);
 
   // The chart canvas exists and the point accounting is non-trivial. This

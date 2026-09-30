@@ -10,7 +10,9 @@ services:
     environment:
       POSTGRES_DB: argus
       POSTGRES_USER: argus_owner
-      POSTGRES_PASSWORD: devpass
+      POSTGRES_PASSWORD: ${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}
+      # Consumed by scripts/db-init/01-roles.sh (dev LOGIN role passwords).
+      ARGUS_DEV_DB_PASSWORD: ${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}
     ports:
       - "5432:5432"
     volumes:
@@ -24,7 +26,7 @@ services:
       # /docker-entrypoint-initdb.d would hide the image's own scripts
       # (000_install_timescaledb.sh, 001_timescaledb_tune.sh) and silently skip
       # TimescaleDB extension installation and tuning. Also regression-checked.
-      - ../../scripts/db-init/01-roles.sql:/docker-entrypoint-initdb.d/01-roles.sql:ro
+      - ../../scripts/db-init/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U argus_owner -d argus"]
       interval: 2s
@@ -41,7 +43,7 @@ services:
         BUILD_DATE: unknown
     command: ["migrate"]
     environment:
-      ARGUS_SERVER_MIGRATE_DSN: "postgres://argus_owner:devpass@db:5432/argus?sslmode=disable"
+      ARGUS_SERVER_MIGRATE_DSN: "postgres://argus_owner:${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}@db:5432/argus?sslmode=disable"
     depends_on:
       db:
         condition: service_healthy
@@ -57,9 +59,9 @@ services:
     command: ["seed-dev"]
     environment:
       ARGUS_ENV: dev
-      ARGUS_SERVER_DB_DSN: "postgres://argus_app_login:devpass@db:5432/argus?sslmode=disable"
-      ARGUS_SERVER_AUTH_DB_DSN: "postgres://argus_auth_login:devpass@db:5432/argus?sslmode=disable"
-      ARGUS_DEV_ADMIN_PASSWORD: "dev-admin-changeme"
+      ARGUS_SERVER_DB_DSN: "postgres://argus_app_login:${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}@db:5432/argus?sslmode=disable"
+      ARGUS_SERVER_AUTH_DB_DSN: "postgres://argus_auth_login:${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}@db:5432/argus?sslmode=disable"
+      ARGUS_DEV_ADMIN_PASSWORD: ${ARGUS_DEV_ADMIN_PASSWORD:-dev-admin-change-me}
       ARGUS_DEV_ENROLLMENT_TOKEN_OUT: /var/lib/argus/ca/enroll-token
     volumes:
       - ca-data:/var/lib/argus/ca
@@ -83,9 +85,9 @@ services:
       ARGUS_SERVER_GRPC_ADDR: ":8443"
       ARGUS_SERVER_ENROLL_ADDR: ":8444"
       # DSNs are consumed from M1 onward (readiness, migrations, auth lookups).
-      ARGUS_SERVER_DB_DSN: "postgres://argus_app_login:devpass@db:5432/argus?sslmode=disable"
-      ARGUS_SERVER_AUTH_DB_DSN: "postgres://argus_auth_login:devpass@db:5432/argus?sslmode=disable"
-      ARGUS_SERVER_MIGRATE_DSN: "postgres://argus_owner:devpass@db:5432/argus?sslmode=disable"
+      ARGUS_SERVER_DB_DSN: "postgres://argus_app_login:${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}@db:5432/argus?sslmode=disable"
+      ARGUS_SERVER_AUTH_DB_DSN: "postgres://argus_auth_login:${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}@db:5432/argus?sslmode=disable"
+      ARGUS_SERVER_MIGRATE_DSN: "postgres://argus_owner:${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}@db:5432/argus?sslmode=disable"
       ARGUS_SERVER_CA_DIR: /var/lib/argus/ca
       ARGUS_DEV_SEED: "true"
     ports:

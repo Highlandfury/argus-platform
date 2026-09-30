@@ -42,7 +42,7 @@ func cmdSeedDev(args []string) int {
 
 	password := os.Getenv("ARGUS_DEV_ADMIN_PASSWORD")
 	if password == "" {
-		password = "dev-admin-changeme"
+		password = "dev-admin-change-me"
 		fmt.Fprintln(os.Stderr, "warning: ARGUS_DEV_ADMIN_PASSWORD not set; using the documented development default")
 	}
 	hash, err := security.HashPassword(password)

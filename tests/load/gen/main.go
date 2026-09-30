@@ -96,7 +96,7 @@ func run() int {
 	flag.Parse()
 
 	if cfg.password == "" {
-		cfg.password = "dev-admin-changeme"
+		cfg.password = "dev-admin-change-me"
 	}
 	if cfg.mode == "single-stream" {
 		cfg.collectors = 1

@@ -10,7 +10,7 @@ test("login, dashboard, logout", async ({ page }) => {
   await page.getByTestId("login-email").fill("admin@dev.local");
   await page
     .getByTestId("login-password")
-    .fill(process.env.ARGUS_DEV_ADMIN_PASSWORD ?? "dev-admin-changeme");
+    .fill(process.env.ARGUS_DEV_ADMIN_PASSWORD ?? "dev-admin-change-me");
   await page.getByTestId("login-submit").click();
 
   await expect(page).toHaveURL(/\/$/);

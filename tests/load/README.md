@@ -32,7 +32,7 @@ curl.exe http://127.0.0.1:8080/v1/readyz   # expect 200
 ## Setup / test data
 
 The dev stack is seeded by `seed` (org `dev`, site `HQ`, admin login) and the
-collector produces `collector_cpu_percent` every 5 s — **no additional test data
+collector produces `collector_cpu_percent` every 5 s â€” **no additional test data
 is required** and L-03 creates none (it only reads; the single login is the
 only write-like action).
 
@@ -47,22 +47,22 @@ until a dev reset; that is the documented cleanup).
 # documented dev credential
 Get-Content tests\load\k6\api.js -Raw | docker run --rm -i --network argus-dev_default `
   -e BASE_URL=http://server:8080 `
-  -e K6_PASSWORD=dev-admin-changeme `
+  -e K6_PASSWORD=dev-admin-change-me `
   grafana/k6:2.3.0 run --summary-trend-stats 'min,avg,p(50),p(95),p(99),max' -
 ```
 
 Canonical thresholds enforced by the script: `p(95) < 300 ms`,
 `p(99) < 1 s`, error rate `< 0.1%`. Recorded deviation: the canonical text says
 "24 h @ 10 s step", but the normative query contract caps results at 2000
-points (24 h @ 10 s → 422 `query.points_exceeded`), so L-03 issues
-**24 h @ 1 m** — the finest permitted 24 h resolution (same interpretation as
+points (24 h @ 10 s â†’ 422 `query.points_exceeded`), so L-03 issues
+**24 h @ 1 m** â€” the finest permitted 24 h resolution (same interpretation as
 AC-08, recorded in `ACCEPTANCE_RUN.md`).
 
 ## Interpret results
 
-- **PASS** — k6 exits 0: both duration thresholds and the error-rate threshold
+- **PASS** â€” k6 exits 0: both duration thresholds and the error-rate threshold
   are green.
-- **FAIL** — k6 exits non-zero and prints `thresholds ... have been crossed`
+- **FAIL** â€” k6 exits non-zero and prints `thresholds ... have been crossed`
   with the offending metric. Report the measured values; do **not** immediately
   change production code. Classify first (test environment vs. server request
   path vs. database), then hand optimization to the appropriate milestone.

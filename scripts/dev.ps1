@@ -9,6 +9,29 @@ param(
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 
+# Dev credentials are never tracked: generate a gitignored .env with random
+# values on first use and load it into this session (compose also auto-loads it
+# from the project directory). Placeholder fallbacks live in the compose file
+# and .env.example for a bare `docker compose up`.
+$EnvFile = Join-Path $Root 'deployments\compose\.env'
+if (-not (Test-Path $EnvFile)) {
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $dbBytes = New-Object byte[] 16
+    $adminBytes = New-Object byte[] 16
+    $rng.GetBytes($dbBytes)
+    $rng.GetBytes($adminBytes)
+    $dbPw = ($dbBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+    $adminPw = ($adminBytes | ForEach-Object { $_.ToString('x2') }) -join ''
+    "ARGUS_DEV_DB_PASSWORD=$dbPw`nARGUS_DEV_ADMIN_PASSWORD=$adminPw" |
+        Set-Content -Path $EnvFile -Encoding ASCII -NoNewline
+    Write-Host "generated dev credentials: deployments\compose\.env (gitignored)"
+}
+Get-Content $EnvFile | ForEach-Object {
+    if ($_ -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+        Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2]
+    }
+}
+
 # Local toolchain first (user-local, gitignored).
 $env:GOPATH = Join-Path $Root '.tools\gopath'
 $env:GOMODCACHE = Join-Path $Root '.tools\gomodcache'

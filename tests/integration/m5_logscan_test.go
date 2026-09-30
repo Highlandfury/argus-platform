@@ -20,9 +20,9 @@ import (
 	"github.com/argus-platform/argus/internal/platform/telemetry"
 )
 
-// S-08 (SPEC §15): exercise authentication, enrollment, and the control stream
+// S-08 (SPEC Ã‚Â§15): exercise authentication, enrollment, and the control stream
 // with logs captured to a buffer, then scan the output for forbidden secret
-// classes. The test fails with the PATTERN NAME only — fixture secrets are
+// classes. The test fails with the PATTERN NAME only Ã¢â‚¬â€ fixture secrets are
 // never printed.
 func TestM5LogScanNoSecretLeakage(t *testing.T) {
 	var buf bytes.Buffer
@@ -131,7 +131,7 @@ func TestM5LogScanNoSecretLeakage(t *testing.T) {
 		{"wrong_password_fixture", failPw},
 		{"session_cookie_name", "argus_session="},
 		{"csrf_cookie_name", "argus_csrf="},
-		{"db_password", "devpass"},
+		{"db_password", "dev-db-change-me"}, //nolint:gosec // testcontainer placeholder value
 		{"authorization_header", "Authorization:"},
 		{"bearer_value", "Bearer "},
 	}

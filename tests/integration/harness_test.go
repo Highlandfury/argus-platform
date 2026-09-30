@@ -135,21 +135,33 @@ func waitStableFor(ctx context.Context, dsn string, timeout time.Duration) error
 	return fmt.Errorf("database not stably ready within %s: last error: %w", timeout, lastErr)
 }
 
-// applyDevRolesScript executes the same SQL used by the dev compose stack so
-// tests exercise the real bootstrap artifact, not a copy.
+// applyDevRolesScript executes the SQL embedded in the dev bootstrap script
+// (scripts/db-init/01-roles.sh) so tests exercise the real artifact, not a
+// copy. The psql variable :'pw' is substituted with the testcontainer password.
 func applyDevRolesScript(ctx context.Context, dsn string) error {
-	path := filepath.Join("..", "..", "scripts", "db-init", "01-roles.sql")
+	path := filepath.Join("..", "..", "scripts", "db-init", "01-roles.sh")
 	raw, err := os.ReadFile(path) //nolint:gosec // fixed repository-relative constant path
 	if err != nil {
 		return fmt.Errorf("read roles script: %w", err)
 	}
+	script := string(raw)
+	start := strings.Index(script, "<<'SQL'")
+	end := strings.LastIndex(script, "\nSQL")
+	if start < 0 || end < 0 || end <= start {
+		return errors.New("roles script: SQL heredoc not found")
+	}
+	sql := script[start+len("<<'SQL'") : end]
+	// Must match the POSTGRES_PASSWORD of the test container below.
+	const containerPassword = "dev-db-change-me" //nolint:gosec // testcontainer placeholder value
+	sql = strings.ReplaceAll(sql, ":'pw'", "'"+strings.ReplaceAll(containerPassword, "'", "''")+"'")
+
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("connect for roles: %w", err)
 	}
 	defer func() { _ = conn.Close(ctx) }()
 	// Simple protocol: the script contains DO blocks with semicolons.
-	if _, err := conn.PgConn().Exec(ctx, string(raw)).ReadAll(); err != nil {
+	if _, err := conn.PgConn().Exec(ctx, sql).ReadAll(); err != nil {
 		return fmt.Errorf("apply roles script: %w", err)
 	}
 	return nil
@@ -162,10 +174,10 @@ func startTimescaleContainer(ctx context.Context) (testcontainers.Container, str
 	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image: timescaleImage,
-			Env: map[string]string{
+			Env: map[string]string{ //nolint:gosec // testcontainer placeholder values
 				"POSTGRES_DB":       "argus",
 				"POSTGRES_USER":     "argus_owner",
-				"POSTGRES_PASSWORD": "devpass",
+				"POSTGRES_PASSWORD": "dev-db-change-me", //nolint:gosec // testcontainer placeholder value
 			},
 			ExposedPorts: []string{"5432/tcp"},
 			WaitingFor:   wait.ForListeningPort("5432/tcp").WithStartupTimeout(5 * time.Minute),
@@ -183,15 +195,15 @@ func startTimescaleContainer(ctx context.Context) (testcontainers.Container, str
 	if err != nil {
 		return nil, "", fmt.Errorf("container port: %w", err)
 	}
-	return c, fmt.Sprintf("postgres://argus_owner:devpass@%s:%s/argus?sslmode=disable", host, port.Port()), nil
+	return c, fmt.Sprintf("postgres://argus_owner:dev-db-change-me@%s:%s/argus?sslmode=disable", host, port.Port()), nil //nolint:gosec // testcontainer placeholder value
 }
 
 func appDSNFor(base string) string {
-	return strings.Replace(base, "argus_owner:devpass", "argus_app_login:devpass", 1)
+	return strings.Replace(base, "argus_owner:dev-db-change-me", "argus_app_login:dev-db-change-me", 1) //nolint:gosec // testcontainer placeholder value
 }
 
 func authDSNFor(base string) string {
-	return strings.Replace(base, "argus_owner:devpass", "argus_auth_login:devpass", 1)
+	return strings.Replace(base, "argus_owner:dev-db-change-me", "argus_auth_login:dev-db-change-me", 1) //nolint:gosec // testcontainer placeholder value
 }
 
 func must(t *testing.T, err error) {

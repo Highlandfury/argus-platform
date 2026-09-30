@@ -14,7 +14,7 @@ permissions:
 # NOTE (self-hosted CI): the account's GitHub-hosted Action minutes are
 # billing-locked, so every job targets this repository's self-hosted Linux
 # runner with labels: self-hosted, linux, x64, argus.
-# Setup instructions: docs/phase-1/RUNBOOK.md §17.
+# Setup instructions: docs/phase-1/RUNBOOK.md Â§17.
 # To revert to GitHub-hosted runners, replace the runs-on values with
 # `ubuntu-latest` (all jobs).
 
@@ -154,7 +154,7 @@ jobs:
         env:
           POSTGRES_DB: argus
           POSTGRES_USER: argus_owner
-          POSTGRES_PASSWORD: devpass
+          POSTGRES_PASSWORD: dev-db-change-me
         ports:
           - 5432:5432
         options: >-
@@ -167,7 +167,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: verify extension, hypertable, idempotent conflict handling
         env:
-          PGPASSWORD: devpass
+          PGPASSWORD: dev-db-change-me
         run: |
           psql -h 127.0.0.1 -U argus_owner -d argus -v ON_ERROR_STOP=1 <<'SQL'
           SELECT version();
