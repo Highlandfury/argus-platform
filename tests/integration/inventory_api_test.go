@@ -1073,6 +1073,44 @@ func TestInventoryScopeEnforcement(t *testing.T) {
 		t.Fatalf("split out-of-scope source: status %d body %v", res.Status, res.Body)
 	}
 
+	// Destination scope on PATCH (M7-S3 review finding): moving a device to
+	// a site outside the caller's bindings is denied and mutates nothing.
+	deniedMove, err := json.Marshal(map[string]any{"site_id": env.siteID, "serial": "SN-SCOPE-HACK"})
+	must(t, err)
+	if res = do(http.MethodPatch, "/v1/devices/"+d2, string(deniedMove)); res.Status != http.StatusForbidden {
+		t.Fatalf("out-of-scope destination patch: status %d body %v", res.Status, res.Body)
+	}
+	res = do(http.MethodGet, "/v1/devices/"+d2, "")
+	if res.Status != http.StatusOK || res.Body["site_id"] != site2 {
+		t.Fatalf("denied destination patch changed site: %d %v", res.Status, res.Body)
+	}
+	if res.Body["serial"] == "SN-SCOPE-HACK" {
+		t.Fatalf("denied destination patch changed identity: %v", res.Body)
+	}
+	var openHack int
+	err = ownerPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM device_identity_history
+		 WHERE device_id = $1::uuid AND identifier_type = 'serial'
+		   AND identifier_value = 'SN-SCOPE-HACK' AND last_seen_at IS NULL`,
+		mustUUID(t, d2)).Scan(&openHack)
+	must(t, err)
+	if openHack != 0 {
+		t.Fatalf("denied destination patch left %d open identity window(s)", openHack)
+	}
+
+	// A destination site also within scope is allowed: bind a third site and
+	// move the device there.
+	site3 := createSite(t, env.orgID, "S3-"+env.slug)
+	bindScope(t, env.orgID, adminID, "site", site3)
+	moveOK, err := json.Marshal(map[string]any{"site_id": site3})
+	must(t, err)
+	if res = do(http.MethodPatch, "/v1/devices/"+d2, string(moveOK)); res.Status != http.StatusOK {
+		t.Fatalf("in-scope destination patch: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodGet, "/v1/devices/"+d2, ""); res.Status != http.StatusOK || res.Body["site_id"] != site3 {
+		t.Fatalf("in-scope move did not persist: %d %v", res.Status, res.Body)
+	}
+
 	// Device groups are governed by org/device_group bindings only.
 	if res = do(http.MethodGet, "/v1/device-groups", ""); res.Status != http.StatusOK || len(dataList(t, res.Body)) != 0 {
 		t.Fatalf("site-bound group list: status %d body %v", res.Status, res.Body)

@@ -573,6 +573,13 @@ func (h *HTTP) UpdateDevice(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
 		return
 	}
+	// Destination scope (M7-S3 review): a PATCH must not move the device
+	// outside the caller's permitted subtree, and a denied move must not
+	// mutate anything (the service transaction never starts).
+	if patch.HasSiteID && !sc.AllowsSite(patch.SiteID) {
+		writeScopeForbidden(w, r, "site is outside the caller's scope")
+		return
+	}
 	updated, err := h.Svc.UpdateDevice(r.Context(), p.OrgID, id, patch, actorFrom(r))
 	if err != nil {
 		switch {
