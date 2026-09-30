@@ -302,9 +302,13 @@ tests green (login, registry, metrics chart, failure states, enrollment token).
 **Status note (2026-09-30):** this repository was blocked by a billing lock that made GitHub refuse to start *any* Actions job â€” including on
 self-hosted runners â€” until the payment issue is resolved in *Settings â†’
 Billing & plans*. This repository is now **public**, which resolved the block:
-the complete `ci` sweep runs on the self-hosted runner (run `36667334318` was
-the first to start; its three compose-stack jobs initially failed on host-port
-conflicts with the local dev stack, fixed by the isolation change below).
+the complete `ci` sweep runs on the self-hosted runner. First fully green run:
+**`36689174067`** (commit `5f7262f`, 2026-09-30): all ten jobs success
+(`failure-suite` is skipped on push events; it runs nightly/release via
+`workflow_dispatch`). Getting there surfaced three CI-only issues, all fixed in
+the commits above: host-port conflicts and shared volumes with the local dev
+stack, the db-init bind mount not existing on the Docker host, and AC-08
+needing the collector container in the e2e stack.
 The identical gates remain runnable locally:
 
 ```powershell
