@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
       -X github.com/argus-platform/argus/internal/platform/buildinfo.Commit=${COMMIT} \
       -X github.com/argus-platform/argus/internal/platform/buildinfo.Date=${BUILD_DATE}" \
     -o /out/argus-server ./cmd/argus-server
-RUN mkdir -p /out/var/lib/argus/ca
+RUN mkdir -p /out/var/lib/argus/ca /out/var/lib/argus/secrets
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build --chown=65532:65532 /out/var/lib/argus /var/lib/argus

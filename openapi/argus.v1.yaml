@@ -11,7 +11,10 @@ info:
     Inventory operations additionally declare `x-argus-capability` (required RBAC-SC
     capability) and `x-argus-scope` (org|site|device_group|device); the contract test
     compares these against the route registry so an implemented inventory route without
-    enforcement metadata (or with mismatched metadata) fails CI.
+    enforcement metadata (or with mismatched metadata) fails CI. Credential operations
+    declare the same extensions (scope `org`; the binding target scope is validated
+    server-side). Credentials are write-only: no route, response, or query returns
+    secret material — `GET` returns metadata only.
 servers:
   - url: http://localhost:8080
     description: Local dev
@@ -22,6 +25,7 @@ tags:
   - name: collectors
   - name: metrics
   - name: inventory
+  - name: credentials
   - name: ops
 
 paths:
@@ -614,6 +618,160 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /v1/credentials:
+    get:
+      tags: [credentials]
+      summary: List credential metadata (never secret material; write-only surface)
+      description: >
+        Returns metadata and binding summaries only. No operation, response, or
+        query parameter can read a secret back: secrets are write-only for every
+        role (docs/04 §6.2, docs/14 §24.5).
+      x-argus-capability: credential.read_metadata
+      x-argus-scope: org
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK (metadata only)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/CredentialMetadata' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [credentials]
+      summary: Create a credential (secret submitted once; metadata-only response)
+      description: >
+        The `secret` is sealed with envelope encryption (per-secret DEK, AES-256-GCM,
+        encryption context bound to org/type/id/version) and is never returned,
+        logged, or stored in plaintext.
+      x-argus-capability: credential.write
+      x-argus-scope: org
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialCreate' }
+      responses:
+        '201':
+          description: Created (metadata only; the secret is not in the response)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialMetadata' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/credentials/{id}:
+    get:
+      tags: [credentials]
+      summary: Credential metadata detail (metadata only; there is no secret read)
+      x-argus-capability: credential.read_metadata
+      x-argus-scope: org
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: OK (metadata only)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialMetadata' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/credentials/{id}/rotate:
+    post:
+      tags: [credentials]
+      summary: Rotate a credential (new secret; atomic envelope replacement; metadata-only response)
+      description: >
+        Re-seals the credential under a fresh per-secret DEK in one transaction and
+        stamps rotated_at. The previous envelope bytes are replaced, not kept.
+      x-argus-capability: credential.rotate
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialRotateRequest' }
+      responses:
+        '200':
+          description: Rotated (metadata only; the new secret is not in the response)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialMetadata' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/credentials/{id}/bind:
+    post:
+      tags: [credentials]
+      summary: Bind a credential to a scope target (org|site|device_group|device)
+      description: >
+        The target is resolved server-side against the tenant's sites /
+        device_groups / devices tables (org targets must be the caller's own
+        org); a foreign or unknown target is uniformly 404 with no existence
+        oracle. Duplicate bindings are a deterministic 409.
+      x-argus-capability: credential.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialBindRequest' }
+      responses:
+        '201':
+          description: Bound
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialBinding' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/credentials/{id}/unbind:
+    post:
+      tags: [credentials]
+      summary: Remove a credential binding by (scope_type, scope_id)
+      description: >
+        Unbind deliberately does not resolve the target, so stale bindings can be
+        cleaned up after a target row was deleted.
+      x-argus-capability: credential.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialUnbindRequest' }
+      responses:
+        '204': { description: Unbound }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /v1/healthz:
     get:
       tags: [ops]
@@ -998,6 +1156,65 @@ components:
       properties:
         name: { type: string, maxLength: 200 }
         selector: { type: object, additionalProperties: true }
+    CredentialMetadata:
+      type: object
+      required: [id, name, kind, metadata, created_at, updated_at, bindings]
+      description: >
+        API-safe projection of a credential. There is no secret field, no
+        envelope column, and no key material: the store keeps the ciphertext
+        envelope out of every response by construction.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        kind: { type: string, description: 'Credential kind, e.g. snmp_v2c, snmp_v3, ssh_paramiko' }
+        metadata: { type: object, additionalProperties: true, description: Non-secret descriptor (username hints, policies) }
+        rotated_at: { type: [string, 'null'], format: date-time, description: Last envelope rotation (if any) }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        bindings:
+          type: array
+          description: Binding summaries (scope + priority); full binding semantics are enforced by dispatch resolution (M9).
+          items: { $ref: '#/components/schemas/CredentialBinding' }
+    CredentialBinding:
+      type: object
+      required: [id, scope_type, scope_id, priority, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        scope_type: { type: string, enum: [org, site, device_group, device] }
+        scope_id: { type: string, format: uuid }
+        priority: { type: integer, description: Higher wins within one scope level at dispatch resolution }
+        created_at: { type: string, format: date-time }
+    CredentialCreate:
+      type: object
+      required: [name, kind, secret]
+      properties:
+        name: { type: string, maxLength: 200 }
+        kind: { type: string, description: 'e.g. snmp_v2c, snmp_v3, ssh_paramiko' }
+        secret:
+          type: string
+          minLength: 1
+          description: >
+            The secret value (SNMP community, SNMPv3 auth/priv keys, SSH
+            password). Write-only: sealed into the envelope and never returned.
+        metadata: { type: object, additionalProperties: true }
+    CredentialRotateRequest:
+      type: object
+      required: [secret]
+      properties:
+        secret: { type: string, minLength: 1, description: 'New secret value; write-only, never returned.' }
+    CredentialBindRequest:
+      type: object
+      required: [scope_type, scope_id]
+      properties:
+        scope_type: { type: string, enum: [org, site, device_group, device] }
+        scope_id: { type: string, format: uuid, description: 'Must exist in the caller tenant (org targets: the caller org).' }
+        priority: { type: integer, default: 0, description: Higher wins within one scope level. }
+    CredentialUnbindRequest:
+      type: object
+      required: [scope_type, scope_id]
+      properties:
+        scope_type: { type: string, enum: [org, site, device_group, device] }
+        scope_id: { type: string, format: uuid }
     MetricSeries:
       type: object
       required: [metric, unit, resolution, from, to, points, meta, status]

@@ -1,7 +1,8 @@
-// Inventory authorization metadata contract (P2-D5, docs/12 §22.19): every
-// implemented inventory route must declare and enforce a capability + scope,
-// and the OpenAPI document must advertise exactly the same metadata. This is
-// the CI gate that fails when enforcement metadata drifts from the spec.
+// Authorization metadata contract (P2-D5, docs/12 §22.19): every implemented
+// inventory (M7-S3) and credential (M7-S4) route must declare and enforce a
+// capability + scope, and the OpenAPI document must advertise exactly the same
+// metadata. This is the CI gate that fails when enforcement metadata drifts
+// from the spec.
 package contract
 
 import (
@@ -24,19 +25,36 @@ func isInventoryPath(path string) bool {
 		strings.HasPrefix(path, "/v1/device-groups")
 }
 
+// isCredentialPath reports whether a path belongs to the M7-S4 credential
+// surface (/v1/credentials).
+func isCredentialPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/credentials")
+}
+
 type authzMeta struct {
 	Capability string
 	Scope      string
 }
 
+// capabilityInVocabulary reports whether capability belongs to the vocabulary
+// enforced for the given surface.
+func capabilityInVocabulary(path, capability string) bool {
+	if isCredentialPath(path) {
+		return authz.IsCredentialCapability(capability)
+	}
+	return authz.IsInventoryCapability(capability)
+}
+
 // TestInventoryAuthzMetadataMatchesRoutes compares the route registry's
-// enforced capability/scope metadata against the OpenAPI vendor extensions:
+// enforced capability/scope metadata against the OpenAPI vendor extensions for
+// the inventory AND credential surfaces:
 //
-//   - an implemented inventory route without capability/scope metadata fails;
-//   - an inventory operation without x-argus-capability or x-argus-scope fails;
+//   - an implemented route without capability/scope metadata fails;
+//   - an operation without x-argus-capability or x-argus-scope fails;
 //   - a route and operation that disagree on method/path or metadata fail;
 //   - an OpenAPI operation declaring metadata the registry does not enforce
-//     fails.
+//     fails;
+//   - a capability outside the surface's pinned vocabulary fails.
 func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "openapi", "argus.v1.yaml"))
 	if err != nil {
@@ -53,14 +71,23 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 
 	// Enforced metadata from the route registry.
 	enforced := map[routeKey]authzMeta{}
+	inventoryCount, credentialCount := 0, 0
 	for _, rt := range api.Routes() {
-		if !isInventoryPath(rt.Path) {
+		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) {
 			continue
+		}
+		if isCredentialPath(rt.Path) {
+			credentialCount++
+		} else {
+			inventoryCount++
 		}
 		enforced[routeKey{rt.Method, rt.Path}] = authzMeta{Capability: rt.Capability, Scope: rt.Scope}
 	}
-	if len(enforced) != 18 {
-		t.Fatalf("inventory routes in registry = %d, want the 18 M7-S3 routes", len(enforced))
+	if inventoryCount != 18 {
+		t.Fatalf("inventory routes in registry = %d, want the 18 M7-S3 routes", inventoryCount)
+	}
+	if credentialCount != 6 {
+		t.Fatalf("credential routes in registry = %d, want the 6 M7-S4 routes", credentialCount)
 	}
 	for key, meta := range enforced {
 		if meta.Capability == "" {
@@ -71,8 +98,8 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 			t.Errorf("route %s %s: missing enforced scope metadata", key.method, key.path)
 			continue
 		}
-		if !authz.IsInventoryCapability(meta.Capability) {
-			t.Errorf("route %s %s: capability %q not in the inventory vocabulary", key.method, key.path, meta.Capability)
+		if !capabilityInVocabulary(key.path, meta.Capability) {
+			t.Errorf("route %s %s: capability %q not in the %s vocabulary", key.method, key.path, meta.Capability, vocabularyName(key.path))
 		}
 		if !authz.IsScope(meta.Scope) {
 			t.Errorf("route %s %s: scope %q not in {org,site,device_group,device}", key.method, key.path, meta.Scope)
@@ -83,7 +110,7 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	documented := map[routeKey]authzMeta{}
 	for pair := model.Model.Paths.PathItems.First(); pair != nil; pair = pair.Next() {
 		path := pair.Key()
-		if !isInventoryPath(path) {
+		if !isInventoryPath(path) && !isCredentialPath(path) {
 			continue
 		}
 		item := pair.Value()
@@ -125,6 +152,14 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 				t.Errorf("OpenAPI operation %s %s: empty capability/scope metadata", method, path)
 				continue
 			}
+			if !capabilityInVocabulary(path, meta.Capability) {
+				t.Errorf("OpenAPI operation %s %s: capability %q not in the %s vocabulary", method, path, meta.Capability, vocabularyName(path))
+				continue
+			}
+			if !authz.IsScope(meta.Scope) {
+				t.Errorf("OpenAPI operation %s %s: scope %q not in {org,site,device_group,device}", method, path, meta.Scope)
+				continue
+			}
 			documented[key] = meta
 		}
 	}
@@ -134,7 +169,7 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	for key, meta := range enforced {
 		documentedMeta, ok := documented[key]
 		if !ok {
-			t.Errorf("implemented inventory route %s %s is missing OpenAPI capability/scope metadata", key.method, key.path)
+			t.Errorf("implemented route %s %s is missing OpenAPI capability/scope metadata", key.method, key.path)
 			continue
 		}
 		if documentedMeta.Capability != meta.Capability {
@@ -151,4 +186,11 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 			t.Errorf("OpenAPI operation %s %s declares x-argus metadata but the route registry does not enforce it", key.method, key.path)
 		}
 	}
+}
+
+func vocabularyName(path string) string {
+	if isCredentialPath(path) {
+		return "credential"
+	}
+	return "inventory"
 }

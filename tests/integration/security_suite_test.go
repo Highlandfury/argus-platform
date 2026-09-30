@@ -45,6 +45,14 @@ import "testing"
 //	S-20 inventory CSRF still required on mutations    -> TestInventoryCSRFEnforcement
 //	S-21 inventory cross-tenant devices/interfaces/    -> TestInventoryCrossTenantS21
 //	     groups + enumeration resistance
+//	S-22 credential capability enforcement (write-     -> TestCredentialsCapabilityEnforcement
+//	     only surface; viewer holds no credential
+//	     capability, 401 before 403)
+//	S-23 credential CSRF required on mutations        -> TestCredentialsCSRFEnforcement
+//	S-24 credential cross-tenant invisibility + RLS   -> TestCredentialsCrossTenantS24
+//	     probes + enumeration parity
+//	S-25 credential scope restriction (org-wide       -> TestCredentialsScopeRestriction
+//	     credential surface)
 //
 // S-14 (injection): parameterized SQL + dimension canonicalization are
 // unit-tested (internal/modules/metrics) and every query is bound-parameter
@@ -88,4 +96,8 @@ func TestSecuritySuite(t *testing.T) {
 	t.Run("S19_inventory_scope_bindings", TestInventoryScopeEnforcement)
 	t.Run("S20_inventory_csrf_mutations", TestInventoryCSRFEnforcement)
 	t.Run("S21_inventory_cross_tenant_surface", TestInventoryCrossTenantS21)
+	t.Run("S22_credentials_capability_enforcement", TestCredentialsCapabilityEnforcement)
+	t.Run("S23_credentials_csrf_mutations", TestCredentialsCSRFEnforcement)
+	t.Run("S24_credentials_cross_tenant_surface", TestCredentialsCrossTenantS24)
+	t.Run("S25_credentials_scope_restriction", TestCredentialsScopeRestriction)
 }

@@ -49,6 +49,12 @@ var routeTable = []Route{
 	{Method: "GET", Path: "/v1/device-groups/{id}", Protected: true, Capability: authz.CapDeviceGroupRead, Scope: authz.ScopeDeviceGroup},
 	{Method: "PATCH", Path: "/v1/device-groups/{id}", Protected: true, CSRF: true, Capability: authz.CapDeviceGroupWrite, Scope: authz.ScopeDeviceGroup},
 	{Method: "DELETE", Path: "/v1/device-groups/{id}", Protected: true, CSRF: true, Capability: authz.CapDeviceGroupWrite, Scope: authz.ScopeDeviceGroup},
+	{Method: "GET", Path: "/v1/credentials", Protected: true, Capability: authz.CapCredentialReadMetadata, Scope: authz.ScopeOrg},
+	{Method: "POST", Path: "/v1/credentials", Protected: true, CSRF: true, Capability: authz.CapCredentialWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/credentials/{id}", Protected: true, Capability: authz.CapCredentialReadMetadata, Scope: authz.ScopeOrg},
+	{Method: "POST", Path: "/v1/credentials/{id}/rotate", Protected: true, CSRF: true, Capability: authz.CapCredentialRotate, Scope: authz.ScopeOrg},
+	{Method: "POST", Path: "/v1/credentials/{id}/bind", Protected: true, CSRF: true, Capability: authz.CapCredentialWrite, Scope: authz.ScopeOrg},
+	{Method: "POST", Path: "/v1/credentials/{id}/unbind", Protected: true, CSRF: true, Capability: authz.CapCredentialWrite, Scope: authz.ScopeOrg},
 	{Method: "GET", Path: "/v1/healthz"},
 	{Method: "GET", Path: "/v1/readyz"},
 }

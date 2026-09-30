@@ -45,6 +45,20 @@ const (
 	CapDeviceGroupWrite   = "device_group.write"
 )
 
+// Credential capability vocabulary (M7-S4). All four names are canonical
+// (docs/04 §6.5): credential.read_metadata, credential.write, credential.rotate,
+// credential.use. Bind/unbind have no canonical name and are enforced under
+// credential.write (the canonical CRUD capability for /credentials). The
+// write-only invariant (docs/04 §6.2 note, docs/12 §22.11) means no capability
+// reads secret material; credential.use is the internal dispatch capability
+// (M9 policy path) and is not attached to any HTTP route yet.
+const (
+	CapCredentialReadMetadata = "credential.read_metadata" //nolint:gosec // RBAC-SC capability name, not a credential
+	CapCredentialWrite        = "credential.write"         //nolint:gosec // RBAC-SC capability name, not a credential
+	CapCredentialRotate       = "credential.rotate"        //nolint:gosec // RBAC-SC capability name, not a credential
+	CapCredentialUse          = "credential.use"           //nolint:gosec // RBAC-SC capability name, not a credential
+)
+
 // Scope types: nodes of the resource tree the authorizer resolves at. Device
 // scope resolves through the device's site binding (device-level bindings are
 // not representable in migration 000010).
@@ -61,6 +75,13 @@ var InventoryCapabilities = []string{
 	CapDeviceRead, CapDeviceWrite, CapDeviceIdentityRead, CapDeviceMerge,
 	CapDeviceSplit, CapInterfaceRead, CapInterfaceWrite,
 	CapDeviceGroupRead, CapDeviceGroupWrite,
+}
+
+// CredentialCapabilities is the full credential capability set; admin holds
+// all of them. Nothing here grants secret reads: every capability operates on
+// metadata or writes.
+var CredentialCapabilities = []string{
+	CapCredentialReadMetadata, CapCredentialWrite, CapCredentialRotate, CapCredentialUse,
 }
 
 // ReadCapabilities are granted to the viewer role (all read-class inventory
@@ -80,9 +101,17 @@ func capabilitySet(caps ...string) map[string]bool {
 // roleCapabilities is the Phase-1 role -> capability derivation. Unknown roles
 // hold nothing (fail closed). This map is the single place that changes when
 // the canonical RBAC-SC catalog lands.
+//
+// Credential role mapping (M7-S4): the canonical permission matrix (docs/04
+// §6.4) grants device-credential create/edit to Org Admin (F) and, within
+// scope, Site Admin / Network Engineer (W); IT Support, NOC, Security Operator,
+// Auditor, and Read-only hold "–". Under the Phase-1 admin/viewer model the
+// viewer therefore receives NO credential capability — not even metadata reads —
+// which is the least privilege the canonical docs allow (credentials are
+// write-only and "never revealable" per docs/04 §6.2).
 var roleCapabilities = map[string]map[string]bool{
-	"admin":  capabilitySet(InventoryCapabilities...),
-	"viewer": capabilitySet(ReadCapabilities...),
+	"admin":  capabilitySet(append(append([]string{}, InventoryCapabilities...), CredentialCapabilities...)...),
+	"viewer": capabilitySet(ReadCapabilities...), // deliberately no credential capabilities
 }
 
 // Allowed reports whether the role holds the capability under the current role
@@ -98,6 +127,17 @@ func Allowed(role, capability string) bool {
 // IsInventoryCapability reports whether name is part of the M7-S3 vocabulary.
 func IsInventoryCapability(name string) bool {
 	for _, c := range InventoryCapabilities {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// IsCredentialCapability reports whether name is part of the M7-S4 credential
+// vocabulary.
+func IsCredentialCapability(name string) bool {
+	for _, c := range CredentialCapabilities {
 		if c == name {
 			return true
 		}

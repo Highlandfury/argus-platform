@@ -1,9 +1,10 @@
-# M7-EVIDENCE — Inventory API remediation (P2-D5, identity uniqueness/lifecycle)
+# M7-EVIDENCE — Inventory + credentials (M7-S3 remediation, M7-S4 credentials API)
 
-Living evidence record for the M7-S3 remediation pass. It documents the three
-remediation areas — capability + scope authorization (P2-D5), DB-enforced
-identity uniqueness (P2-AC-01), and identity-history lifecycle on PATCH
-(P2-AC-02/P2-D7) — plus the OpenAPI contract enforcement and the test evidence.
+Living evidence record for the M7-S3 remediation pass and the M7-S4 credentials
+increment. Sections 1-7 document the three M7-S3 remediation areas — capability
++ scope authorization (P2-D5), DB-enforced identity uniqueness (P2-AC-01), and
+identity-history lifecycle on PATCH (P2-AC-02/P2-D7) — plus the OpenAPI
+contract enforcement and the test evidence. Section 8 documents M7-S4.
 Historical phase documents are not rewritten.
 
 References: `PHASE_2_SPEC.md` P2-AC-01/02, P2-D5, P2-D7; canonical docs/04 §6
@@ -238,3 +239,220 @@ denials are visible in HTTP logs with the request id.
 Verification commands and observed results are recorded in the M7-S3
 remediation report (build, inventory/security/full integration suites, unit
 suites, contract tests, gofmt, golangci-lint v2.14.0).
+
+## 8. M7-S4 — Credentials API (write-only) + device-list UI skeleton
+
+References: `PHASE_2_SPEC.md` P2-AC-04/05; `PHASE_2_FILE_PLAN.md` M7-S4;
+canonical docs/04 §6.4-6.5 (capability catalog + permission matrix),
+docs/11 §21.1 (device_credentials / credential_bindings), docs/12 §22.11
+(credentials endpoints), docs/14 §24.5 (envelope encryption, bindings,
+rotation), docs/14 §24.2 (write-only secrets).
+
+### 8.1 API surface
+
+Six routes, session + CSRF, capability and scope metadata in both the route
+registry (`internal/api/routes.go`) and OpenAPI (contract-gated):
+
+| Route | Capability | Scope | CSRF |
+|---|---|---|---|
+| GET /v1/credentials | `credential.read_metadata` | org | – |
+| POST /v1/credentials | `credential.write` | org | yes |
+| GET /v1/credentials/{id} | `credential.read_metadata` | org | – |
+| POST /v1/credentials/{id}/rotate | `credential.rotate` | org | yes |
+| POST /v1/credentials/{id}/bind | `credential.write` | org | yes |
+| POST /v1/credentials/{id}/unbind | `credential.write` | org | yes |
+
+The canonical catalog (docs/04 §6.5) names `credential.read_metadata`,
+`credential.write`, `credential.use`, and `credential.rotate`; those exact names
+are used. Bind/unbind have no canonical name, so both are enforced under
+`credential.write` (the canonical CRUD capability for `/credentials` in
+docs/12 §22.11) — documented choice, no new vocabulary invented.
+`credential.use` is pinned in the vocabulary for the M9 dispatch path but has
+no HTTP route in this increment (the resolver is internal-only).
+
+**Role mapping.** `admin` holds all four credential capabilities; `viewer`
+holds NONE — not even `credential.read_metadata`. Rationale: the canonical
+permission matrix (docs/04 §6.4) gives device-credential create/edit to Org
+Admin (F) and Site Admin/Network Engineer (W) and "–" to IT Support, NOC,
+Security Operator, Auditor, and Read-only; docs/04 §6.2 states credentials are
+"never revealable to any role". Least privilege under the Phase-1 admin/viewer
+model is therefore no credential capability for viewer; unknown roles hold
+nothing (fail closed).
+
+**Scope semantics.** Credential profiles are org-level rows (no site column)
+whose bindings may target any scope type, so the whole credential surface
+requires an org-wide caller (`authz.Scope.Unrestricted`); a caller with
+scope bindings is denied deterministically with 403 `auth.forbidden`
+(mirroring the M7-S3 device-group create rule). Binding targets are validated
+server-side independently of caller scope (see 8.4). Finer site-scoped
+credential administration is a documented limitation (8.10).
+
+### 8.2 Write-only invariant
+
+Responses are built exclusively from `CredentialMetadata`/`BindingSummary`
+projections (`internal/modules/credentials/models.go`): id, name, kind,
+descriptor metadata, rotated_at, created/updated, binding summaries. The
+envelope columns (`data_enc`, `kms_key_id`, `key_version`,
+`encryption_context`) are structurally absent from the projection, and list
+queries never even select them. No endpoint reads a secret back: there is no
+`GET .../secret` (404), `?reveal=true` is ignored (byte-identical metadata
+response), and no handler returns plaintext. Create/rotate accept a `secret`
+request field exactly once and seal it before any response is written. A unit
+test marshals a credential row with a sentinel secret and asserts no envelope
+field or secret byte appears; integration tests scan responses, audit payloads,
+captured server logs, and full DB dumps for sentinel plaintext.
+
+### 8.3 Encryption path
+
+Create/rotate call `SecretsVault.Seal(orgID, kind, credentialID, plaintext)`
+(P2-D2, M7-S2) and store the returned envelope 1:1 into the 000009 columns; the
+encryption context `{org_id, secret_type, secret_id, version}` binds ciphertext
+to tenant+record+version and is the AAD of both GCM layers. The server wires
+the vault from `ARGUS_SECRETS_KEY_FILE`/`ARGUS_SECRETS_KEY_ID` at startup
+(`cmd/argus-server`): dev generates the local master key (P2-D2), non-dev fails
+closed, and an unloadable vault leaves the credential routes at 503 rather than
+failing the process. Fixing the dev stack required creating
+`/var/lib/argus/secrets` with the distroless nonroot ownership in
+`deployments/compose/Dockerfile.server` (same pattern as the CA dir) — the
+M7-S2 compose wiring was declared but only consumed now.
+
+### 8.4 Binding validation + resolver semantics
+
+Bind validates, inside the caller's tenant transaction and never from request
+ids: the credential exists (RLS), and the target exists for its `scope_type`
+(`site`→sites, `device_group`→device_groups, `device`→live devices, `org`→the
+caller's own org id). Foreign and unknown targets are uniformly
+404 `credential.target_not_found` (no existence oracle); duplicates are
+409 `credential.binding_conflict` (UQ(credential_id, scope_type, scope_id));
+invalid scope types/ids are 400. Unbind is by `(scope_type, scope_id)` and
+deliberately does NOT resolve the target, so stale bindings can be cleaned up
+after a target row is deleted; a missing binding is 404
+`credential.binding_not_found`.
+
+**Resolver (M9 hook, internal only).** `Resolver.ResolveForDevice(orgID,
+deviceID)` selects the effective credential by the canonical precedence
+docs/14 §24.5 + docs/11 §21.1: direct `device` binding > `device_group` >
+`site` > `org`; within one level higher `priority` wins. The canonical docs do
+not define a same-priority tie-break; this increment uses the lowest credential
+id — UUIDv7 is time-sortable, so it is the OLDEST credential, deterministic and
+stable (documented choice). Devices with no applicable binding fail with
+`ErrNoCredential`; unknown/foreign devices with `ErrDeviceNotFound` (RLS).
+`Resolver.Materialize` is the only plaintext path (envelope → vault `Open`),
+never wired to HTTP; tests prove round-trip, determinism, and cross-tenant
+rejection. Device-group membership is not resolvable from the current schema
+(no devices→groups link; selector grammar unpinned, same limitation as M7-S3),
+so the group tier is an extension point: `WithGroupMembership(fn)` lets M9 plug
+selector evaluation in without changing the resolver; tests prove the tier is
+unreachable by default and resolves when the hook is injected.
+
+### 8.5 Rotation semantics
+
+Rotation re-seals under a fresh per-secret DEK inside one transaction and
+atomically replaces `data_enc`, `kms_key_id`, `key_version`,
+`encryption_context`, stamps `rotated_at`/`updated_at` with server `now()`, and
+returns metadata only. The stored `key_version` follows the vault's current KEK
+version: with the dev key ring advanced to version 2, rotation stores version 2
+and the version-1-only vault can no longer open the new envelope (integration
+test extends the key file to two versions). Under an unchanged KEK the version
+stays 1 while ciphertext/DEK change; a per-rotation generation counter is not
+introduced because the M7-S2 vault equates context version with KEK version.
+
+### 8.6 Audit events
+
+`credential.create` / `credential.rotate` / `credential.bind` /
+`credential.unbind` through the existing `AuditSink` pattern (same event shape
+as inventory; action names follow `resource.action`). Events carry actor, org,
+resource id, scope type/id/priority, never secret material. Only successful
+mutations are audited: capability/CSRF denials and service-level failures
+(name conflict, foreign target) produce no success event (asserted by count).
+
+### 8.7 RLS, tenant, and leak tests
+
+`device_credentials_tenant` and `credential_bindings_tenant` (000009,
+enable+force+policy) remain the isolation floor; all store paths run inside
+`database.WithTenant`. Integration evidence:
+`TestCredentialsCrossTenantS24` — B sees no A rows in lists, all point
+operations on A ids are 404 `credential.not_found`, foreign vs missing problem
+bodies are byte-identical (modulo `request_id`), direct DB probes under B's
+context return 0 rows, foreign-org INSERTs raise SQLSTATE 42501 for both
+tables, and A's data is untouched afterwards. `TestCredentialsWriteOnlyLifecycle`
++ `TestCredentialsAuditAndLeakScan` scan response bodies, audit JSON, captured
+slog output, and `row_to_json` dumps for sentinel plaintext (none found).
+
+### 8.8 Test evidence
+
+- `internal/modules/credentials/*_test.go`: API-safe serialization (no envelope
+  fields/secret bytes), request validation, scope vocabulary, resolver
+  precedence/priority/tie-break/fail-closed.
+- `tests/integration/credentials_api_test.go`:
+  `TestCredentialsWriteOnlyLifecycle` (create/list/detail/rotate, no secret
+  endpoint, `?reveal=true` inert, at-rest ciphertext, pagination, validation,
+  name conflict), `TestCredentialsBindUnbind` (all four scope types, duplicate
+  409, invalid/foreign targets, foreign credential 404s, unbind semantics),
+  `TestCredentialsEnumerationParity`, `TestCredentialsResolver` (unbound
+  rejection, tier precedence, priority, deterministic tie-break, group hook,
+  cross-tenant rejection, materialize), `TestCredentialsRotationEnvelopeVersion`,
+  `TestCredentialsAuditAndLeakScan`, `TestCredentialsSchemaNoPlaintextColumn`
+  (information_schema: only the envelope columns exist; no column name suggests
+  raw credential material).
+- `tests/integration/security_suite_test.go` extended with S-22
+  (`TestCredentialsCapabilityEnforcement`: 401 unauthenticated, viewer 403 on
+  all six endpoints), S-23 (`TestCredentialsCSRFEnforcement`: 403 `auth.csrf`
+  before any state change), S-24 (`TestCredentialsCrossTenantS24`), S-25
+  (`TestCredentialsScopeRestriction`).
+- `tests/contract/authz_contract_test.go` extended to the credential surface:
+  the registry now pins 18 inventory + 6 credential routes; missing,
+  mismatched, out-of-vocabulary, or unenforced metadata fails CI (existing
+  checks unchanged).
+- Unit suites and route-metadata pins: `internal/api/routes_test.go`
+  (6 credential routes, all protected, mutations CSRF, viewer holds none).
+
+### 8.9 Frontend + E2E
+
+- `web/src/app/(app)/devices/page.tsx` + `web/src/features/inventory/DevicesList.tsx`:
+  device list (name, kind, site resolved via /v1/sites, status, mgmt IP,
+  last-seen/updated) from the real `/v1/devices` API with deterministic
+  loading/empty/error states. No device detail page (M10); no detail link is
+  fabricated.
+- `web/src/app/(app)/credentials/page.tsx` +
+  `CreateCredentialForm`/`RotateCredential`: metadata-only panel (name, kind,
+  metadata summary, binding summary, rotated/created/updated), admin-gated
+  create form (secret submitted once, cleared immediately), per-row rotate.
+  Nothing secret is rendered or placed in localStorage/sessionStorage; no
+  "show password" affordance exists.
+- Playwright (`web/e2e/devices.spec.ts`, `web/e2e/credentials.spec.ts`)
+  extends the existing suite (one session per file to respect the 10/min login
+  limiter; real API, no fake backend): device list renders a device created
+  through the real API with session+CSRF; empty/error states via interception
+  (existing metrics-spec pattern); credentials create + rotate never render or
+  store sentinel secrets; a direct mutation without CSRF is 403 `auth.csrf`.
+  Observed: **10 passed** (6 pre-existing + 4 new) twice against the dev
+  compose stack.
+
+### 8.10 Limitations (deliberate deferrals)
+
+- M9 consumption is NOT wired: the resolver/materializer exist and are tested,
+  but nothing polls, dispatches, or delivers credentials; `credential.use` has
+  no route. No SNMP/ICMP/polling/discovery/alerting/M8/M10 behavior was added.
+- Device-group membership resolution is an extension point (see 8.4); the
+  group tier resolves only when M9 injects selector evaluation.
+- The credential surface requires org-wide scope; site-scoped credential
+  administration is deferred (8.1).
+- Binding management has no UI yet (API-only; noted on the credentials page).
+- `key_version` tracks the KEK version, not a per-rotation counter (8.5).
+
+### 8.11 Verification (all commands run in this increment)
+
+| Command | Result |
+|---|---|
+| `go build ./...` | pass |
+| `go test ./internal/... -count=1` | pass (all packages) |
+| `go test -race ./internal/modules/credentials/...` | not runnable on this Windows host: `-race requires cgo`, no `gcc` on PATH |
+| `go test ./tests/contract/... -count=1` | pass |
+| `go test ./tests/integration/ -run 'TestCredentials' -count=1 -v` | pass (M7-S4 suite incl. schema probe, plus M7-S2 at-rest) |
+| `go test ./tests/integration/ -run 'TestSecuritySuite' -count=1 -v` | pass (S-01..S-25) |
+| `go test ./tests/integration/ -count=1` | pass (full suite, 114 s) |
+| `gofmt -l internal cmd tests` | empty |
+| golangci-lint v2.14.0 (docker) `run --timeout 10m ./...` | 0 issues |
+| `npm run build` (web) | pass (new /devices + /credentials routes) |
+| `npx playwright test` | 10 passed |

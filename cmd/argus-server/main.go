@@ -17,12 +17,13 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
+	grpccreds "google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
 	"github.com/argus-platform/argus/internal/api"
 	"github.com/argus-platform/argus/internal/modules/collectors"
+	"github.com/argus-platform/argus/internal/modules/credentials"
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/ingest"
 	"github.com/argus-platform/argus/internal/modules/inventory"
@@ -34,6 +35,7 @@ import (
 	"github.com/argus-platform/argus/internal/platform/grpcx"
 	"github.com/argus-platform/argus/internal/platform/logging"
 	"github.com/argus-platform/argus/internal/platform/ratelimit"
+	"github.com/argus-platform/argus/internal/platform/secrets"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
 )
 
@@ -172,7 +174,7 @@ func cmdServe(args []string) int {
 		metricsQuery = metrics.NewQueryService(appPool, collectorsSvc, argus)
 
 		enrollGRPC = grpc.NewServer(
-			grpc.Creds(credentials.NewTLS(&tls.Config{
+			grpc.Creds(grpccreds.NewTLS(&tls.Config{
 				Certificates: []tls.Certificate{*ca.ServerTLS()},
 				MinVersion:   tls.VersionTLS12,
 			})),
@@ -184,7 +186,7 @@ func cmdServe(args []string) int {
 			collectors.NewEnrollmentServer(collectorsSvc, enrollLimiter(cfg.EnrollRatePerMin), logger))
 
 		streamGRPC = grpc.NewServer(
-			grpc.Creds(credentials.NewTLS(&tls.Config{
+			grpc.Creds(grpccreds.NewTLS(&tls.Config{
 				Certificates: []tls.Certificate{*ca.ServerTLS()},
 				ClientAuth:   tls.RequireAndVerifyClientCert,
 				ClientCAs:    ca.RootPool(),
@@ -217,6 +219,25 @@ func cmdServe(args []string) int {
 		inventorySvc = inventory.New(appPool, inventory.SlogAudit{Logger: logger})
 	}
 
+	// Credentials API (M7-S4): write-only secrets sealed by the SecretsVault
+	// (P2-D2 dev binding; generation is dev-only, prod fails closed on a
+	// missing key file). When the vault cannot load, the credential routes
+	// answer 503 instead of failing the whole server (degraded mode).
+	var credentialsSvc *credentials.Service
+	if appPool != nil {
+		kek, err := secrets.LoadOrCreateLocalKMS(secrets.LocalConfig{
+			Path:          cfg.SecretsKeyFile,
+			KeyID:         cfg.SecretsKeyID,
+			AllowGenerate: cfg.Env == config.EnvDev,
+			Logger:        logger,
+		})
+		if err != nil {
+			logger.Error("credentials API disabled: secrets vault unavailable", "error", err)
+		} else {
+			credentialsSvc = credentials.New(appPool, secrets.New(kek), credentials.SlogAudit{Logger: logger})
+		}
+	}
+
 	opts := api.Options{
 		Logger:            logger,
 		Telemetry:         tel,
@@ -231,6 +252,7 @@ func cmdServe(args []string) int {
 		CollectorSessions: sessions,
 		MetricsQuery:      metricsQuery,
 		Inventory:         inventorySvc,
+		Credentials:       credentialsSvc,
 	}
 
 	httpSrv := &http.Server{

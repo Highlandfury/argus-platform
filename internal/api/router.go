@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/argus-platform/argus/internal/modules/collectors"
+	"github.com/argus-platform/argus/internal/modules/credentials"
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
@@ -43,16 +44,18 @@ type Options struct {
 	CollectorSessions *collectors.SessionRegistry
 	MetricsQuery      *metrics.QueryService
 	Inventory         *inventory.Service
+	Credentials       *credentials.Service
 }
 
 type handlers struct {
-	o              Options
-	limiter        *loginLimiter
-	identityHTTP   *identity.HTTP
-	tenancyHTTP    *tenancy.HTTP
-	collectorsHTTP *collectors.HTTP
-	metricsHTTP    *metrics.HTTP
-	inventoryHTTP  *inventory.HTTP
+	o               Options
+	limiter         *loginLimiter
+	identityHTTP    *identity.HTTP
+	tenancyHTTP     *tenancy.HTTP
+	collectorsHTTP  *collectors.HTTP
+	metricsHTTP     *metrics.HTTP
+	inventoryHTTP   *inventory.HTTP
+	credentialsHTTP *credentials.HTTP
 }
 
 func newHandlers(o Options) *handlers {
@@ -88,6 +91,9 @@ func newHandlers(o Options) *handlers {
 	}
 	if o.Inventory != nil {
 		h.inventoryHTTP = &inventory.HTTP{Svc: o.Inventory}
+	}
+	if o.Credentials != nil {
+		h.credentialsHTTP = &credentials.HTTP{Svc: o.Credentials}
 	}
 	return h
 }
@@ -324,6 +330,50 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 			default:
 				h.inventoryHTTP.GetDeviceGroup(w, r)
 			}
+		})
+	case "/v1/credentials":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.credentialsHTTP == nil {
+				serviceUnavailable(w, r, "credentials service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.credentialsHTTP.CreateCredential(w, r)
+				return
+			}
+			h.credentialsHTTP.ListCredentials(w, r)
+		})
+	case "/v1/credentials/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.credentialsHTTP == nil {
+				serviceUnavailable(w, r, "credentials service not configured")
+				return
+			}
+			h.credentialsHTTP.GetCredential(w, r)
+		})
+	case "/v1/credentials/{id}/rotate":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.credentialsHTTP == nil {
+				serviceUnavailable(w, r, "credentials service not configured")
+				return
+			}
+			h.credentialsHTTP.RotateCredential(w, r)
+		})
+	case "/v1/credentials/{id}/bind":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.credentialsHTTP == nil {
+				serviceUnavailable(w, r, "credentials service not configured")
+				return
+			}
+			h.credentialsHTTP.BindCredential(w, r)
+		})
+	case "/v1/credentials/{id}/unbind":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.credentialsHTTP == nil {
+				serviceUnavailable(w, r, "credentials service not configured")
+				return
+			}
+			h.credentialsHTTP.UnbindCredential(w, r)
 		})
 	case "/v1/healthz":
 		return http.HandlerFunc(h.health)

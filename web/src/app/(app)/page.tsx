@@ -47,6 +47,9 @@ export default async function DashboardPage() {
         )}
       </div>
       <p className="muted" style={{ marginTop: 16 }}>
+        <a href="/devices">Devices</a> — inventory list with sites, status, and
+        management addresses. <a href="/credentials">Credentials</a> — write-only
+        secret metadata and bindings.{" "}
         <a href="/collectors">Collectors</a> — enrollment, identity, and the
         secure control stream. Metrics, topology, and alerting arrive in later
         milestones (M4+).
