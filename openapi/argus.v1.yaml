@@ -8,6 +8,10 @@ info:
     X-Request-ID, CSRF double-submit, Idempotency-Key) follow the architecture package §22.
     Session auth uses the `argus_session` cookie; unsafe methods additionally require
     `X-CSRF-Token` matching the `argus_csrf` cookie.
+    Inventory operations additionally declare `x-argus-capability` (required RBAC-SC
+    capability) and `x-argus-scope` (org|site|device_group|device); the contract test
+    compares these against the route registry so an implemented inventory route without
+    enforcement metadata (or with mismatched metadata) fails CI.
 servers:
   - url: http://localhost:8080
     description: Local dev
@@ -232,6 +236,8 @@ paths:
     get:
       tags: [inventory]
       summary: List devices (cursor pagination, soft-deleted hidden by default)
+      x-argus-capability: device.read
+      x-argus-scope: site
       parameters:
         - { name: 'filter[site_id]', in: query, schema: { type: string, format: uuid } }
         - { name: 'filter[status]', in: query, schema: { type: string, enum: [new, up, down, degraded, maintenance, retired] } }
@@ -256,6 +262,8 @@ paths:
     post:
       tags: [inventory]
       summary: Add a manual device (admin)
+      x-argus-capability: device.write
+      x-argus-scope: site
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
@@ -277,6 +285,8 @@ paths:
     get:
       tags: [inventory]
       summary: Device detail
+      x-argus-capability: device.read
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { name: include_deleted, in: query, schema: { type: boolean, default: false } }
@@ -291,6 +301,8 @@ paths:
     patch:
       tags: [inventory]
       summary: Update a device (admin; omitted fields unchanged, null clears nullable fields)
+      x-argus-capability: device.write
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -313,6 +325,8 @@ paths:
     delete:
       tags: [inventory]
       summary: Soft-delete a device (admin)
+      x-argus-capability: device.write
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -326,6 +340,8 @@ paths:
     get:
       tags: [inventory]
       summary: Identity attribute history of a device (open rows have null last_seen_at)
+      x-argus-capability: device.identity.read
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
@@ -350,6 +366,8 @@ paths:
     post:
       tags: [inventory]
       summary: 'Merge source devices into {id}: re-points identity history + interfaces, soft-deletes sources (admin)'
+      x-argus-capability: device.merge
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -374,6 +392,8 @@ paths:
     post:
       tags: [inventory]
       summary: 'Split identity-history rows off {id} into a new device (admin)'
+      x-argus-capability: device.split
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -398,6 +418,8 @@ paths:
     get:
       tags: [inventory]
       summary: List interfaces of a device
+      x-argus-capability: interface.read
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
@@ -420,6 +442,8 @@ paths:
     post:
       tags: [inventory]
       summary: Add a manual interface to a device (admin; UQ(device_id, if_index))
+      x-argus-capability: interface.write
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -444,6 +468,8 @@ paths:
     get:
       tags: [inventory]
       summary: Interface detail
+      x-argus-capability: interface.read
+      x-argus-scope: device
       parameters: [{ $ref: '#/components/parameters/Id' }]
       responses:
         '200':
@@ -456,6 +482,8 @@ paths:
     patch:
       tags: [inventory]
       summary: Update editable interface metadata (admin; if_index is immutable)
+      x-argus-capability: interface.write
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -477,6 +505,8 @@ paths:
     delete:
       tags: [inventory]
       summary: Delete an interface (admin; the 000008 shape has no deleted_at)
+      x-argus-capability: interface.write
+      x-argus-scope: device
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -490,6 +520,8 @@ paths:
     get:
       tags: [inventory]
       summary: List device groups
+      x-argus-capability: device_group.read
+      x-argus-scope: device_group
       parameters:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: cursor, in: query, schema: { type: string } }
@@ -510,6 +542,8 @@ paths:
     post:
       tags: [inventory]
       summary: Create a dynamic device group (admin; selector is a jsonb object)
+      x-argus-capability: device_group.write
+      x-argus-scope: org
       parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
       requestBody:
         required: true
@@ -531,6 +565,8 @@ paths:
     get:
       tags: [inventory]
       summary: Device group detail
+      x-argus-capability: device_group.read
+      x-argus-scope: device_group
       parameters: [{ $ref: '#/components/parameters/Id' }]
       responses:
         '200':
@@ -543,6 +579,8 @@ paths:
     patch:
       tags: [inventory]
       summary: Update a device group (admin)
+      x-argus-capability: device_group.write
+      x-argus-scope: device_group
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }
@@ -565,6 +603,8 @@ paths:
     delete:
       tags: [inventory]
       summary: Delete a device group (admin)
+      x-argus-capability: device_group.write
+      x-argus-scope: device_group
       parameters:
         - { $ref: '#/components/parameters/Id' }
         - { $ref: '#/components/parameters/CsrfToken' }

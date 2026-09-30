@@ -98,6 +98,9 @@ func NewRouter(o Options) http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range routeTable {
 		handler := h.handlerFor(rt)
+		if rt.Capability != "" {
+			handler = h.requireCapability(rt.Capability, handler)
+		}
 		if rt.Protected {
 			if rt.CSRF {
 				handler = h.requireCSRF(handler)

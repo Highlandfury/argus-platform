@@ -15,15 +15,19 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/argus-platform/argus/internal/api"
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
+	"github.com/argus-platform/argus/internal/platform/database"
 	"github.com/argus-platform/argus/internal/platform/security"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
 )
@@ -733,5 +737,894 @@ func TestInventoryTenantIsolationS17(t *testing.T) {
 	res = a.do(t, http.MethodGet, "/v1/devices/"+deviceID, "")
 	if res.Status != http.StatusOK || res.Body["name"] != "tenant-a-dev" || res.Body["serial"] != "SN-TENANT-A" {
 		t.Fatalf("A's device mutated by B: %d %v", res.Status, res.Body)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M7-S3 remediation helpers: users with roles, server-side scope bindings,
+// direct-DB identity inspection.
+// ---------------------------------------------------------------------------
+
+// seedUserWithRole inserts a login user with the given role and returns its id
+// and email.
+func seedUserWithRole(t *testing.T, env *inventoryEnv, role string) (string, string) {
+	t.Helper()
+	id := newUUID()
+	email := env.slug + "-" + role + "-" + id[:8] + "@dev.local"
+	hash, err := security.HashPassword("it-password")
+	must(t, err)
+	_, err = ownerPool.Exec(context.Background(),
+		`INSERT INTO users (id, org_id, email, password_hash, role) VALUES ($1, $2, $3, $4, $5)`,
+		id, env.orgID, email, hash, role)
+	must(t, err)
+	return id, email
+}
+
+// bindScope inserts one user_scope_bindings row through the app path (RLS).
+func bindScope(t *testing.T, orgID, userID, scopeType, scopeID string) {
+	t.Helper()
+	err := database.WithTenant(context.Background(), appPool, mustUUID(t, orgID), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO user_scope_bindings (id, org_id, user_id, scope_type, scope_id) VALUES ($1, $2, $3, $4, $5)`,
+			newUUID(), orgID, userID, scopeType, scopeID)
+		return err
+	})
+	must(t, err)
+}
+
+// loginAs logs in an existing user on a fresh client and returns the client
+// plus its CSRF token.
+func loginAs(t *testing.T, env *inventoryEnv, email string) (*http.Client, string) {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	must(t, err)
+	client := &http.Client{Jar: jar, Timeout: 10 * time.Second}
+	body, err := json.Marshal(map[string]string{
+		"org_slug": env.slug, "email": email, "password": "it-password",
+	})
+	must(t, err)
+	res := doRequest(t, client, http.MethodPost, env.srv.URL+"/v1/auth/login", string(body), nil)
+	if res.Status != http.StatusOK {
+		t.Fatalf("login %s: status %d body %v", email, res.Status, res.Body)
+	}
+	csrf := cookieByName(res, "argus_csrf")
+	if csrf == nil {
+		t.Fatalf("login %s did not set argus_csrf", email)
+	}
+	return client, csrf.Value
+}
+
+// createSite inserts an extra site into the env's org and returns its id.
+func createSite(t *testing.T, orgID, name string) string {
+	t.Helper()
+	id := newUUID()
+	err := database.WithTenant(context.Background(), appPool, mustUUID(t, orgID), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO sites (id, org_id, name) VALUES ($1, $2, $3)`, id, orgID, name)
+		return err
+	})
+	must(t, err)
+	return id
+}
+
+// identityRowDB is one device_identity_history row as stored in the database.
+type identityRowDB struct {
+	Type      string
+	Value     string
+	FirstSeen time.Time
+	LastSeen  *time.Time
+}
+
+func (r identityRowDB) open() bool { return r.LastSeen == nil }
+
+// identityRowsFor loads a device's identity history from the database.
+func identityRowsFor(t *testing.T, orgID, deviceID string) []identityRowDB {
+	t.Helper()
+	var out []identityRowDB
+	err := database.WithTenant(context.Background(), appPool, mustUUID(t, orgID), func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT identifier_type, identifier_value, first_seen_at, last_seen_at
+			 FROM device_identity_history WHERE device_id = $1 ORDER BY first_seen_at, id`, deviceID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r identityRowDB
+			if err := rows.Scan(&r.Type, &r.Value, &r.FirstSeen, &r.LastSeen); err != nil {
+				return err
+			}
+			out = append(out, r)
+		}
+		return rows.Err()
+	})
+	must(t, err)
+	return out
+}
+
+// identityRowID returns the id of the device's open identity row for a key.
+func identityRowID(t *testing.T, orgID, deviceID, typ, value string) string {
+	t.Helper()
+	var id string
+	err := database.WithTenant(context.Background(), appPool, mustUUID(t, orgID), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT id::text FROM device_identity_history
+			 WHERE device_id = $1 AND identifier_type = $2 AND identifier_value = $3 AND last_seen_at IS NULL
+			 ORDER BY id LIMIT 1`, deviceID, typ, value).Scan(&id)
+	})
+	must(t, err)
+	if id == "" {
+		t.Fatalf("open identity %s=%s not found for device %s", typ, value, deviceID)
+	}
+	return id
+}
+
+// duplicateOpenWindows counts (org, type, value) keys with more than one open
+// window in the org. The 000011 partial unique index keeps this at zero.
+func duplicateOpenWindows(t *testing.T, orgID string) int {
+	t.Helper()
+	var n int
+	err := database.WithTenant(context.Background(), appPool, mustUUID(t, orgID), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM (
+				SELECT 1 FROM device_identity_history WHERE last_seen_at IS NULL
+				GROUP BY org_id, identifier_type, identifier_value HAVING count(*) > 1
+			) dup`).Scan(&n)
+	})
+	must(t, err)
+	return n
+}
+
+func openRowsOf(rows []identityRowDB, typ string) []identityRowDB {
+	var out []identityRowDB
+	for _, r := range rows {
+		if r.Type == typ && r.open() {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// TestInventoryCapabilityEnforcement (security suite S-18): unauthenticated
+// inventory access is 401; a viewer session holds the read capabilities but
+// every write-class capability is denied with deterministic 403 problem+json.
+func TestInventoryCapabilityEnforcement(t *testing.T) {
+	env := newInventoryEnv(t, "inv-cap-"+newUUID()[:8])
+	deviceID := env.createDevice(t, "cap-dev", map[string]any{"serial": "SN-CAP-1"})
+	res := env.do(t, http.MethodPost, "/v1/devices/"+deviceID+"/interfaces", `{"if_index":1,"if_name":"Gi1/0/1"}`)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("interface create: status %d body %v", res.Status, res.Body)
+	}
+	interfaceID, _ := res.Body["id"].(string)
+	res = env.do(t, http.MethodPost, "/v1/device-groups", `{"name":"cap-group"}`)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("group create: status %d body %v", res.Status, res.Body)
+	}
+	groupID, _ := res.Body["id"].(string)
+
+	// Unauthenticated: 401 for reads and writes.
+	anon := &http.Client{Timeout: 10 * time.Second}
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/devices"},
+		{http.MethodGet, "/v1/devices/" + deviceID},
+		{http.MethodGet, "/v1/devices/" + deviceID + "/identity-history"},
+		{http.MethodGet, "/v1/devices/" + deviceID + "/interfaces"},
+		{http.MethodGet, "/v1/device-groups"},
+		{http.MethodPost, "/v1/devices"},
+	} {
+		res = doRequest(t, anon, tc.method, env.srv.URL+tc.path, "", nil)
+		requireProblem(t, res, http.StatusUnauthorized, "auth.unauthenticated")
+	}
+
+	// Viewer: read capabilities are granted.
+	_, viewerEmail := seedUserWithRole(t, env, "viewer")
+	viewer, viewerCSRF := loginAs(t, env, viewerEmail)
+	viewerHeaders := map[string]string{"X-CSRF-Token": viewerCSRF}
+	for _, tc := range []struct{ name, path string }{
+		{"devices", "/v1/devices"},
+		{"device", "/v1/devices/" + deviceID},
+		{"identity_history", "/v1/devices/" + deviceID + "/identity-history"},
+		{"device_interfaces", "/v1/devices/" + deviceID + "/interfaces"},
+		{"interface", "/v1/interfaces/" + interfaceID},
+		{"groups", "/v1/device-groups"},
+		{"group", "/v1/device-groups/" + groupID},
+	} {
+		t.Run("viewer_read_"+tc.name, func(t *testing.T) {
+			res := doRequest(t, viewer, http.MethodGet, env.srv.URL+tc.path, "", nil)
+			if res.Status != http.StatusOK {
+				t.Fatalf("status %d body %v", res.Status, res.Body)
+			}
+		})
+	}
+
+	// Viewer: every write-class capability is denied (403 auth.forbidden).
+	for _, tc := range []struct {
+		name, method, path, body string
+	}{
+		{"create_device", http.MethodPost, "/v1/devices", `{"site_id":"` + env.siteID + `","name":"cap-viewer","kind":"switch"}`},
+		{"update_device", http.MethodPatch, "/v1/devices/" + deviceID, `{"name":"cap-v2"}`},
+		{"delete_device", http.MethodDelete, "/v1/devices/" + deviceID, ""},
+		{"merge_device", http.MethodPost, "/v1/devices/" + deviceID + "/merge", `{"source_device_ids":["` + newUUID() + `"]}`},
+		{"split_device", http.MethodPost, "/v1/devices/" + deviceID + "/split", `{"identity_history_ids":["` + newUUID() + `"],"name":"x"}`},
+		{"create_interface", http.MethodPost, "/v1/devices/" + deviceID + "/interfaces", `{"if_index":2,"if_name":"Gi2"}`},
+		{"update_interface", http.MethodPatch, "/v1/interfaces/" + interfaceID, `{"description":"x"}`},
+		{"delete_interface", http.MethodDelete, "/v1/interfaces/" + interfaceID, ""},
+		{"create_group", http.MethodPost, "/v1/device-groups", `{"name":"cap-group-2"}`},
+		{"update_group", http.MethodPatch, "/v1/device-groups/" + groupID, `{"name":"cap-group-3"}`},
+		{"delete_group", http.MethodDelete, "/v1/device-groups/" + groupID, ""},
+	} {
+		t.Run("viewer_write_"+tc.name, func(t *testing.T) {
+			res := doRequest(t, viewer, tc.method, env.srv.URL+tc.path, tc.body, viewerHeaders)
+			requireProblem(t, res, http.StatusForbidden, "auth.forbidden")
+		})
+	}
+
+	// Nothing changed under the denied attempts.
+	res = env.do(t, http.MethodGet, "/v1/devices/"+deviceID, "")
+	if res.Status != http.StatusOK || res.Body["name"] != "cap-dev" {
+		t.Fatalf("device mutated by denied viewer attempts: %d %v", res.Status, res.Body)
+	}
+	res = env.do(t, http.MethodGet, "/v1/interfaces/"+interfaceID, "")
+	if res.Status != http.StatusOK {
+		t.Fatal("interface deleted by denied viewer attempt")
+	}
+	res = env.do(t, http.MethodGet, "/v1/device-groups/"+groupID, "")
+	if res.Status != http.StatusOK || res.Body["name"] != "cap-group" {
+		t.Fatal("group mutated by denied viewer attempts")
+	}
+}
+
+// TestInventoryScopeEnforcement (security suite S-19): a user WITH scope
+// bindings is restricted to the bound subtrees — collection filters narrow,
+// conflicting filters are 403, item access outside scope is 404, and creates
+// require the parent in scope.
+func TestInventoryScopeEnforcement(t *testing.T) {
+	env := newInventoryEnv(t, "inv-scope-"+newUUID()[:8])
+	site2 := createSite(t, env.orgID, "S2-"+env.slug)
+	d1 := env.createDevice(t, "scope-d1", map[string]any{"serial": "SN-SCOPE-1"})
+	body, err := json.Marshal(map[string]any{"site_id": site2, "name": "scope-d2", "kind": "switch"})
+	must(t, err)
+	res := env.do(t, http.MethodPost, "/v1/devices", string(body))
+	if res.Status != http.StatusCreated {
+		t.Fatalf("site2 device create: status %d body %v", res.Status, res.Body)
+	}
+	d2, _ := res.Body["id"].(string)
+	res = env.do(t, http.MethodPost, "/v1/device-groups", `{"name":"scope-group-1"}`)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("group create: status %d", res.Status)
+	}
+	group1, _ := res.Body["id"].(string)
+	res = env.do(t, http.MethodPost, "/v1/device-groups", `{"name":"scope-group-2"}`)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("group create: status %d", res.Status)
+	}
+	group2, _ := res.Body["id"].(string)
+
+	// Site-bound admin: capabilities intact, scope restricted to site2.
+	adminID, adminEmail := seedUserWithRole(t, env, "admin")
+	bindScope(t, env.orgID, adminID, "site", site2)
+	client, csrf := loginAs(t, env, adminEmail)
+	headers := map[string]string{"X-CSRF-Token": csrf}
+	do := func(method, path, body string) apiResponse {
+		return doRequest(t, client, method, env.srv.URL+path, body, headers)
+	}
+
+	res = do(http.MethodGet, "/v1/devices", "")
+	if res.Status != http.StatusOK {
+		t.Fatalf("scoped list: status %d body %v", res.Status, res.Body)
+	}
+	rows := dataList(t, res.Body)
+	if len(rows) != 1 || rows[0]["id"] != d2 {
+		t.Fatalf("site-bound list = %v, want only device %s", rows, d2)
+	}
+	if res = do(http.MethodGet, "/v1/devices/"+d2, ""); res.Status != http.StatusOK {
+		t.Fatalf("scoped in-scope device: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodGet, "/v1/devices/"+d1, ""); res.Status != http.StatusNotFound {
+		t.Fatalf("scoped out-of-scope device read: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodPatch, "/v1/devices/"+d1, `{"name":"hacked"}`); res.Status != http.StatusNotFound {
+		t.Fatalf("scoped out-of-scope patch: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodDelete, "/v1/devices/"+d1, ""); res.Status != http.StatusNotFound {
+		t.Fatalf("scoped out-of-scope delete: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodGet, "/v1/devices/"+d1+"/identity-history", ""); res.Status != http.StatusNotFound {
+		t.Fatalf("scoped out-of-scope identity history: status %d", res.Status)
+	}
+	if res = do(http.MethodGet, "/v1/devices/"+d1+"/interfaces", ""); res.Status != http.StatusNotFound {
+		t.Fatalf("scoped out-of-scope interface list: status %d", res.Status)
+	}
+	if res = do(http.MethodPost, "/v1/devices/"+d1+"/interfaces", `{"if_index":5,"if_name":"Gi5"}`); res.Status != http.StatusNotFound {
+		t.Fatalf("scoped out-of-scope interface create: status %d", res.Status)
+	}
+
+	// Conflicting collection filter is 403; matching filter narrows.
+	if res = do(http.MethodGet, "/v1/devices?filter[site_id]="+env.siteID, ""); res.Status != http.StatusForbidden {
+		t.Fatalf("conflicting site filter: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodGet, "/v1/devices?filter[site_id]="+site2, ""); res.Status != http.StatusOK || len(dataList(t, res.Body)) != 1 {
+		t.Fatalf("matching site filter: status %d body %v", res.Status, res.Body)
+	}
+
+	// Creates require the parent site in scope (403 scope denial).
+	foreignCreate, err := json.Marshal(map[string]any{"site_id": env.siteID, "name": "scope-foreign", "kind": "switch"})
+	must(t, err)
+	if res = do(http.MethodPost, "/v1/devices", string(foreignCreate)); res.Status != http.StatusForbidden {
+		t.Fatalf("out-of-scope create: status %d body %v", res.Status, res.Body)
+	}
+	inScopeCreate, err := json.Marshal(map[string]any{"site_id": site2, "name": "scope-in", "kind": "switch"})
+	must(t, err)
+	if res = do(http.MethodPost, "/v1/devices", string(inScopeCreate)); res.Status != http.StatusCreated {
+		t.Fatalf("in-scope create: status %d body %v", res.Status, res.Body)
+	}
+
+	// Merge/split: out-of-scope target or source is 404.
+	mergeBody, err := json.Marshal(map[string]any{"source_device_ids": []string{d1}})
+	must(t, err)
+	if res = do(http.MethodPost, "/v1/devices/"+d2+"/merge", string(mergeBody)); res.Status != http.StatusNotFound {
+		t.Fatalf("merge out-of-scope source: status %d body %v", res.Status, res.Body)
+	}
+	swapBody, err := json.Marshal(map[string]any{"source_device_ids": []string{d2}})
+	must(t, err)
+	if res = do(http.MethodPost, "/v1/devices/"+d1+"/merge", string(swapBody)); res.Status != http.StatusNotFound {
+		t.Fatalf("merge out-of-scope target: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodPost, "/v1/devices/"+d1+"/split", `{"identity_history_ids":["`+newUUID()+`"],"name":"x"}`); res.Status != http.StatusNotFound {
+		t.Fatalf("split out-of-scope source: status %d body %v", res.Status, res.Body)
+	}
+
+	// Device groups are governed by org/device_group bindings only.
+	if res = do(http.MethodGet, "/v1/device-groups", ""); res.Status != http.StatusOK || len(dataList(t, res.Body)) != 0 {
+		t.Fatalf("site-bound group list: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodGet, "/v1/device-groups/"+group1, ""); res.Status != http.StatusNotFound {
+		t.Fatalf("site-bound group read: status %d", res.Status)
+	}
+	if res = do(http.MethodPost, "/v1/device-groups", `{"name":"scope-denied"}`); res.Status != http.StatusForbidden {
+		t.Fatalf("site-bound group create: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodPatch, "/v1/device-groups/"+group1, `{"name":"nope"}`); res.Status != http.StatusNotFound {
+		t.Fatalf("site-bound group update: status %d", res.Status)
+	}
+	if res = do(http.MethodDelete, "/v1/device-groups/"+group1, ""); res.Status != http.StatusNotFound {
+		t.Fatalf("site-bound group delete: status %d", res.Status)
+	}
+
+	// Device-group-bound admin: only the bound group is visible; device
+	// membership resolution is deferred (documented limitation).
+	groupUserID, groupEmail := seedUserWithRole(t, env, "admin")
+	bindScope(t, env.orgID, groupUserID, "device_group", group1)
+	client2, csrf2 := loginAs(t, env, groupEmail)
+	headers2 := map[string]string{"X-CSRF-Token": csrf2}
+	do2 := func(method, path, body string) apiResponse {
+		return doRequest(t, client2, method, env.srv.URL+path, body, headers2)
+	}
+	if res = do2(http.MethodGet, "/v1/device-groups/"+group1, ""); res.Status != http.StatusOK {
+		t.Fatalf("group-bound in-scope group: status %d body %v", res.Status, res.Body)
+	}
+	if res = do2(http.MethodGet, "/v1/device-groups/"+group2, ""); res.Status != http.StatusNotFound {
+		t.Fatalf("group-bound out-of-scope group: status %d", res.Status)
+	}
+	res = do2(http.MethodGet, "/v1/device-groups", "")
+	if res.Status != http.StatusOK || len(dataList(t, res.Body)) != 1 {
+		t.Fatalf("group-bound list: status %d body %v", res.Status, res.Body)
+	}
+	if res = do2(http.MethodGet, "/v1/devices", ""); res.Status != http.StatusOK || len(dataList(t, res.Body)) != 0 {
+		t.Fatalf("group-bound device list: status %d body %v", res.Status, res.Body)
+	}
+	if res = do2(http.MethodGet, "/v1/devices/"+d2, ""); res.Status != http.StatusNotFound {
+		t.Fatalf("group-bound device read: status %d", res.Status)
+	}
+	if res = do2(http.MethodPost, "/v1/device-groups", `{"name":"group-bound-create"}`); res.Status != http.StatusForbidden {
+		t.Fatalf("group-bound group create: status %d body %v", res.Status, res.Body)
+	}
+	if res = do2(http.MethodPatch, "/v1/device-groups/"+group1, `{"selector":{"kinds":["router"]}}`); res.Status != http.StatusOK {
+		t.Fatalf("group-bound group update: status %d body %v", res.Status, res.Body)
+	}
+
+	// A caller with NO bindings keeps org-wide access (the original admin).
+	res = env.do(t, http.MethodGet, "/v1/devices", "")
+	if res.Status != http.StatusOK || len(dataList(t, res.Body)) < 2 {
+		t.Fatalf("unrestricted admin list: status %d body %v", res.Status, res.Body)
+	}
+}
+
+// TestInventoryIdentityUniqueness (P2-AC-01): duplicate open identity windows
+// are rejected by the database with device.identity_conflict, closed history
+// may repeat, soft delete closes windows for re-claiming, and cross-tenant
+// duplicates are allowed (org-wide uniqueness scope).
+func TestInventoryIdentityUniqueness(t *testing.T) {
+	env := newInventoryEnv(t, "inv-uniq-"+newUUID()[:8])
+	deviceID := env.createDevice(t, "uniq-1", map[string]any{
+		"serial":        "SN-U1",
+		"sys_object_id": "1.3.6.1.4.1.9.1.1",
+		"mgmt_ip":       "10.9.0.1",
+		"identities": []map[string]string{
+			{"type": "mac", "value": "aa:bb:cc:00:00:01"},
+			{"type": "hostname", "value": "uniq-1"},
+		},
+	})
+
+	for _, tc := range []struct {
+		name  string
+		extra map[string]any
+	}{
+		{"serial", map[string]any{"serial": "SN-U1"}},
+		{"sys_object_id", map[string]any{"sys_object_id": "1.3.6.1.4.1.9.1.1"}},
+		{"mgmt_ip", map[string]any{"mgmt_ip": "10.9.0.1"}},
+		{"mac", map[string]any{"identities": []map[string]string{{"type": "mac", "value": "AA:BB:CC:00:00:01"}}}},
+		{"hostname", map[string]any{"identities": []map[string]string{{"type": "hostname", "value": "uniq-1"}}}},
+	} {
+		t.Run("duplicate_"+tc.name, func(t *testing.T) {
+			body := map[string]any{"site_id": env.siteID, "name": "dup-" + tc.name, "kind": "switch"}
+			for k, v := range tc.extra {
+				body[k] = v
+			}
+			raw, err := json.Marshal(body)
+			must(t, err)
+			res := env.do(t, http.MethodPost, "/v1/devices", string(raw))
+			requireProblem(t, res, http.StatusConflict, "device.identity_conflict")
+		})
+	}
+
+	// PATCHing onto a foreign open identity is 409 and leaves the row intact.
+	dev2 := env.createDevice(t, "uniq-2", map[string]any{"serial": "SN-U2"})
+	res := env.do(t, http.MethodPatch, "/v1/devices/"+dev2, `{"serial":"SN-U1"}`)
+	requireProblem(t, res, http.StatusConflict, "device.identity_conflict")
+	res = env.do(t, http.MethodGet, "/v1/devices/"+dev2, "")
+	if res.Status != http.StatusOK || res.Body["serial"] != "SN-U2" {
+		t.Fatalf("conflicting patch mutated device: %d %v", res.Status, res.Body)
+	}
+	rowsDev2 := identityRowsFor(t, env.orgID, dev2)
+	if opens := openRowsOf(rowsDev2, "serial"); len(opens) != 1 || opens[0].Value != "SN-U2" {
+		t.Fatalf("conflicting patch left device2 history inconsistent: %+v", rowsDev2)
+	}
+
+	// Historical reuse: closing SN-U1 frees it.
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+deviceID, `{"serial":"SN-U1X"}`)
+	if res.Status != http.StatusOK {
+		t.Fatalf("identity patch: status %d body %v", res.Status, res.Body)
+	}
+	reused := env.createDevice(t, "uniq-reuse", map[string]any{"serial": "SN-U1"})
+	_ = reused
+
+	// Soft delete closes open windows so identities can be re-claimed.
+	if res = env.do(t, http.MethodDelete, "/v1/devices/"+dev2, ""); res.Status != http.StatusNoContent {
+		t.Fatalf("delete device2: status %d body %v", res.Status, res.Body)
+	}
+	for _, r := range identityRowsFor(t, env.orgID, dev2) {
+		if r.open() {
+			t.Fatalf("soft-deleted device still has an open identity window: %+v", r)
+		}
+	}
+	env.createDevice(t, "uniq-reclaim", map[string]any{"serial": "SN-U2"})
+
+	// Cross-tenant duplicates are allowed (uniqueness is org-wide).
+	envB := newInventoryEnv(t, "inv-uniq-b-"+newUUID()[:8])
+	envB.createDevice(t, "uniq-b", map[string]any{"serial": "SN-U1"})
+
+	// Concurrent creation of the same serial: the DB unique index must reject
+	// exactly one of the two requests.
+	statuses := make(chan int, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			raw, _ := json.Marshal(map[string]any{
+				"site_id": env.siteID, "name": "conc-" + strconv.Itoa(i), "kind": "switch", "serial": "SN-CONC",
+			})
+			req, err := http.NewRequest(http.MethodPost, env.srv.URL+"/v1/devices", strings.NewReader(string(raw)))
+			if err != nil {
+				statuses <- -1
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-CSRF-Token", env.csrf)
+			resp, err := env.client.Do(req)
+			if err != nil {
+				statuses <- -1
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			statuses <- resp.StatusCode
+		}(i)
+	}
+	wg.Wait()
+	close(statuses)
+	created, conflicted := 0, 0
+	for s := range statuses {
+		switch s {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+			conflicted++
+		default:
+			t.Fatalf("concurrent duplicate create: unexpected status %d", s)
+		}
+	}
+	if created != 1 || conflicted != 1 {
+		t.Fatalf("concurrent duplicate create: created=%d conflict=%d, want 1/1", created, conflicted)
+	}
+
+	// No duplicate open windows anywhere in the org.
+	if n := duplicateOpenWindows(t, env.orgID); n != 0 {
+		t.Fatalf("org has %d duplicated open identity keys", n)
+	}
+}
+
+// TestInventoryIdentityPatchLifecycle (P2-AC-02): a PATCH of a canonical
+// identity column closes the old open window and opens the new one in one
+// transaction with the same server timestamp; same-value PATCH is a no-op;
+// explicit null closes without opening; omitted fields are untouched.
+func TestInventoryIdentityPatchLifecycle(t *testing.T) {
+	env := newInventoryEnv(t, "inv-life-"+newUUID()[:8])
+	deviceID := env.createDevice(t, "life-dev", map[string]any{
+		"serial":        "SN-L1",
+		"sys_object_id": "1.3.6.1.4.1.9.1.2",
+		"mgmt_ip":       "10.9.1.1",
+	})
+
+	rows := identityRowsFor(t, env.orgID, deviceID)
+	if len(rows) != 3 {
+		t.Fatalf("baseline identity rows = %d, want 3 (%+v)", len(rows), rows)
+	}
+
+	// Change serial: old closed, new open, same transaction timestamp.
+	res := env.do(t, http.MethodPatch, "/v1/devices/"+deviceID, `{"serial":"SN-L2"}`)
+	if res.Status != http.StatusOK || res.Body["serial"] != "SN-L2" {
+		t.Fatalf("serial patch: status %d body %v", res.Status, res.Body)
+	}
+	rows = identityRowsFor(t, env.orgID, deviceID)
+	var oldSerial, newSerial *identityRowDB
+	for i := range rows {
+		switch {
+		case rows[i].Type == "serial" && rows[i].Value == "SN-L1":
+			oldSerial = &rows[i]
+		case rows[i].Type == "serial" && rows[i].Value == "SN-L2":
+			newSerial = &rows[i]
+		}
+	}
+	if oldSerial == nil || newSerial == nil {
+		t.Fatalf("serial transition rows missing: %+v", rows)
+	}
+	if oldSerial.open() {
+		t.Fatal("old serial window still open after PATCH")
+	}
+	if !newSerial.open() {
+		t.Fatal("new serial window not open after PATCH")
+	}
+	if !oldSerial.LastSeen.Equal(newSerial.FirstSeen) {
+		t.Fatalf("transition timestamps differ: old last_seen=%v new first_seen=%v (must be one tx now())",
+			oldSerial.LastSeen, newSerial.FirstSeen)
+	}
+
+	// Same-value PATCH: no redundant row, history stable.
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+deviceID, `{"serial":"SN-L2"}`)
+	if res.Status != http.StatusOK {
+		t.Fatalf("same-value patch: status %d", res.Status)
+	}
+	rowsSame := identityRowsFor(t, env.orgID, deviceID)
+	if len(rowsSame) != len(rows) {
+		t.Fatalf("same-value PATCH added history rows: %d -> %d", len(rows), len(rowsSame))
+	}
+	if opens := openRowsOf(rowsSame, "serial"); len(opens) != 1 || !opens[0].open() {
+		t.Fatalf("same-value PATCH disturbed the open window: %+v", opens)
+	}
+
+	// Omitted field: untouched.
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+deviceID, `{"name":"life-dev-2"}`)
+	if res.Status != http.StatusOK || res.Body["serial"] != "SN-L2" {
+		t.Fatalf("omitted-field patch: status %d body %v", res.Status, res.Body)
+	}
+	if got := identityRowsFor(t, env.orgID, deviceID); len(got) != len(rows) {
+		t.Fatalf("omitted-field PATCH changed history: %d -> %d", len(rows), len(got))
+	}
+
+	// Explicit null: close without opening; column becomes NULL.
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+deviceID, `{"serial":null}`)
+	if res.Status != http.StatusOK || res.Body["serial"] != nil {
+		t.Fatalf("null serial patch: status %d body %v", res.Status, res.Body)
+	}
+	rowsNull := identityRowsFor(t, env.orgID, deviceID)
+	if opens := openRowsOf(rowsNull, "serial"); len(opens) != 0 {
+		t.Fatalf("null PATCH left an open serial window: %+v", opens)
+	}
+	if len(rowsNull) != len(rows) {
+		t.Fatalf("null PATCH must close, not add, rows: %d -> %d", len(rows), len(rowsNull))
+	}
+
+	// mgmt_ip transition uses canonical (host) values.
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+deviceID, `{"mgmt_ip":"10.9.1.2"}`)
+	if res.Status != http.StatusOK || res.Body["mgmt_ip"] != "10.9.1.2" {
+		t.Fatalf("mgmt_ip patch: status %d body %v", res.Status, res.Body)
+	}
+	rowsIP := identityRowsFor(t, env.orgID, deviceID)
+	if opens := openRowsOf(rowsIP, "mgmt_ip"); len(opens) != 1 || opens[0].Value != "10.9.1.2" {
+		t.Fatalf("mgmt_ip open window = %+v", opens)
+	}
+
+	// Multi-field PATCH shares one transaction timestamp.
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+deviceID, `{"sys_object_id":"1.3.6.1.4.1.9.1.3","mgmt_ip":null}`)
+	if res.Status != http.StatusOK {
+		t.Fatalf("multi-field patch: status %d body %v", res.Status, res.Body)
+	}
+	rowsMulti := identityRowsFor(t, env.orgID, deviceID)
+	var closedIP, openSys *identityRowDB
+	for i := range rowsMulti {
+		switch {
+		case rowsMulti[i].Type == "mgmt_ip" && rowsMulti[i].Value == "10.9.1.2":
+			closedIP = &rowsMulti[i]
+		case rowsMulti[i].Type == "sys_object_id" && rowsMulti[i].Value == "1.3.6.1.4.1.9.1.3":
+			openSys = &rowsMulti[i]
+		}
+	}
+	if closedIP == nil || closedIP.open() || openSys == nil {
+		t.Fatalf("multi-field transition rows missing: %+v", rowsMulti)
+	}
+	if !closedIP.LastSeen.Equal(openSys.FirstSeen) {
+		t.Fatalf("multi-field transition timestamps differ: %v vs %v", closedIP.LastSeen, openSys.FirstSeen)
+	}
+}
+
+// TestInventoryMergeSplitIdentityRegressions (P2-D7): identity-history lifecycle
+// is preserved across manual merge/split — open windows move, exactly one open
+// window per key remains, soft deletes and history stay correct.
+func TestInventoryMergeSplitIdentityRegressions(t *testing.T) {
+	env := newInventoryEnv(t, "inv-reg-"+newUUID()[:8])
+
+	// create -> patch identity -> merge.
+	a := env.createDevice(t, "reg-a", map[string]any{"serial": "SN-A1"})
+	b := env.createDevice(t, "reg-b", map[string]any{"serial": "SN-B1"})
+	res := env.do(t, http.MethodPatch, "/v1/devices/"+a, `{"serial":"SN-A2"}`)
+	if res.Status != http.StatusOK {
+		t.Fatalf("patch A: status %d body %v", res.Status, res.Body)
+	}
+	mergeBody, err := json.Marshal(map[string]any{"source_device_ids": []string{b}})
+	must(t, err)
+	res = env.do(t, http.MethodPost, "/v1/devices/"+a+"/merge", string(mergeBody))
+	if res.Status != http.StatusOK {
+		t.Fatalf("merge B into A: status %d body %v", res.Status, res.Body)
+	}
+	rowsA := identityRowsFor(t, env.orgID, a)
+	if opens := openRowsOf(rowsA, "serial"); len(opens) != 2 {
+		t.Fatalf("merged device serial windows = %+v, want SN-A2 + SN-B1 open", opens)
+	}
+	if n := duplicateOpenWindows(t, env.orgID); n != 0 {
+		t.Fatalf("merge produced %d duplicate open keys", n)
+	}
+	if res = env.do(t, http.MethodGet, "/v1/devices/"+b, ""); res.Status != http.StatusNotFound {
+		t.Fatalf("merged source still live: %d", res.Status)
+	}
+
+	// create -> merge -> split: split a reparented identity into a new device.
+	c := env.createDevice(t, "reg-c", map[string]any{"serial": "SN-C1"})
+	d := env.createDevice(t, "reg-d", map[string]any{"serial": "SN-D1", "identities": []map[string]string{{"type": "hostname", "value": "reg-d"}}})
+	mergeB2, err := json.Marshal(map[string]any{"source_device_ids": []string{d}})
+	must(t, err)
+	res = env.do(t, http.MethodPost, "/v1/devices/"+c+"/merge", string(mergeB2))
+	if res.Status != http.StatusOK {
+		t.Fatalf("merge D into C: status %d body %v", res.Status, res.Body)
+	}
+	dRow := identityRowID(t, env.orgID, c, "serial", "SN-D1")
+	splitB, err := json.Marshal(map[string]any{"identity_history_ids": []string{dRow}, "name": "reg-e", "reason": "split back"})
+	must(t, err)
+	res = env.do(t, http.MethodPost, "/v1/devices/"+c+"/split", string(splitB))
+	if res.Status != http.StatusCreated {
+		t.Fatalf("split D identity: status %d body %v", res.Status, res.Body)
+	}
+	if res.Body["serial"] != "SN-D1" {
+		t.Fatalf("split device canonical serial = %v", res.Body["serial"])
+	}
+	// C keeps its own open serial and loses only the detached window.
+	rowsC := identityRowsFor(t, env.orgID, c)
+	if opens := openRowsOf(rowsC, "serial"); len(opens) != 1 || opens[0].Value != "SN-C1" {
+		t.Fatalf("source serial windows after split = %+v", opens)
+	}
+	if n := duplicateOpenWindows(t, env.orgID); n != 0 {
+		t.Fatalf("split produced %d duplicate open keys", n)
+	}
+
+	// patch identity -> split: the moved OPEN window becomes the new device's
+	// canonical identity and the source column is cleared to stay consistent.
+	f := env.createDevice(t, "reg-f", map[string]any{"serial": "SN-F1"})
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+f, `{"serial":"SN-F2"}`)
+	if res.Status != http.StatusOK {
+		t.Fatalf("patch F: status %d body %v", res.Status, res.Body)
+	}
+	fRow := identityRowID(t, env.orgID, f, "serial", "SN-F2")
+	splitF, err := json.Marshal(map[string]any{"identity_history_ids": []string{fRow}, "name": "reg-g"})
+	must(t, err)
+	res = env.do(t, http.MethodPost, "/v1/devices/"+f+"/split", string(splitF))
+	if res.Status != http.StatusCreated {
+		t.Fatalf("patch->split: status %d body %v", res.Status, res.Body)
+	}
+	g, _ := res.Body["id"].(string)
+	res = env.do(t, http.MethodGet, "/v1/devices/"+f, "")
+	if res.Status != http.StatusOK || res.Body["serial"] != nil {
+		t.Fatalf("source serial must be cleared after moving its open window: %d %v", res.Status, res.Body)
+	}
+	rowsF := identityRowsFor(t, env.orgID, f)
+	if opens := openRowsOf(rowsF, "serial"); len(opens) != 0 {
+		t.Fatalf("source still has open serial windows: %+v", opens)
+	}
+	// SN-F2 is now open on the new device; SN-F1 is closed history and reusable.
+	res = env.do(t, http.MethodPost, "/v1/devices", `{"site_id":"`+env.siteID+`","name":"no-f2","kind":"switch","serial":"SN-F2"}`)
+	requireProblem(t, res, http.StatusConflict, "device.identity_conflict")
+	env.createDevice(t, "yes-f1", map[string]any{"serial": "SN-F1"})
+	_ = g
+
+	// duplicate identity -> merge: a rejected duplicate is repaired by merging.
+	h := env.createDevice(t, "reg-h", map[string]any{"serial": "SN-H1"})
+	i := env.createDevice(t, "reg-i", map[string]any{"serial": "SN-I1"})
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+i, `{"serial":"SN-H1"}`)
+	requireProblem(t, res, http.StatusConflict, "device.identity_conflict")
+	mergeH, err := json.Marshal(map[string]any{"source_device_ids": []string{i}})
+	must(t, err)
+	res = env.do(t, http.MethodPost, "/v1/devices/"+h+"/merge", string(mergeH))
+	if res.Status != http.StatusOK {
+		t.Fatalf("duplicate->merge: status %d body %v", res.Status, res.Body)
+	}
+	if opens := openRowsOf(identityRowsFor(t, env.orgID, h), "serial"); len(opens) != 2 {
+		t.Fatalf("merged serial windows = %+v, want SN-H1 + SN-I1", opens)
+	}
+
+	// duplicate identity -> split: splitting keeps exactly one owner per key.
+	j := env.createDevice(t, "reg-j", map[string]any{
+		"serial":     "SN-J1",
+		"identities": []map[string]string{{"type": "hostname", "value": "reg-j"}},
+	})
+	jRow := identityRowID(t, env.orgID, j, "hostname", "reg-j")
+	splitJ, err := json.Marshal(map[string]any{"identity_history_ids": []string{jRow}, "name": "reg-k"})
+	must(t, err)
+	res = env.do(t, http.MethodPost, "/v1/devices/"+j+"/split", string(splitJ))
+	if res.Status != http.StatusCreated {
+		t.Fatalf("duplicate->split: status %d body %v", res.Status, res.Body)
+	}
+	k, _ := res.Body["id"].(string)
+	res = env.do(t, http.MethodPost, "/v1/devices", `{"site_id":"`+env.siteID+`","name":"no-host","kind":"switch","identities":[{"type":"hostname","value":"reg-j"}]}`)
+	requireProblem(t, res, http.StatusConflict, "device.identity_conflict")
+	res = env.do(t, http.MethodPost, "/v1/devices", `{"site_id":"`+env.siteID+`","name":"no-j-serial","kind":"switch","serial":"SN-J1"}`)
+	requireProblem(t, res, http.StatusConflict, "device.identity_conflict")
+	_ = k
+
+	if n := duplicateOpenWindows(t, env.orgID); n != 0 {
+		t.Fatalf("regression flows produced %d duplicate open keys", n)
+	}
+}
+
+// TestInventoryCSRFEnforcement (security suite S-20): capabilities are in
+// ADDITION to CSRF — every inventory mutation still requires the double-submit
+// header, and rejected requests leave no state behind.
+func TestInventoryCSRFEnforcement(t *testing.T) {
+	env := newInventoryEnv(t, "inv-csrf-"+newUUID()[:8])
+	deviceID := env.createDevice(t, "csrf-dev", map[string]any{"serial": "SN-CSRF-1"})
+	res := env.do(t, http.MethodPost, "/v1/devices/"+deviceID+"/interfaces", `{"if_index":1,"if_name":"Gi1"}`)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("interface create: status %d", res.Status)
+	}
+	interfaceID, _ := res.Body["id"].(string)
+	res = env.do(t, http.MethodPost, "/v1/device-groups", `{"name":"csrf-group"}`)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("group create: status %d", res.Status)
+	}
+	groupID, _ := res.Body["id"].(string)
+
+	for _, tc := range []struct {
+		name, method, path, body string
+	}{
+		{"create_device", http.MethodPost, "/v1/devices", `{"site_id":"` + env.siteID + `","name":"csrf-x","kind":"switch"}`},
+		{"update_device", http.MethodPatch, "/v1/devices/" + deviceID, `{"name":"csrf-hacked"}`},
+		{"delete_device", http.MethodDelete, "/v1/devices/" + deviceID, ""},
+		{"merge_device", http.MethodPost, "/v1/devices/" + deviceID + "/merge", `{"source_device_ids":["` + newUUID() + `"]}`},
+		{"split_device", http.MethodPost, "/v1/devices/" + deviceID + "/split", `{"identity_history_ids":["` + newUUID() + `"],"name":"x"}`},
+		{"create_interface", http.MethodPost, "/v1/devices/" + deviceID + "/interfaces", `{"if_index":2,"if_name":"Gi2"}`},
+		{"update_interface", http.MethodPatch, "/v1/interfaces/" + interfaceID, `{"description":"x"}`},
+		{"delete_interface", http.MethodDelete, "/v1/interfaces/" + interfaceID, ""},
+		{"create_group", http.MethodPost, "/v1/device-groups", `{"name":"csrf-group-2"}`},
+		{"update_group", http.MethodPatch, "/v1/device-groups/" + groupID, `{"name":"csrf-group-3"}`},
+		{"delete_group", http.MethodDelete, "/v1/device-groups/" + groupID, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// No X-CSRF-Token header at all: session is valid, so CSRF is the
+			// rejecting layer (403 auth.csrf) before capability/handler.
+			res := doRequest(t, env.client, tc.method, env.srv.URL+tc.path, tc.body, nil)
+			requireProblem(t, res, http.StatusForbidden, "auth.csrf")
+		})
+	}
+	// State untouched.
+	res = env.do(t, http.MethodGet, "/v1/devices/"+deviceID, "")
+	if res.Status != http.StatusOK || res.Body["name"] != "csrf-dev" {
+		t.Fatalf("CSRF-less attempt mutated the device: %d %v", res.Status, res.Body)
+	}
+	res = env.do(t, http.MethodGet, "/v1/interfaces/"+interfaceID, "")
+	if res.Status != http.StatusOK {
+		t.Fatal("CSRF-less attempt deleted the interface")
+	}
+	// With CSRF the same mutation succeeds.
+	res = env.do(t, http.MethodPatch, "/v1/devices/"+deviceID, `{"name":"csrf-ok"}`)
+	if res.Status != http.StatusOK || res.Body["name"] != "csrf-ok" {
+		t.Fatalf("CSRF-protected patch: status %d body %v", res.Status, res.Body)
+	}
+}
+
+// TestInventoryCrossTenantS21 (security suite S-21): cross-tenant reads and
+// mutations on devices, interfaces, and groups are 404 with the same response
+// shape as genuinely missing rows (enumeration resistance).
+func TestInventoryCrossTenantS21(t *testing.T) {
+	a := newInventoryEnv(t, "inv-xt-a-"+newUUID()[:8])
+	b := newInventoryEnv(t, "inv-xt-b-"+newUUID()[:8])
+
+	aDevice := a.createDevice(t, "xt-a-dev", map[string]any{"serial": "SN-XT-A"})
+	res := a.do(t, http.MethodPost, "/v1/devices/"+aDevice+"/interfaces", `{"if_index":1,"if_name":"Gi1"}`)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("A interface create: status %d body %v", res.Status, res.Body)
+	}
+	aInterface, _ := res.Body["id"].(string)
+	res = a.do(t, http.MethodPost, "/v1/device-groups", `{"name":"xt-a-group"}`)
+	if res.Status != http.StatusCreated {
+		t.Fatalf("A group create: status %d", res.Status)
+	}
+	aGroup, _ := res.Body["id"].(string)
+
+	bDevice := b.createDevice(t, "xt-b-dev", nil)
+
+	// Cross-tenant interface mutations are 404 (A's interface is invisible).
+	for _, tc := range []struct {
+		name, method, path, body, code string
+	}{
+		{"read_interface", http.MethodGet, "/v1/interfaces/" + aInterface, "", "interface.not_found"},
+		{"update_interface", http.MethodPatch, "/v1/interfaces/" + aInterface, `{"description":"hacked"}`, "interface.not_found"},
+		{"delete_interface", http.MethodDelete, "/v1/interfaces/" + aInterface, "", "interface.not_found"},
+		{"read_device", http.MethodGet, "/v1/devices/" + aDevice, "", "device.not_found"},
+		{"read_group", http.MethodGet, "/v1/device-groups/" + aGroup, "", "device_group.not_found"},
+		{"merge_target", http.MethodPost, "/v1/devices/" + aDevice + "/merge", `{"source_device_ids":["` + bDevice + `"]}`, "device.not_found"},
+		{"split_source", http.MethodPost, "/v1/devices/" + aDevice + "/split", `{"identity_history_ids":["` + newUUID() + `"],"name":"x"}`, "device.not_found"},
+	} {
+		t.Run("cross_tenant_"+tc.name, func(t *testing.T) {
+			res := b.do(t, tc.method, tc.path, tc.body)
+			requireProblem(t, res, http.StatusNotFound, tc.code)
+		})
+	}
+
+	// Enumeration resistance: a foreign interface id and a random id produce
+	// the same status, code, and detail.
+	foreign := b.do(t, http.MethodGet, "/v1/interfaces/"+aInterface, "")
+	missing := b.do(t, http.MethodGet, "/v1/interfaces/"+newUUID(), "")
+	if foreign.Status != missing.Status || foreign.Body["code"] != missing.Body["code"] ||
+		foreign.Body["detail"] != missing.Body["detail"] {
+		t.Fatalf("foreign vs missing interface response differs:\nforeign: %v\nmissing: %v", foreign.Body, missing.Body)
+	}
+
+	// B cannot merge A's device as a source.
+	mergeBody, err := json.Marshal(map[string]any{"source_device_ids": []string{aDevice}})
+	must(t, err)
+	res = b.do(t, http.MethodPost, "/v1/devices/"+bDevice+"/merge", string(mergeBody))
+	requireProblem(t, res, http.StatusNotFound, "device.not_found")
+
+	// B cannot split with A's identity rows (rows are invisible -> validation
+	// failure, matching the missing-row response exactly).
+	res = a.do(t, http.MethodGet, "/v1/devices/"+aDevice+"/identity-history", "")
+	aRowID := dataList(t, res.Body)[0]["id"].(string)
+	foreignRows, err := json.Marshal(map[string]any{"identity_history_ids": []string{aRowID}, "name": "stolen"})
+	must(t, err)
+	foreignSplit := b.do(t, http.MethodPost, "/v1/devices/"+bDevice+"/split", string(foreignRows))
+	missingRows, err := json.Marshal(map[string]any{"identity_history_ids": []string{newUUID()}, "name": "stolen"})
+	must(t, err)
+	missingSplit := b.do(t, http.MethodPost, "/v1/devices/"+bDevice+"/split", string(missingRows))
+	if foreignSplit.Status != missingSplit.Status || foreignSplit.Body["code"] != missingSplit.Body["code"] ||
+		foreignSplit.Body["detail"] != missingSplit.Body["detail"] {
+		t.Fatalf("foreign vs missing split rows differ:\nforeign: %v\nmissing: %v", foreignSplit.Body, missingSplit.Body)
+	}
+
+	// A's rows are intact.
+	res = a.do(t, http.MethodGet, "/v1/devices/"+aDevice, "")
+	if res.Status != http.StatusOK || res.Body["serial"] != "SN-XT-A" {
+		t.Fatalf("A's device mutated by B: %d %v", res.Status, res.Body)
+	}
+	res = a.do(t, http.MethodGet, "/v1/interfaces/"+aInterface, "")
+	if res.Status != http.StatusOK || res.Body["description"] != nil {
+		t.Fatalf("A's interface mutated by B: %d %v", res.Status, res.Body)
 	}
 }

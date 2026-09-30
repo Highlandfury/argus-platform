@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/argus-platform/argus/internal/platform/authz"
 	"github.com/argus-platform/argus/internal/platform/database"
 )
 
@@ -18,16 +19,23 @@ const defaultPollProfile = "standard"
 
 // Service implements the inventory lifecycle over the database. Every method
 // is org-scoped: it opens a database.WithTenant transaction (RLS + WITH CHECK
-// as the isolation and integrity floor).
+// as the isolation and integrity floor). ScopeFor resolves the caller's
+// server-side scope bindings (P2-D5).
 type Service struct {
 	app   *pgxpool.Pool
 	audit AuditSink
+	authz *authz.Authorizer
 }
 
 // New wires the inventory service. audit may be nil in unit contexts; the
 // server passes SlogAudit so mutations always leave structured evidence.
 func New(app *pgxpool.Pool, audit AuditSink) *Service {
-	return &Service{app: app, audit: audit}
+	return &Service{app: app, audit: audit, authz: authz.New(app)}
+}
+
+// ScopeFor resolves the caller's scope bindings inside a tenant transaction.
+func (s *Service) ScopeFor(ctx context.Context, orgID, userID uuid.UUID) (authz.Scope, error) {
+	return s.authz.ScopeFor(ctx, orgID, userID)
 }
 
 func parseCursor(cursor string) (*uuid.UUID, error) {
@@ -158,6 +166,9 @@ func (s *Service) CreateDevice(ctx context.Context, orgID uuid.UUID, in CreateDe
 		return nil
 	})
 	if err != nil {
+		if isIdentityConflict(err) {
+			return Device{}, ErrIdentityConflict
+		}
 		if isUniqueViolation(err) {
 			return Device{}, ErrNameConflict
 		}
@@ -180,6 +191,7 @@ func identityRecordsFor(orgID, deviceID uuid.UUID, d Device, explicit []Identity
 		if value == "" {
 			return nil
 		}
+		value = canonicalIdentityValue(typ, value)
 		key := typ + "\x00" + value
 		if seen[key] {
 			return nil
@@ -195,7 +207,7 @@ func identityRecordsFor(orgID, deviceID uuid.UUID, d Device, explicit []Identity
 			DeviceID:        deviceID,
 			IdentifierType:  typ,
 			IdentifierValue: value,
-			Source:          "manual",
+			Source:          identitySourceManual,
 			FirstSeenAt:     now,
 		})
 		return nil
@@ -223,7 +235,10 @@ func identityRecordsFor(orgID, deviceID uuid.UUID, d Device, explicit []Identity
 	return out, nil
 }
 
-// UpdateDevice applies a partial update.
+// UpdateDevice applies a partial update. When a canonical identity column
+// (serial, sys_object_id, mgmt_ip) changes, the device's identity history is
+// maintained in the SAME transaction: the old open window is closed and a new
+// open window opened, both stamped with the transaction's server now().
 func (s *Service) UpdateDevice(ctx context.Context, orgID, id uuid.UUID, p DevicePatch, actor Actor) (Device, error) {
 	var updated Device
 	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
@@ -236,11 +251,29 @@ func (s *Service) UpdateDevice(ctx context.Context, orgID, id uuid.UUID, p Devic
 				return ErrSiteNotFound
 			}
 		}
-		var err error
+		cur, err := findDevice(ctx, tx, id, false)
+		if err != nil {
+			return err
+		}
+		for _, tr := range identityTransitions(cur, p) {
+			if tr.Close != nil {
+				if err := closeOpenIdentity(ctx, tx, id, tr.Type, *tr.Close); err != nil {
+					return err
+				}
+			}
+			if tr.Open != nil {
+				if err := openIdentity(ctx, tx, orgID, id, tr.Type, *tr.Open, identitySourceManual); err != nil {
+					return err
+				}
+			}
+		}
 		updated, err = updateDeviceTx(ctx, tx, id, p)
 		return err
 	})
 	if err != nil {
+		if isIdentityConflict(err) {
+			return Device{}, ErrIdentityConflict
+		}
 		if isUniqueViolation(err) {
 			return Device{}, ErrNameConflict
 		}
@@ -253,7 +286,9 @@ func (s *Service) UpdateDevice(ctx context.Context, orgID, id uuid.UUID, p Devic
 }
 
 // DeleteDevice soft-deletes a device (deleted_at; the row is kept for
-// auditors and the canonical 14-day retirement path).
+// auditors and the canonical 14-day retirement path). Open identity windows
+// are closed in the same transaction so the identity values can be re-claimed
+// by a replacement device (docs/07 §11.4).
 func (s *Service) DeleteDevice(ctx context.Context, orgID, id uuid.UUID, actor Actor) error {
 	var d Device
 	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
@@ -264,6 +299,9 @@ func (s *Service) DeleteDevice(ctx context.Context, orgID, id uuid.UUID, actor A
 		}
 		if d.DeletedAt != nil {
 			return ErrDeviceNotFound
+		}
+		if err := closeOpenIdentities(ctx, tx, id); err != nil {
+			return err
 		}
 		deleted, err := softDeleteDevice(ctx, tx, id)
 		if err != nil {
@@ -334,6 +372,9 @@ func (s *Service) MergeDevices(ctx context.Context, orgID uuid.UUID, actor Actor
 		return err
 	})
 	if err != nil {
+		if isIdentityConflict(err) {
+			return Device{}, ErrIdentityConflict
+		}
 		return Device{}, err
 	}
 	sourceStrings := make([]string, 0, len(sourceIDs))
@@ -351,7 +392,11 @@ func (s *Service) MergeDevices(ctx context.Context, orgID uuid.UUID, actor Actor
 // SplitDevice detaches identity-history rows from the source device into a
 // newly created device (P2-D7): the new device inherits kind/site from the
 // source unless overridden, and device columns (serial, sysObjectID, mgmt IP)
-// are populated from the detached keys.
+// are derived from the detached OPEN identity windows (closed windows are
+// history and never become a live device's current identity). Source columns
+// whose open identity moved are cleared so both devices stay consistent with
+// their history. Uniqueness is untouched: rows are re-pointed, never cloned,
+// so no duplicate open window can result.
 func (s *Service) SplitDevice(ctx context.Context, orgID uuid.UUID, actor Actor, sourceID uuid.UUID, identityIDs []uuid.UUID, name, kind string, siteID *uuid.UUID, reason string) (Device, error) {
 	newDeviceID, err := newID()
 	if err != nil {
@@ -394,20 +439,34 @@ func (s *Service) SplitDevice(ctx context.Context, orgID uuid.UUID, actor Actor,
 			Confidence:  100,
 			Metadata:    json.RawMessage(`{}`),
 		}
+		clearPatch := DevicePatch{}
 		for _, h := range detached {
+			if h.LastSeenAt != nil {
+				continue // closed window: historical, not the new device's identity
+			}
 			value := h.IdentifierValue
 			switch h.IdentifierType {
 			case IdentityTypeSerial:
 				if d.Serial == nil {
 					d.Serial = &value
 				}
+				if src.Serial != nil && *src.Serial == value {
+					clearPatch.Serial = NullableString{Set: true}
+				}
 			case IdentityTypeSysObjectID:
 				if d.SysObjectID == nil {
 					d.SysObjectID = &value
 				}
+				if src.SysObjectID != nil && *src.SysObjectID == value {
+					clearPatch.SysObjectID = NullableString{Set: true}
+				}
 			case IdentityTypeMgmtIP:
 				if d.MgmtIP == nil {
-					d.MgmtIP = &value
+					v := canonicalIdentityValue(IdentityTypeMgmtIP, value)
+					d.MgmtIP = &v
+				}
+				if src.MgmtIP != nil && canonicalIdentityValue(IdentityTypeMgmtIP, *src.MgmtIP) == canonicalIdentityValue(IdentityTypeMgmtIP, value) {
+					clearPatch.MgmtIP = NullableString{Set: true}
 				}
 			}
 		}
@@ -422,9 +481,17 @@ func (s *Service) SplitDevice(ctx context.Context, orgID uuid.UUID, actor Actor,
 		if moved != int64(len(identityIDs)) {
 			return ErrIdentityNotFound
 		}
+		if clearPatch.Serial.Set || clearPatch.SysObjectID.Set || clearPatch.MgmtIP.Set {
+			if _, err := updateDeviceTx(ctx, tx, sourceID, clearPatch); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
+		if isIdentityConflict(err) {
+			return Device{}, ErrIdentityConflict
+		}
 		if isUniqueViolation(err) {
 			return Device{}, ErrNameConflict
 		}
@@ -579,15 +646,16 @@ func (s *Service) DeleteInterface(ctx context.Context, orgID, id uuid.UUID, acto
 	return nil
 }
 
-// ListGroups returns one cursor page of device groups.
-func (s *Service) ListGroups(ctx context.Context, orgID uuid.UUID, limit int, cursor string) (GroupPage, error) {
+// ListGroups returns one cursor page of device groups, narrowed by the
+// caller's scope filter (P2-D5).
+func (s *Service) ListGroups(ctx context.Context, orgID uuid.UUID, scope ScopeFilter, limit int, cursor string) (GroupPage, error) {
 	after, err := parseCursor(cursor)
 	if err != nil {
 		return GroupPage{}, err
 	}
 	var page GroupPage
 	err = database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := listGroups(ctx, tx, limit+1, after)
+		rows, err := listGroups(ctx, tx, scope, limit+1, after)
 		if err != nil {
 			return err
 		}

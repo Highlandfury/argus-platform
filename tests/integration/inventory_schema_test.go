@@ -18,7 +18,7 @@ import (
 	"github.com/argus-platform/argus/migrations"
 )
 
-// inventoryTables is the six-table M7-S1 tenant surface.
+// inventoryTables is the seven-table M7-S1/S3 tenant surface.
 var inventoryTables = []string{
 	"devices",
 	"interfaces",
@@ -26,18 +26,20 @@ var inventoryTables = []string{
 	"device_groups",
 	"device_credentials",
 	"credential_bindings",
+	"user_scope_bindings",
 }
 
 const sqlstateUniqueViolation = "23505"
 
 // inventoryFixture holds one tenant's M7 rows (one per table).
 type inventoryFixture struct {
-	DeviceID     string
-	InterfaceID  string
-	IdentityID   string
-	GroupID      string
-	CredentialID string
-	BindingID    string
+	DeviceID       string
+	InterfaceID    string
+	IdentityID     string
+	GroupID        string
+	CredentialID   string
+	BindingID      string
+	ScopeBindingID string
 }
 
 // seedInventoryFixture writes one row into each M7 table through the sanctioned
@@ -46,12 +48,13 @@ func seedInventoryFixture(t *testing.T, tn tenant) inventoryFixture {
 	t.Helper()
 	ctx := context.Background()
 	fx := inventoryFixture{
-		DeviceID:     newUUID(),
-		InterfaceID:  newUUID(),
-		IdentityID:   newUUID(),
-		GroupID:      newUUID(),
-		CredentialID: newUUID(),
-		BindingID:    newUUID(),
+		DeviceID:       newUUID(),
+		InterfaceID:    newUUID(),
+		IdentityID:     newUUID(),
+		GroupID:        newUUID(),
+		CredentialID:   newUUID(),
+		BindingID:      newUUID(),
+		ScopeBindingID: newUUID(),
 	}
 	err := database.WithTenant(ctx, appPool, mustUUID(t, tn.OrgID), func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
@@ -89,6 +92,12 @@ func seedInventoryFixture(t *testing.T, tn tenant) inventoryFixture {
 			fx.BindingID, tn.OrgID, fx.CredentialID, fx.DeviceID); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO user_scope_bindings (id, org_id, user_id, scope_type, scope_id)
+			 VALUES ($1, $2, $3, 'site', $4)`,
+			fx.ScopeBindingID, tn.OrgID, tn.UserID, tn.SiteID); err != nil {
+			return err
+		}
 		return nil
 	})
 	must(t, err)
@@ -114,9 +123,9 @@ func countInventoryRows(t *testing.T, asOrg string, filterOrg string) map[string
 	return out
 }
 
-// TestInventorySchemaMigrated asserts the M7-S1 structural contract on the
-// harness database: schema version, the six tables, forced RLS + tenant policy
-// on each, and the named canonical constraints/indexes.
+// TestInventorySchemaMigrated asserts the M7-S1/S3 structural contract on the
+// harness database: schema version, the seven tables, forced RLS + tenant
+// policy on each, and the named canonical constraints/indexes.
 func TestInventorySchemaMigrated(t *testing.T) {
 	ctx := context.Background()
 
@@ -127,14 +136,14 @@ func TestInventorySchemaMigrated(t *testing.T) {
 		t.Fatal("schema_migrations dirty")
 	}
 	if version != migrations.Latest {
-		t.Fatalf("schema version = %d, want %d (migrations 000008/000009)", version, migrations.Latest)
+		t.Fatalf("schema version = %d, want %d (migrations 000008..000011)", version, migrations.Latest)
 	}
 
 	for _, tbl := range inventoryTables {
 		var exists bool
 		must(t, ownerPool.QueryRow(ctx, `SELECT to_regclass($1) IS NOT NULL`, "public."+tbl).Scan(&exists))
 		if !exists {
-			t.Fatalf("table %s missing (migrations 000008/000009)", tbl)
+			t.Fatalf("table %s missing (migrations 000008..000011)", tbl)
 		}
 		var rls, forced bool
 		must(t, ownerPool.QueryRow(ctx,
@@ -171,6 +180,14 @@ func TestInventorySchemaMigrated(t *testing.T) {
 			`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'devices_org_site_name_uniq'`).Scan(&def))
 		if !strings.Contains(def, "UNIQUE") || !strings.Contains(def, "WHERE (deleted_at IS NULL)") {
 			t.Fatalf("unexpected devices_org_site_name_uniq definition: %s", def)
+		}
+		// Open identity windows are unique per (org, identifier_type,
+		// identifier_value); closed history rows may repeat (migration 000011).
+		var openUniq string
+		must(t, ownerPool.QueryRow(ctx,
+			`SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'device_identity_history_open_uniq'`).Scan(&openUniq))
+		if !strings.Contains(openUniq, "UNIQUE") || !strings.Contains(openUniq, "WHERE (last_seen_at IS NULL)") {
+			t.Fatalf("unexpected device_identity_history_open_uniq definition: %s", openUniq)
 		}
 	})
 }
@@ -242,6 +259,8 @@ func TestInventorySchemaRLSIsolation(t *testing.T) {
 			[]any{newUUID(), b.OrgID, []byte("intruder-envelope")}},
 		{"credential_bindings", `INSERT INTO credential_bindings (id, org_id, credential_id, scope_type, scope_id) VALUES ($1, $2, $3, 'device', $4)`,
 			[]any{newUUID(), b.OrgID, fxOther.CredentialID, fxOther.DeviceID}},
+		{"user_scope_bindings", `INSERT INTO user_scope_bindings (id, org_id, user_id, scope_type, scope_id) VALUES ($1, $2, $3, 'site', $4)`,
+			[]any{newUUID(), b.OrgID, b.UserID, b.SiteID}},
 	}
 	for _, tc := range foreignInserts {
 		t.Run("insert-"+tc.name, func(t *testing.T) {
@@ -370,11 +389,81 @@ func TestInventorySchemaConstraints(t *testing.T) {
 		}))
 		must(t, insertNamed(deviceB, dupName))
 	})
+
+	t.Run("open_identity_unique_history_repeats_and_reuse", func(t *testing.T) {
+		value := "SN-" + tn.Slug // the fixture's open serial on fx.DeviceID
+		device2, device3 := newUUID(), newUUID()
+		must(t, database.WithTenant(ctx, appPool, mustUUID(t, tn.OrgID), func(ctx context.Context, tx pgx.Tx) error {
+			for _, d := range []struct{ id, name string }{
+				{device2, "uniq2-" + tn.Slug},
+				{device3, "uniq3-" + tn.Slug},
+			} {
+				if _, err := tx.Exec(ctx,
+					`INSERT INTO devices (id, org_id, site_id, name, kind) VALUES ($1, $2, $3, $4, 'switch')`,
+					d.id, tn.OrgID, tn.SiteID, d.name); err != nil {
+					return err
+				}
+			}
+			return nil
+		}))
+
+		openIdentity := func(deviceID, value string) error {
+			return database.WithTenant(ctx, appPool, mustUUID(t, tn.OrgID), func(ctx context.Context, tx pgx.Tx) error {
+				_, err := tx.Exec(ctx,
+					`INSERT INTO device_identity_history (id, org_id, device_id, identifier_type, identifier_value, source)
+					 VALUES ($1, $2, $3, 'serial', $4, 'manual')`,
+					newUUID(), tn.OrgID, deviceID, value)
+				return err
+			})
+		}
+
+		// A second OPEN window for the same serial in the same org is rejected.
+		if got := pgErrCode(openIdentity(device2, value)); got != sqlstateUniqueViolation {
+			t.Fatalf("duplicate open identity: want SQLSTATE %s, got %q", sqlstateUniqueViolation, got)
+		}
+
+		// Close the old window: the serial is re-claimable.
+		must(t, database.WithTenant(ctx, appPool, mustUUID(t, tn.OrgID), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx,
+				`UPDATE device_identity_history SET last_seen_at = now()
+				 WHERE device_id = $1 AND identifier_type = 'serial' AND identifier_value = $2 AND last_seen_at IS NULL`,
+				fx.DeviceID, value)
+			return err
+		}))
+		must(t, openIdentity(device2, value))
+
+		// Historical (closed) rows may repeat — even while the value is open.
+		must(t, database.WithTenant(ctx, appPool, mustUUID(t, tn.OrgID), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO device_identity_history (id, org_id, device_id, identifier_type, identifier_value, source, first_seen_at, last_seen_at)
+				 VALUES ($1, $2, $3, 'serial', $4, 'manual', now() - interval '2 days', now() - interval '1 day')`,
+				newUUID(), tn.OrgID, device3, value)
+			return err
+		}))
+
+		// Cross-tenant: another org may hold the same serial open concurrently
+		// (the uniqueness scope is org-wide).
+		other := seedTenant(t, "m7-uniq-"+newUUID()[:8])
+		otherDevice := newUUID()
+		must(t, database.WithTenant(ctx, appPool, mustUUID(t, other.OrgID), func(ctx context.Context, tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO devices (id, org_id, site_id, name, kind) VALUES ($1, $2, $3, 'uniq-other', 'switch')`,
+				otherDevice, other.OrgID, other.SiteID); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx,
+				`INSERT INTO device_identity_history (id, org_id, device_id, identifier_type, identifier_value, source)
+				 VALUES ($1, $2, $3, 'serial', $4, 'manual')`,
+				newUUID(), other.OrgID, otherDevice, value)
+			return err
+		}))
+	})
 }
 
-// TestInventorySchemaDownUpRoundTrip steps only migrations 000009 + 000008
-// down on a throwaway database: the six tables disappear, the Phase-1 schema
-// stays, and re-applying up restores the inventory schema.
+// TestInventorySchemaDownUpRoundTrip steps migrations 000011..000008 down on a
+// throwaway database: the seven tables (and the open-identity unique index)
+// disappear, the Phase-1 schema stays, and re-applying up restores the
+// inventory schema.
 func TestInventorySchemaDownUpRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	dbName := "argus_m7test"
@@ -403,14 +492,20 @@ func TestInventorySchemaDownUpRoundTrip(t *testing.T) {
 			t.Fatalf("%s missing after up", tbl)
 		}
 	}
+	if !indexExists(t, dsn, "device_identity_history_open_uniq") {
+		t.Fatal("device_identity_history_open_uniq missing after up")
+	}
 
-	if err := database.MigrateDown(dsn, 2); err != nil {
-		t.Fatalf("migrate down 000009+000008: %v", err)
+	if err := database.MigrateDown(dsn, 4); err != nil {
+		t.Fatalf("migrate down 000011..000008: %v", err)
 	}
 	for _, tbl := range inventoryTables {
 		if tableExists(t, dsn, "public."+tbl) {
 			t.Fatalf("%s still present after down", tbl)
 		}
+	}
+	if indexExists(t, dsn, "device_identity_history_open_uniq") {
+		t.Fatal("device_identity_history_open_uniq still present after down")
 	}
 	if !tableExists(t, dsn, "public.collectors") {
 		t.Fatal("Phase-1 collectors table lost on M7 down")

@@ -111,12 +111,24 @@ var DeviceStatuses = []string{"new", "up", "down", "degraded", "maintenance", "r
 var InterfaceRoles = []string{"uplink", "access", "trunk", "unused", "unknown"}
 
 // DeviceFilter narrows a device listing. IncludeDeleted is the auditor view
-// (?include_deleted=true, canonical soft-delete convention).
+// (?include_deleted=true, canonical soft-delete convention). Scope carries the
+// caller's resolved scope bindings (P2-D5): it is fail-closed when set.
 type DeviceFilter struct {
 	SiteID         *uuid.UUID
 	Status         *string
 	Kind           *string
 	IncludeDeleted bool
+	Scope          ScopeFilter
+}
+
+// ScopeFilter narrows list queries to the caller's scope bindings. The zero
+// value (Unrestricted=false, empty slices) matches nothing; callers with no
+// bindings (or an org binding) set Unrestricted=true to preserve org-wide
+// access.
+type ScopeFilter struct {
+	Unrestricted bool
+	SiteIDs      []uuid.UUID
+	GroupIDs     []uuid.UUID
 }
 
 // NullableString distinguishes an omitted value from an explicit JSON null in

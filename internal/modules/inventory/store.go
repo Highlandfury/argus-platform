@@ -21,15 +21,29 @@ var (
 	ErrNameConflict      = errors.New("inventory: name already in use")
 	ErrIFIndexConflict   = errors.New("inventory: interface index already in use")
 	ErrMergeConflict     = errors.New("inventory: merge conflicts with existing device data")
+	ErrIdentityConflict  = errors.New("inventory: identity already assigned to another device")
 	ErrInvalidCursor     = errors.New("inventory: invalid cursor")
 )
 
 // sqlstateUniqueViolation is the PostgreSQL class code for unique conflicts.
 const sqlstateUniqueViolation = "23505"
 
+// identityOpenUniqueIndex is the partial unique index over open identity
+// windows (migration 000011).
+const identityOpenUniqueIndex = "device_identity_history_open_uniq"
+
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == sqlstateUniqueViolation
+}
+
+// isIdentityConflict reports whether err is the open-identity-window unique
+// violation. Other 23505s (device name, if_index) map to their own conflicts.
+func isIdentityConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == sqlstateUniqueViolation &&
+		pgErr.ConstraintName == identityOpenUniqueIndex
 }
 
 // Columns are explicitly listed (text casts for inet/macaddr so scans are
@@ -123,8 +137,10 @@ func listDevices(ctx context.Context, tx pgx.Tx, limit int, after *uuid.UUID, f 
 		  AND ($3::text IS NULL OR d.status = $3)
 		  AND ($4::text IS NULL OR d.kind = $4)
 		  AND ($5::boolean OR d.deleted_at IS NULL)
+		  AND ($7::boolean OR d.site_id = ANY($8::uuid[]))
 		ORDER BY d.id
-		LIMIT $6`, after, f.SiteID, f.Status, f.Kind, f.IncludeDeleted, limit)
+		LIMIT $6`, after, f.SiteID, f.Status, f.Kind, f.IncludeDeleted, limit,
+		f.Scope.Unrestricted, f.Scope.SiteIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +214,48 @@ func softDeleteDevice(ctx context.Context, tx pgx.Tx, id uuid.UUID) (bool, error
 	return tag.RowsAffected() > 0, nil
 }
 
+// closeOpenIdentities closes every open identity window of a device with one
+// transactionally consistent server timestamp. Called when a device is
+// soft-deleted so its identities can be re-claimed (canonical reuse
+// semantics); the closed rows stay as history.
+func closeOpenIdentities(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE device_identity_history SET last_seen_at = now()
+		WHERE device_id = $1 AND last_seen_at IS NULL`, deviceID)
+	return err
+}
+
+// closeOpenIdentity closes the open window for one identity key of a device, if
+// present (device PATCH transitions).
+func closeOpenIdentity(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID, identifierType, value string) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE device_identity_history SET last_seen_at = now()
+		WHERE device_id = $1 AND identifier_type = $2 AND identifier_value = $3 AND last_seen_at IS NULL`,
+		deviceID, identifierType, value)
+	return err
+}
+
+// openIdentity inserts a new open identity window for a device unless the same
+// device already has that exact key open (same-value corner: no redundant row).
+// A conflict with ANOTHER device's open window raises 23505 on the partial
+// unique index (migration 000011) and surfaces as ErrIdentityConflict.
+func openIdentity(ctx context.Context, tx pgx.Tx, orgID, deviceID uuid.UUID, identifierType, value, source string) error {
+	id, err := newID()
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO device_identity_history
+			(id, org_id, device_id, identifier_type, identifier_value, source, first_seen_at)
+		SELECT $1, $2, $3, $4, $5, $6, now()
+		WHERE NOT EXISTS (
+			SELECT 1 FROM device_identity_history
+			WHERE device_id = $3 AND identifier_type = $4 AND identifier_value = $5 AND last_seen_at IS NULL
+		)`,
+		id, orgID, deviceID, identifierType, value, source)
+	return err
+}
+
 // mergeDevicesTx re-points identity history and interfaces of sources into
 // target and soft-deletes the sources. Interface if_index collisions abort the
 // whole merge (no partial state): the UQ(device_id, if_index) contract cannot
@@ -226,6 +284,24 @@ func mergeDevicesTx(ctx context.Context, tx pgx.Tx, target uuid.UUID, sources []
 		return 0, 0, err
 	}
 	identityMoved = tag.RowsAffected()
+
+	// Open-window uniqueness (migration 000011) is enforced by the partial
+	// unique index at every statement; this explicit pre-commit evaluation
+	// pins the merge contract and aborts on legacy duplicate rows instead of
+	// committing a device with two open windows for one identity key.
+	var duplicateOpenIdentity bool
+	if err = tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM device_identity_history
+			WHERE device_id = $1 AND last_seen_at IS NULL
+			GROUP BY org_id, identifier_type, identifier_value
+			HAVING count(*) > 1
+		)`, target).Scan(&duplicateOpenIdentity); err != nil {
+		return 0, 0, err
+	}
+	if duplicateOpenIdentity {
+		return 0, 0, ErrIdentityConflict
+	}
 
 	tag, err = tx.Exec(ctx, `
 		UPDATE devices SET deleted_at = now(), updated_at = now()
@@ -397,11 +473,12 @@ func findGroup(ctx context.Context, tx pgx.Tx, id uuid.UUID) (DeviceGroup, error
 	return g, err
 }
 
-func listGroups(ctx context.Context, tx pgx.Tx, limit int, after *uuid.UUID) ([]DeviceGroup, error) {
+func listGroups(ctx context.Context, tx pgx.Tx, scope ScopeFilter, limit int, after *uuid.UUID) ([]DeviceGroup, error) {
 	rows, err := tx.Query(ctx, `SELECT `+groupColumns+` FROM device_groups g
 		WHERE ($1::uuid IS NULL OR g.id > $1)
+		  AND ($3::boolean OR g.id = ANY($4::uuid[]))
 		ORDER BY g.id
-		LIMIT $2`, after, limit)
+		LIMIT $2`, after, limit, scope.Unrestricted, scope.GroupIDs)
 	if err != nil {
 		return nil, err
 	}

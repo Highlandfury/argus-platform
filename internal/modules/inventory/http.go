@@ -11,12 +11,15 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/argus-platform/argus/internal/platform/authz"
 	"github.com/argus-platform/argus/internal/platform/httpx"
 )
 
 // HTTP exposes the inventory API. Reads require a session; every mutation
 // requires the admin role (the Phase-1 role model; capabilities replace it
-// when RBAC-SC lands).
+// when RBAC-SC lands). Capability enforcement runs in the router (route
+// metadata); scope enforcement runs here after the target resource is
+// resolved (P2-D5).
 type HTTP struct {
 	Svc *Service
 }
@@ -44,6 +47,49 @@ func principalOrg(w http.ResponseWriter, r *http.Request) (httpx.Principal, bool
 		return httpx.Principal{}, false
 	}
 	return p, true
+}
+
+// scopeFor resolves the caller's server-side scope bindings (P2-D5). Failure
+// to resolve is a 500: no access decision is made on an unreadable state.
+func (h *HTTP) scopeFor(w http.ResponseWriter, r *http.Request, p httpx.Principal) (authz.Scope, bool) {
+	sc, err := h.Svc.ScopeFor(r.Context(), p.OrgID, p.UserID)
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "authorization scope lookup failed")
+		return authz.Scope{}, false
+	}
+	return sc, true
+}
+
+// scopeFilter converts the resolved scope into the store-layer list filter.
+func scopeFilter(sc authz.Scope) ScopeFilter {
+	return ScopeFilter{Unrestricted: sc.Unrestricted, SiteIDs: sc.Sites, GroupIDs: sc.DeviceGroups}
+}
+
+// writeScopeForbidden is the deterministic 403 for scope conflicts on
+// collection filters and out-of-scope parents. Item access instead returns the
+// resource's 404 (enumeration resistance) without disclosing scope state.
+func writeScopeForbidden(w http.ResponseWriter, r *http.Request, detail string) {
+	httpx.WriteProblem(w, r, http.StatusForbidden, "auth.forbidden", detail)
+}
+
+// interfaceInScope resolves an interface's parent device and verifies it is
+// within the caller's scope. Denial writes the interface 404 so foreign and
+// missing interfaces are indistinguishable.
+func (h *HTTP) interfaceInScope(w http.ResponseWriter, r *http.Request, p httpx.Principal, sc authz.Scope, i Interface) bool {
+	dev, err := h.Svc.GetDevice(r.Context(), p.OrgID, i.DeviceID, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "interface.not_found", "interface not found")
+			return false
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return false
+	}
+	if !sc.AllowsDevice(dev.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "interface.not_found", "interface not found")
+		return false
+	}
+	return true
 }
 
 func parseLimit(r *http.Request) (int, bool) {
@@ -190,6 +236,10 @@ func (h *HTTP) ListDevices(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	limit, ok := parseLimit(r)
 	if !ok {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "limit must be an integer between 1 and 100")
@@ -202,6 +252,10 @@ func (h *HTTP) ListDevices(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid site_id filter",
 				httpx.FieldError{Field: "filter[site_id]", Code: "invalid", Message: "must be a UUID"})
+			return
+		}
+		if !sc.AllowsSite(id) {
+			writeScopeForbidden(w, r, "site filter is outside the caller's scope")
 			return
 		}
 		filter.SiteID = &id
@@ -217,6 +271,7 @@ func (h *HTTP) ListDevices(w http.ResponseWriter, r *http.Request) {
 	if raw := query.Get("filter[kind]"); raw != "" {
 		filter.Kind = &raw
 	}
+	filter.Scope = scopeFilter(sc)
 
 	page, err := h.Svc.ListDevices(r.Context(), p.OrgID, filter, limit, query.Get("cursor"))
 	if err != nil {
@@ -309,6 +364,14 @@ func (h *HTTP) CreateDevice(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid device", fieldErrs...)
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	if !sc.AllowsSite(siteID) {
+		writeScopeForbidden(w, r, "site is outside the caller's scope")
+		return
+	}
 
 	created, err := h.Svc.CreateDevice(r.Context(), p.OrgID, CreateDeviceInput{
 		SiteID:      siteID,
@@ -327,6 +390,8 @@ func (h *HTTP) CreateDevice(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrSiteNotFound):
 			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid device",
 				httpx.FieldError{Field: "site_id", Code: "invalid", Message: "site_id does not reference a site in this organization"})
+		case errors.Is(err, ErrIdentityConflict):
+			httpx.WriteProblem(w, r, http.StatusConflict, "device.identity_conflict", "an identity value is already assigned to another live device")
 		case errors.Is(err, ErrNameConflict):
 			httpx.WriteProblem(w, r, http.StatusConflict, "device.name_conflict", "a device with this name already exists in the site")
 		default:
@@ -343,6 +408,10 @@ func (h *HTTP) GetDevice(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
@@ -355,6 +424,10 @@ func (h *HTTP) GetDevice(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(d.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, devicePayload(d))
@@ -474,6 +547,10 @@ func (h *HTTP) UpdateDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := httpx.PrincipalFrom(r.Context())
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
@@ -481,6 +558,19 @@ func (h *HTTP) UpdateDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	patch, ok := decodeDevicePatch(w, r)
 	if !ok {
+		return
+	}
+	cur, err := h.Svc.GetDevice(r.Context(), p.OrgID, id, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(cur.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
 		return
 	}
 	updated, err := h.Svc.UpdateDevice(r.Context(), p.OrgID, id, patch, actorFrom(r))
@@ -491,6 +581,8 @@ func (h *HTTP) UpdateDevice(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrSiteNotFound):
 			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid device update",
 				httpx.FieldError{Field: "site_id", Code: "invalid", Message: "site_id does not reference a site in this organization"})
+		case errors.Is(err, ErrIdentityConflict):
+			httpx.WriteProblem(w, r, http.StatusConflict, "device.identity_conflict", "an identity value is already assigned to another live device")
 		case errors.Is(err, ErrNameConflict):
 			httpx.WriteProblem(w, r, http.StatusConflict, "device.name_conflict", "a device with this name already exists in the site")
 		default:
@@ -507,8 +599,25 @@ func (h *HTTP) DeleteDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := httpx.PrincipalFrom(r.Context())
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	cur, err := h.Svc.GetDevice(r.Context(), p.OrgID, id, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(cur.SiteID) {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
 		return
 	}
@@ -529,6 +638,10 @@ func (h *HTTP) ListDeviceIdentityHistory(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
@@ -537,6 +650,19 @@ func (h *HTTP) ListDeviceIdentityHistory(w http.ResponseWriter, r *http.Request)
 	limit, ok := parseLimit(r)
 	if !ok {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "limit must be an integer between 1 and 100")
+		return
+	}
+	d, err := h.Svc.GetDevice(r.Context(), p.OrgID, id, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(d.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
 		return
 	}
 	page, err := h.Svc.ListIdentityHistory(r.Context(), p.OrgID, id, limit, r.URL.Query().Get("cursor"))
@@ -611,6 +737,40 @@ func (h *HTTP) MergeDevice(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid merge request", fieldErrs...)
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	// Scope is checked on the target AND every source: a merge must not move
+	// out-of-scope devices (foreign ids are uniformly 404, no oracle).
+	targetDevice, err := h.Svc.GetDevice(r.Context(), p.OrgID, targetID, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(targetDevice.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	for _, sourceID := range sources {
+		src, err := h.Svc.GetDevice(r.Context(), p.OrgID, sourceID, false)
+		if err != nil {
+			if errors.Is(err, ErrDeviceNotFound) {
+				httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+				return
+			}
+			httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+			return
+		}
+		if !sc.AllowsDevice(src.SiteID) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+	}
 	target, err := h.Svc.MergeDevices(r.Context(), p.OrgID, actorFrom(r), targetID, sources, req.Reason)
 	if err != nil {
 		switch {
@@ -619,6 +779,9 @@ func (h *HTTP) MergeDevice(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrMergeConflict):
 			httpx.WriteProblem(w, r, http.StatusConflict, "device.merge_conflict",
 				"merge would collide interfaces with the same if_index; resolve the duplication first")
+		case errors.Is(err, ErrIdentityConflict):
+			httpx.WriteProblem(w, r, http.StatusConflict, "device.identity_conflict",
+				"merge would leave duplicate open identity windows; resolve the conflict first")
 		default:
 			httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device merge failed")
 		}
@@ -688,6 +851,27 @@ func (h *HTTP) SplitDevice(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid split request", fieldErrs...)
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	src, err := h.Svc.GetDevice(r.Context(), p.OrgID, sourceID, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(src.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	if siteID != nil && !sc.AllowsSite(*siteID) {
+		writeScopeForbidden(w, r, "split target site is outside the caller's scope")
+		return
+	}
 	created, err := h.Svc.SplitDevice(r.Context(), p.OrgID, actorFrom(r), sourceID, identityIDs, req.Name, req.Kind, siteID, req.Reason)
 	if err != nil {
 		switch {
@@ -699,6 +883,8 @@ func (h *HTTP) SplitDevice(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrSiteNotFound):
 			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid split request",
 				httpx.FieldError{Field: "site_id", Code: "invalid", Message: "site_id does not reference a site in this organization"})
+		case errors.Is(err, ErrIdentityConflict):
+			httpx.WriteProblem(w, r, http.StatusConflict, "device.identity_conflict", "an identity value is already assigned to another live device")
 		case errors.Is(err, ErrNameConflict):
 			httpx.WriteProblem(w, r, http.StatusConflict, "device.name_conflict", "a device with this name already exists in the site")
 		default:
@@ -730,6 +916,10 @@ func (h *HTTP) ListDeviceInterfaces(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	deviceID, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
@@ -738,6 +928,19 @@ func (h *HTTP) ListDeviceInterfaces(w http.ResponseWriter, r *http.Request) {
 	limit, ok := parseLimit(r)
 	if !ok {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "limit must be an integer between 1 and 100")
+		return
+	}
+	d, err := h.Svc.GetDevice(r.Context(), p.OrgID, deviceID, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(d.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
 		return
 	}
 	page, err := h.Svc.ListInterfaces(r.Context(), p.OrgID, deviceID, limit, r.URL.Query().Get("cursor"))
@@ -803,6 +1006,23 @@ func (h *HTTP) CreateDeviceInterface(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid interface", fieldErrs...)
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	dev, err := h.Svc.GetDevice(r.Context(), p.OrgID, deviceID, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(dev.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
 	created, err := h.Svc.CreateInterface(r.Context(), p.OrgID, deviceID, CreateInterfaceInput(req), actorFrom(r))
 	if err != nil {
 		switch {
@@ -824,6 +1044,10 @@ func (h *HTTP) GetInterface(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "interface.not_found", "interface not found")
@@ -836,6 +1060,9 @@ func (h *HTTP) GetInterface(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "interface lookup failed")
+		return
+	}
+	if !h.interfaceInScope(w, r, p, sc, i) {
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, interfacePayload(i))
@@ -948,6 +1175,10 @@ func (h *HTTP) UpdateInterface(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := httpx.PrincipalFrom(r.Context())
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "interface.not_found", "interface not found")
@@ -955,6 +1186,18 @@ func (h *HTTP) UpdateInterface(w http.ResponseWriter, r *http.Request) {
 	}
 	patch, ok := decodeInterfacePatch(w, r)
 	if !ok {
+		return
+	}
+	cur, err := h.Svc.GetInterface(r.Context(), p.OrgID, id)
+	if err != nil {
+		if errors.Is(err, ErrInterfaceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "interface.not_found", "interface not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "interface lookup failed")
+		return
+	}
+	if !h.interfaceInScope(w, r, p, sc, cur) {
 		return
 	}
 	updated, err := h.Svc.UpdateInterface(r.Context(), p.OrgID, id, patch, actorFrom(r))
@@ -976,9 +1219,25 @@ func (h *HTTP) DeleteInterface(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := httpx.PrincipalFrom(r.Context())
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "interface.not_found", "interface not found")
+		return
+	}
+	cur, err := h.Svc.GetInterface(r.Context(), p.OrgID, id)
+	if err != nil {
+		if errors.Is(err, ErrInterfaceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "interface.not_found", "interface not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "interface lookup failed")
+		return
+	}
+	if !h.interfaceInScope(w, r, p, sc, cur) {
 		return
 	}
 	if err := h.Svc.DeleteInterface(r.Context(), p.OrgID, id, actorFrom(r)); err != nil {
@@ -1003,12 +1262,16 @@ func (h *HTTP) ListDeviceGroups(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	limit, ok := parseLimit(r)
 	if !ok {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "limit must be an integer between 1 and 100")
 		return
 	}
-	page, err := h.Svc.ListGroups(r.Context(), p.OrgID, limit, r.URL.Query().Get("cursor"))
+	page, err := h.Svc.ListGroups(r.Context(), p.OrgID, scopeFilter(sc), limit, r.URL.Query().Get("cursor"))
 	if err != nil {
 		if errors.Is(err, ErrInvalidCursor) {
 			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid cursor")
@@ -1049,6 +1312,14 @@ func (h *HTTP) CreateDeviceGroup(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid device group", fieldErrs...)
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	if !sc.Unrestricted {
+		writeScopeForbidden(w, r, "creating a device group requires org-wide scope")
+		return
+	}
 	created, err := h.Svc.CreateGroup(r.Context(), p.OrgID, CreateGroupInput(req), actorFrom(r))
 	if err != nil {
 		if errors.Is(err, ErrNameConflict) {
@@ -1067,6 +1338,10 @@ func (h *HTTP) GetDeviceGroup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "device_group.not_found", "device group not found")
@@ -1079,6 +1354,10 @@ func (h *HTTP) GetDeviceGroup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device group lookup failed")
+		return
+	}
+	if !sc.AllowsDeviceGroup(g.ID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device_group.not_found", "device group not found")
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, groupPayload(g))
@@ -1127,6 +1406,23 @@ func (h *HTTP) UpdateDeviceGroup(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid device group update", errs...)
 		return
 	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	cur, err := h.Svc.GetGroup(r.Context(), p.OrgID, id)
+	if err != nil {
+		if errors.Is(err, ErrGroupNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device_group.not_found", "device group not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device group lookup failed")
+		return
+	}
+	if !sc.AllowsDeviceGroup(cur.ID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device_group.not_found", "device group not found")
+		return
+	}
 	updated, err := h.Svc.UpdateGroup(r.Context(), p.OrgID, id, patch, actorFrom(r))
 	if err != nil {
 		switch {
@@ -1148,8 +1444,25 @@ func (h *HTTP) DeleteDeviceGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, _ := httpx.PrincipalFrom(r.Context())
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device_group.not_found", "device group not found")
+		return
+	}
+	cur, err := h.Svc.GetGroup(r.Context(), p.OrgID, id)
+	if err != nil {
+		if errors.Is(err, ErrGroupNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device_group.not_found", "device group not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device group lookup failed")
+		return
+	}
+	if !sc.AllowsDeviceGroup(cur.ID) {
 		httpx.WriteProblem(w, r, http.StatusNotFound, "device_group.not_found", "device group not found")
 		return
 	}

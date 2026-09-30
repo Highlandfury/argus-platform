@@ -140,13 +140,13 @@ func TestSchemaMatchesSpec(t *testing.T) {
 			 JOIN pg_namespace ns ON ns.oid = c.relnamespace
 			 WHERE ns.nspname = 'public' AND c.relkind = 'r'
 			   AND c.relrowsecurity AND c.relforcerowsecurity`).Scan(&n))
-		if n != 17 {
-			t.Fatalf("RLS-enabled+forced tables = %d, want 17 (11 Phase-1 + 6 M7-S1)", n)
+		if n != 18 {
+			t.Fatalf("RLS-enabled+forced tables = %d, want 18 (11 Phase-1 + 6 M7-S1 + 1 M7-S3)", n)
 		}
 		var policies int
 		must(t, ownerPool.QueryRow(ctx, `SELECT count(*) FROM pg_policies WHERE schemaname = 'public'`).Scan(&policies))
-		if policies != 17 {
-			t.Fatalf("tenant policies = %d, want 17 (11 Phase-1 + 6 M7-S1)", policies)
+		if policies != 18 {
+			t.Fatalf("tenant policies = %d, want 18 (11 Phase-1 + 6 M7-S1 + 1 M7-S3)", policies)
 		}
 	})
 
@@ -227,6 +227,23 @@ func tableExists(t *testing.T, dsn, qualifiedName string) bool {
 	var exists bool
 	if err := conn.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", qualifiedName).Scan(&exists); err != nil {
 		t.Fatalf("to_regclass: %v", err)
+	}
+	return exists
+}
+
+func indexExists(t *testing.T, dsn, name string) bool {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	var exists bool
+	if err := conn.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1)`,
+		name).Scan(&exists); err != nil {
+		t.Fatalf("pg_indexes: %v", err)
 	}
 	return exists
 }

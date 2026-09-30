@@ -40,6 +40,11 @@ import "testing"
 //	S-16 auth enumeration uniformity (timing/shape)    -> TestLoginEnumerationUniformS16
 //	S-17 inventory authz + cross-tenant probes         -> TestInventoryAuthzS17,
 //	                                                     TestInventoryTenantIsolationS17
+//	S-18 inventory capability enforcement (P2-D5)      -> TestInventoryCapabilityEnforcement
+//	S-19 inventory scope bindings (P2-D5)              -> TestInventoryScopeEnforcement
+//	S-20 inventory CSRF still required on mutations    -> TestInventoryCSRFEnforcement
+//	S-21 inventory cross-tenant devices/interfaces/    -> TestInventoryCrossTenantS21
+//	     groups + enumeration resistance
 //
 // S-14 (injection): parameterized SQL + dimension canonicalization are
 // unit-tested (internal/modules/metrics) and every query is bound-parameter
@@ -79,4 +84,8 @@ func TestSecuritySuite(t *testing.T) {
 		t.Run("authz", TestInventoryAuthzS17)
 		t.Run("cross_tenant", TestInventoryTenantIsolationS17)
 	})
+	t.Run("S18_inventory_capability_enforcement", TestInventoryCapabilityEnforcement)
+	t.Run("S19_inventory_scope_bindings", TestInventoryScopeEnforcement)
+	t.Run("S20_inventory_csrf_mutations", TestInventoryCSRFEnforcement)
+	t.Run("S21_inventory_cross_tenant_surface", TestInventoryCrossTenantS21)
 }
