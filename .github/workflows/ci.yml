@@ -119,10 +119,12 @@ jobs:
           go-version: "1.27.1"
       - name: compose up (build + wait for healthy; isolated project, no host ports)
         run: |
+          # `collector` is required by AC-08: the query API must return stored
+          # points from the running dev collector.
           docker compose -p argus-ci \
             -f deployments/compose/docker-compose.dev.yml \
             -f deployments/compose/docker-compose.ci.yml \
-            up -d --build --wait db migrate seed server
+            up -d --build --wait db migrate seed server collector
       - name: attach runner to the compose network (service DNS)
         run: docker network connect argus-ci_default "$(hostname)" || true
       - name: extract internal CA (pinned trust for the harness)
