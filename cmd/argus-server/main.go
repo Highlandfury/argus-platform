@@ -25,6 +25,7 @@ import (
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/ingest"
+	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
@@ -210,6 +211,12 @@ func cmdServe(args []string) int {
 		logger.Warn("collector control plane disabled: database pools not configured")
 	}
 
+	// Inventory API (M7): device/interface/group CRUD with audit evidence.
+	var inventorySvc *inventory.Service
+	if appPool != nil {
+		inventorySvc = inventory.New(appPool, inventory.SlogAudit{Logger: logger})
+	}
+
 	opts := api.Options{
 		Logger:            logger,
 		Telemetry:         tel,
@@ -223,6 +230,7 @@ func cmdServe(args []string) int {
 		Collectors:        collectorsSvc,
 		CollectorSessions: sessions,
 		MetricsQuery:      metricsQuery,
+		Inventory:         inventorySvc,
 	}
 
 	httpSrv := &http.Server{

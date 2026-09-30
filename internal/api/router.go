@@ -14,6 +14,7 @@ import (
 
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/identity"
+	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/httpx"
@@ -41,6 +42,7 @@ type Options struct {
 	Collectors        *collectors.Service
 	CollectorSessions *collectors.SessionRegistry
 	MetricsQuery      *metrics.QueryService
+	Inventory         *inventory.Service
 }
 
 type handlers struct {
@@ -50,6 +52,7 @@ type handlers struct {
 	tenancyHTTP    *tenancy.HTTP
 	collectorsHTTP *collectors.HTTP
 	metricsHTTP    *metrics.HTTP
+	inventoryHTTP  *inventory.HTTP
 }
 
 func newHandlers(o Options) *handlers {
@@ -82,6 +85,9 @@ func newHandlers(o Options) *handlers {
 	}
 	if o.MetricsQuery != nil {
 		h.metricsHTTP = &metrics.HTTP{Svc: o.MetricsQuery}
+	}
+	if o.Inventory != nil {
+		h.inventoryHTTP = &inventory.HTTP{Svc: o.Inventory}
 	}
 	return h
 }
@@ -210,6 +216,111 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 				return
 			}
 			h.metricsHTTP.QueryCollectorMetric(w, r)
+		})
+	case "/v1/devices":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.inventoryHTTP.CreateDevice(w, r)
+				return
+			}
+			h.inventoryHTTP.ListDevices(w, r)
+		})
+	case "/v1/devices/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				h.inventoryHTTP.UpdateDevice(w, r)
+			case http.MethodDelete:
+				h.inventoryHTTP.DeleteDevice(w, r)
+			default:
+				h.inventoryHTTP.GetDevice(w, r)
+			}
+		})
+	case "/v1/devices/{id}/identity-history":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			h.inventoryHTTP.ListDeviceIdentityHistory(w, r)
+		})
+	case "/v1/devices/{id}/merge":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			h.inventoryHTTP.MergeDevice(w, r)
+		})
+	case "/v1/devices/{id}/split":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			h.inventoryHTTP.SplitDevice(w, r)
+		})
+	case "/v1/devices/{id}/interfaces":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.inventoryHTTP.CreateDeviceInterface(w, r)
+				return
+			}
+			h.inventoryHTTP.ListDeviceInterfaces(w, r)
+		})
+	case "/v1/interfaces/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				h.inventoryHTTP.UpdateInterface(w, r)
+			case http.MethodDelete:
+				h.inventoryHTTP.DeleteInterface(w, r)
+			default:
+				h.inventoryHTTP.GetInterface(w, r)
+			}
+		})
+	case "/v1/device-groups":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.inventoryHTTP.CreateDeviceGroup(w, r)
+				return
+			}
+			h.inventoryHTTP.ListDeviceGroups(w, r)
+		})
+	case "/v1/device-groups/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				h.inventoryHTTP.UpdateDeviceGroup(w, r)
+			case http.MethodDelete:
+				h.inventoryHTTP.DeleteDeviceGroup(w, r)
+			default:
+				h.inventoryHTTP.GetDeviceGroup(w, r)
+			}
 		})
 	case "/v1/healthz":
 		return http.HandlerFunc(h.health)

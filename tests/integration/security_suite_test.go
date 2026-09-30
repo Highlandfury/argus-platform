@@ -38,6 +38,8 @@ import "testing"
 //	S-13 replay attempts (batches + tokens)            -> TestM4DuplicateBatchOriginalWins,
 //	                                                     TestM4LostAckReplayedAsDuplicate
 //	S-16 auth enumeration uniformity (timing/shape)    -> TestLoginEnumerationUniformS16
+//	S-17 inventory authz + cross-tenant probes         -> TestInventoryAuthzS17,
+//	                                                     TestInventoryTenantIsolationS17
 //
 // S-14 (injection): parameterized SQL + dimension canonicalization are
 // unit-tested (internal/modules/metrics) and every query is bound-parameter
@@ -73,4 +75,8 @@ func TestSecuritySuite(t *testing.T) {
 		t.Run("lost_ack_replay", TestM4LostAckReplayedAsDuplicate)
 	})
 	t.Run("S16_enumeration_uniformity", TestLoginEnumerationUniformS16)
+	t.Run("S17_inventory_authz_and_isolation", func(t *testing.T) {
+		t.Run("authz", TestInventoryAuthzS17)
+		t.Run("cross_tenant", TestInventoryTenantIsolationS17)
+	})
 }

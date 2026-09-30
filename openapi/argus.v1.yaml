@@ -17,6 +17,7 @@ tags:
   - name: tenancy
   - name: collectors
   - name: metrics
+  - name: inventory
   - name: ops
 
 paths:
@@ -227,6 +228,352 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
 
+  /v1/devices:
+    get:
+      tags: [inventory]
+      summary: List devices (cursor pagination, soft-deleted hidden by default)
+      parameters:
+        - { name: 'filter[site_id]', in: query, schema: { type: string, format: uuid } }
+        - { name: 'filter[status]', in: query, schema: { type: string, enum: [new, up, down, degraded, maintenance, retired] } }
+        - { name: 'filter[kind]', in: query, schema: { type: string } }
+        - { name: include_deleted, in: query, schema: { type: boolean, default: false } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Device' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    post:
+      tags: [inventory]
+      summary: Add a manual device (admin)
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/devices/{id}:
+    get:
+      tags: [inventory]
+      summary: Device detail
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: include_deleted, in: query, schema: { type: boolean, default: false } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [inventory]
+      summary: Update a device (admin; omitted fields unchanged, null clears nullable fields)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [inventory]
+      summary: Soft-delete a device (admin)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '204': { description: Soft-deleted }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/devices/{id}/identity-history:
+    get:
+      tags: [inventory]
+      summary: Identity attribute history of a device (open rows have null last_seen_at)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/IdentityRecord' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/devices/{id}/merge:
+    post:
+      tags: [inventory]
+      summary: 'Merge source devices into {id}: re-points identity history + interfaces, soft-deletes sources (admin)'
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceMergeRequest' }
+      responses:
+        '200':
+          description: Merged; target device returned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/devices/{id}/split:
+    post:
+      tags: [inventory]
+      summary: 'Split identity-history rows off {id} into a new device (admin)'
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceSplitRequest' }
+      responses:
+        '201':
+          description: New device created; identity rows re-pointed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Device' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/devices/{id}/interfaces:
+    get:
+      tags: [inventory]
+      summary: List interfaces of a device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Interface' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [inventory]
+      summary: Add a manual interface to a device (admin; UQ(device_id, if_index))
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InterfaceCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Interface' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/interfaces/{id}:
+    get:
+      tags: [inventory]
+      summary: Interface detail
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Interface' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [inventory]
+      summary: Update editable interface metadata (admin; if_index is immutable)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InterfaceUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Interface' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [inventory]
+      summary: Delete an interface (admin; the 000008 shape has no deleted_at)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/device-groups:
+    get:
+      tags: [inventory]
+      summary: List device groups
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/DeviceGroup' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+    post:
+      tags: [inventory]
+      summary: Create a dynamic device group (admin; selector is a jsonb object)
+      parameters: [{ $ref: '#/components/parameters/CsrfToken' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceGroupCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceGroup' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/device-groups/{id}:
+    get:
+      tags: [inventory]
+      summary: Device group detail
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceGroup' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [inventory]
+      summary: Update a device group (admin)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceGroupUpdate' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceGroup' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [inventory]
+      summary: Delete a device group (admin)
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /v1/healthz:
     get:
       tags: [ops]
@@ -302,6 +649,11 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
     NotFound:
       description: Not found (also used for out-of-scope resources; no existence oracle)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Identity conflict (device.name_conflict, device.merge_conflict, interface.if_index_conflict, device_group.name_conflict)
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -448,6 +800,164 @@ components:
               properties:
                 total_samples: { type: integer }
                 last_sample_at: { type: [string, 'null'], format: date-time }
+    Device:
+      type: object
+      required: [id, site_id, name, kind, status, poll_profile, confidence, first_seen_at, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        site_id: { type: string, format: uuid }
+        zone_id: { type: [string, 'null'], format: uuid }
+        name: { type: string, maxLength: 200 }
+        kind: { type: string }
+        vendor_id: { type: [string, 'null'], format: uuid }
+        model_id: { type: [string, 'null'], format: uuid }
+        sys_object_id: { type: [string, 'null'] }
+        serial: { type: [string, 'null'] }
+        firmware: { type: [string, 'null'] }
+        mgmt_ip: { type: [string, 'null'], description: PostgreSQL inet rendered as text }
+        status: { type: string, enum: [new, up, down, degraded, maintenance, retired] }
+        poll_profile: { type: string }
+        confidence: { type: integer, minimum: 0, maximum: 100 }
+        metadata: { type: object, additionalProperties: true }
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: [string, 'null'], format: date-time }
+        deleted_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DeviceCreate:
+      type: object
+      required: [site_id, name, kind]
+      properties:
+        site_id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        kind: { type: string }
+        poll_profile: { type: string, default: standard }
+        sys_object_id: { type: [string, 'null'] }
+        serial: { type: [string, 'null'] }
+        firmware: { type: [string, 'null'] }
+        mgmt_ip: { type: [string, 'null'], description: IPv4/IPv6 address }
+        metadata: { type: object, additionalProperties: true }
+        identities:
+          type: array
+          description: Extra identity keys recorded in device_identity_history (serial/sysObjectID/mgmt_ip are recorded automatically from device fields).
+          items:
+            type: object
+            required: [type, value]
+            properties:
+              type: { type: string, enum: [serial, chassis_id, sys_object_id, mac, hostname, mgmt_ip] }
+              value: { type: string }
+    DeviceUpdate:
+      type: object
+      description: All fields optional; omitted fields are unchanged and null clears nullable fields.
+      properties:
+        site_id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        kind: { type: string }
+        status: { type: string, enum: [new, up, down, degraded, maintenance, retired] }
+        poll_profile: { type: string }
+        sys_object_id: { type: [string, 'null'] }
+        serial: { type: [string, 'null'] }
+        firmware: { type: [string, 'null'] }
+        mgmt_ip: { type: [string, 'null'] }
+        metadata: { type: object, additionalProperties: true }
+    DeviceMergeRequest:
+      type: object
+      required: [source_device_ids]
+      properties:
+        source_device_ids: { type: array, minItems: 1, items: { type: string, format: uuid } }
+        reason: { type: string }
+    DeviceSplitRequest:
+      type: object
+      required: [identity_history_ids, name]
+      properties:
+        identity_history_ids: { type: array, minItems: 1, items: { type: string, format: uuid } }
+        name: { type: string, maxLength: 200, description: Name of the new device }
+        kind: { type: string, description: Defaults to the source device's kind }
+        site_id: { type: string, format: uuid, description: Defaults to the source device's site }
+        reason: { type: string }
+    IdentityRecord:
+      type: object
+      required: [id, device_id, identifier_type, identifier_value, source, first_seen_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        identifier_type: { type: string, enum: [serial, chassis_id, sys_object_id, mac, hostname, mgmt_ip] }
+        identifier_value: { type: string }
+        source: { type: string, enum: [manual, snmp, lldp, discovery] }
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: [string, 'null'], format: date-time, description: null = open window }
+        created_at: { type: string, format: date-time }
+    Interface:
+      type: object
+      required: [id, device_id, if_index, if_name, role, monitored, first_seen_at]
+      properties:
+        id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        if_index: { type: integer, description: 'SNMP ifIndex; identity is UQ(device_id, if_index) and immutable' }
+        if_name: { type: string }
+        if_alias: { type: [string, 'null'] }
+        if_type: { type: [integer, 'null'] }
+        admin_status: { type: [string, 'null'] }
+        oper_status: { type: [string, 'null'] }
+        speed_bps: { type: [integer, 'null'] }
+        mtu: { type: [integer, 'null'] }
+        mac: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        role: { type: string, enum: [uplink, access, trunk, unused, unknown] }
+        monitored: { type: boolean }
+        first_seen_at: { type: string, format: date-time }
+        last_seen_at: { type: [string, 'null'], format: date-time }
+    InterfaceCreate:
+      type: object
+      required: [if_index, if_name]
+      properties:
+        if_index: { type: integer, minimum: 1 }
+        if_name: { type: string }
+        if_alias: { type: [string, 'null'] }
+        if_type: { type: [integer, 'null'] }
+        admin_status: { type: [string, 'null'] }
+        oper_status: { type: [string, 'null'] }
+        speed_bps: { type: [integer, 'null'] }
+        mtu: { type: [integer, 'null'] }
+        mac: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        role: { type: string, enum: [uplink, access, trunk, unused, unknown], default: unknown }
+        monitored: { type: boolean, default: true }
+    InterfaceUpdate:
+      type: object
+      description: All fields optional; omitted fields are unchanged and null clears nullable fields. if_index is immutable.
+      properties:
+        if_name: { type: string }
+        if_alias: { type: [string, 'null'] }
+        if_type: { type: [integer, 'null'] }
+        admin_status: { type: [string, 'null'] }
+        oper_status: { type: [string, 'null'] }
+        speed_bps: { type: [integer, 'null'] }
+        mtu: { type: [integer, 'null'] }
+        mac: { type: [string, 'null'] }
+        description: { type: [string, 'null'] }
+        role: { type: string, enum: [uplink, access, trunk, unused, unknown] }
+        monitored: { type: boolean }
+    DeviceGroup:
+      type: object
+      required: [id, name, selector, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        selector: { type: object, additionalProperties: true, description: Dynamic membership rule; usable as a credential/rule scope }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DeviceGroupCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 200 }
+        selector: { type: object, additionalProperties: true }
+    DeviceGroupUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 200 }
+        selector: { type: object, additionalProperties: true }
     MetricSeries:
       type: object
       required: [metric, unit, resolution, from, to, points, meta, status]
