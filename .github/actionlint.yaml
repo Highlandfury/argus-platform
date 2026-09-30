@@ -1,0 +1,6 @@
+# actionlint configuration: declare the custom self-hosted runner label so the
+# workflow can be linted cleanly (`docker run --rm -v "${PWD}:/w" -w /w
+# rhysd/actionlint:latest`).
+self-hosted-runner:
+  labels:
+    - argus

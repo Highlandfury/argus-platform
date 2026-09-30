@@ -299,12 +299,13 @@ tests green (login, registry, metrics chart, failure states, enrollment token).
 
 ## 17. CI runner (self-hosted)
 
-**Status note (2026-09-30):** this repository's GitHub account is
-billing-locked; GitHub refuses to start *any* Actions job â€” including on
+**Status note (2026-09-30):** this repository was blocked by a billing lock that made GitHub refuse to start *any* Actions job â€” including on
 self-hosted runners â€” until the payment issue is resolved in *Settings â†’
-Billing & plans* (or the repository is made public, where Actions usage is not
-billed; publishing is a separate decision and requires a secret-hygiene pass).
-Until then, run the identical gates locally:
+Billing & plans*. This repository is now **public**, which resolved the block:
+the complete `ci` sweep runs on the self-hosted runner (run `36667334318` was
+the first to start; its three compose-stack jobs initially failed on host-port
+conflicts with the local dev stack, fixed by the isolation change below).
+The identical gates remain runnable locally:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\ci-local.ps1
@@ -359,6 +360,16 @@ expiry.
 `argus-runner-1` (Idle). Then trigger any workflow (push, or *Actions â†’
 security-suite â†’ Run workflow*). Inside the runner, both must work:
 `docker version` and `docker compose version`.
+
+**Isolation (added 2026-09-30):** the `compose-smoke` and `e2e` jobs run under
+compose project `argus-ci` with `deployments/compose/docker-compose.ci.yml`
+(published host ports are reset; the runner container joins the
+`argus-ci_default` network and the steps use service DNS, e.g.
+`http://server:8080`). CI therefore coexists with a running local dev stack,
+and CI teardown can never delete local `argus-dev` volumes. The `compat-matrix`
+service publishes on host port `15432` (not 5432) to avoid the local db, and
+the job probes `host.docker.internal` before `127.0.0.1` so it works for both
+containerized and host-process runners.
 
 **Caution / implications**
 - Mounting `/var/run/docker.sock` gives the runner root-equivalent access to

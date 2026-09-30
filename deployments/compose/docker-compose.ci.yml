@@ -1,0 +1,13 @@
+# CI-only override (used as `-f docker-compose.dev.yml -f docker-compose.ci.yml`
+# together with `-p argus-ci`): the stacked jobs get their own project name,
+# network and volumes, and publish NO host ports — services are reached over
+# the compose network by DNS. This isolates CI runs completely from a
+# developer's local stack on the same host (no port conflicts, and CI's
+# `down -v` can never delete local dev volumes).
+services:
+  db:
+    ports: !reset []
+  server:
+    ports: !reset []
+  web:
+    ports: !reset []

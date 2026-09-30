@@ -117,21 +117,44 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.27.1"
-      - name: compose up (build + wait for healthy)
-        run: docker compose -f deployments/compose/docker-compose.dev.yml up -d --build --wait
+      - name: compose up (build + wait for healthy; isolated project, no host ports)
+        run: |
+          docker compose -p argus-ci \
+            -f deployments/compose/docker-compose.dev.yml \
+            -f deployments/compose/docker-compose.ci.yml \
+            up -d --build --wait db migrate seed server
+      - name: attach runner to the compose network (service DNS)
+        run: docker network connect argus-ci_default "$(hostname)" || true
       - name: extract internal CA (pinned trust for the harness)
-        run: docker compose -f deployments/compose/docker-compose.dev.yml cp server:/var/lib/argus/ca/root.pem e2e-ca.pem
+        run: |
+          docker compose -p argus-ci \
+            -f deployments/compose/docker-compose.dev.yml \
+            -f deployments/compose/docker-compose.ci.yml \
+            cp server:/var/lib/argus/ca/root.pem e2e-ca.pem
       - name: e2e harness (AC-01/02/03/08, T7)
         env:
           ARGUS_E2E: "1"
+          ARGUS_E2E_API: "http://server:8080"
+          ARGUS_E2E_OPS: "http://server:9090"
+          ARGUS_E2E_ENROLL: "https://server:8444"
+          ARGUS_E2E_STREAM: "server:8443"
           ARGUS_E2E_CA: e2e-ca.pem
         run: go test ./tests/e2e/... -count=1 -v
       - name: compose logs (on failure)
         if: failure()
-        run: docker compose -f deployments/compose/docker-compose.dev.yml logs --tail=100
+        run: |
+          docker compose -p argus-ci \
+            -f deployments/compose/docker-compose.dev.yml \
+            -f deployments/compose/docker-compose.ci.yml \
+            logs --tail=100
       - name: compose down
         if: always()
-        run: docker compose -f deployments/compose/docker-compose.dev.yml down -v --remove-orphans
+        run: |
+          docker network disconnect argus-ci_default "$(hostname)" 2>/dev/null || true
+          docker compose -p argus-ci \
+            -f deployments/compose/docker-compose.dev.yml \
+            -f deployments/compose/docker-compose.ci.yml \
+            down -v --remove-orphans
 
   security-suite:
     name: security suite (S-01..S-16; release gate)
@@ -156,7 +179,7 @@ jobs:
           POSTGRES_USER: argus_owner
           POSTGRES_PASSWORD: dev-db-change-me
         ports:
-          - 5432:5432
+          - 15432:5432
         options: >-
           --health-cmd "pg_isready -U argus_owner -d argus"
           --health-interval 2s
@@ -169,7 +192,13 @@ jobs:
         env:
           PGPASSWORD: dev-db-change-me
         run: |
-          psql -h 127.0.0.1 -U argus_owner -d argus -v ON_ERROR_STOP=1 <<'SQL'
+          for h in host.docker.internal 127.0.0.1; do
+            if pg_isready -q -h "$h" -p 15432 -U argus_owner -d argus; then
+              PGHOST="$h"; export PGHOST; break
+            fi
+          done
+          echo "using PGHOST=$PGHOST"
+          psql -h "$PGHOST" -p 15432 -U argus_owner -d argus -v ON_ERROR_STOP=1 <<'SQL'
           SELECT version();
           SELECT extversion FROM pg_extension WHERE extname = 'timescaledb';
           CREATE TABLE smoke(
@@ -213,13 +242,19 @@ jobs:
             echo "ERROR: directory mount over /docker-entrypoint-initdb.d hides the image's own init scripts (TimescaleDB extension install/tune)"
             exit 1
           fi
-      - name: build and start stack
-        run: docker compose -f deployments/compose/docker-compose.dev.yml up --build --wait
+      - name: build and start stack (isolated project, no host ports)
+        run: |
+          docker compose -p argus-ci \
+            -f deployments/compose/docker-compose.dev.yml \
+            -f deployments/compose/docker-compose.ci.yml \
+            up -d --build --wait db migrate seed server collector
+      - name: attach runner to the compose network (service DNS)
+        run: docker network connect argus-ci_default "$(hostname)" || true
       - name: probe healthz
-        run: curl -fsS http://127.0.0.1:8080/v1/healthz
+        run: curl -fsS http://server:8080/v1/healthz
       - name: probe readyz (database + schema + auth-role checks)
         run: |
-          curl -fsS http://127.0.0.1:8080/v1/readyz -o /tmp/readyz.json
+          curl -fsS http://server:8080/v1/readyz -o /tmp/readyz.json
           cat /tmp/readyz.json
           python3 - <<'PY'
           import json
@@ -229,13 +264,22 @@ jobs:
           print('readyz checks OK')
           PY
       - name: probe metrics
-        run: curl -fsS http://127.0.0.1:9090/metrics | grep -q argus_build_info
+        run: curl -fsS http://server:9090/metrics | grep -q argus_build_info
       - name: stack logs (on failure)
         if: failure()
-        run: docker compose -f deployments/compose/docker-compose.dev.yml logs --tail=200
+        run: |
+          docker compose -p argus-ci \
+            -f deployments/compose/docker-compose.dev.yml \
+            -f deployments/compose/docker-compose.ci.yml \
+            logs --tail=200
       - name: teardown
         if: always()
-        run: docker compose -f deployments/compose/docker-compose.dev.yml down -v --remove-orphans
+        run: |
+          docker network disconnect argus-ci_default "$(hostname)" 2>/dev/null || true
+          docker compose -p argus-ci \
+            -f deployments/compose/docker-compose.dev.yml \
+            -f deployments/compose/docker-compose.ci.yml \
+            down -v --remove-orphans
 
   web:
     name: web build (when present)
