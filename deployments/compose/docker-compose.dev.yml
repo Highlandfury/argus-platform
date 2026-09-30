@@ -28,7 +28,12 @@ services:
       # TimescaleDB extension installation and tuning. Also regression-checked.
       - ../../scripts/db-init/01-roles.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U argus_owner -d argus"]
+      # TCP probe on purpose: the socket-based default answers while the
+      # entrypoint's temporary init server is still running (init scripts /
+      # TimescaleDB tuning), so dependents (dbinit, migrate) could start
+      # before the real listener exists. Observed as dbinit exit 2 on
+      # 2026-09-30; TCP succeeds only once the real server is up.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U argus_owner -d argus"]
       interval: 2s
       timeout: 3s
       retries: 30
