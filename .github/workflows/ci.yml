@@ -254,15 +254,10 @@ jobs:
         run: curl -fsS http://server:8080/v1/healthz
       - name: probe readyz (database + schema + auth-role checks)
         run: |
-          curl -fsS http://server:8080/v1/readyz -o /tmp/readyz.json
-          cat /tmp/readyz.json
-          python3 - <<'PY'
-          import json
-          d = json.load(open('/tmp/readyz.json'))
-          assert d['checks']['database'] == 'ok', d
-          assert d['checks']['auth_database'] == 'ok', d
-          print('readyz checks OK')
-          PY
+          curl -fsS http://server:8080/v1/readyz | tee /tmp/readyz.json
+          grep -q '"database":"ok"' /tmp/readyz.json
+          grep -q '"auth_database":"ok"' /tmp/readyz.json
+          echo "readyz checks OK"
       - name: probe metrics
         run: curl -fsS http://server:9090/metrics | grep -q argus_build_info
       - name: stack logs (on failure)

@@ -369,7 +369,12 @@ compose project `argus-ci` with `deployments/compose/docker-compose.ci.yml`
 and CI teardown can never delete local `argus-dev` volumes. The `compat-matrix`
 service publishes on host port `15432` (not 5432) to avoid the local db, and
 the job probes `host.docker.internal` before `127.0.0.1` so it works for both
-containerized and host-process runners.
+containerized and host-process runners. The db init script (a file bind mount
+in the dev file) cannot be bind-mounted in CI, because bind-mount sources are
+resolved by the Docker host and a containerized runner's checkout is not
+visible there; CI runs the same canonical `scripts/db-init/01-roles.sh` in a
+`dbinit` one-shot service (built from a tiny image, executed over TCP after
+the db is healthy; the script is idempotent).
 
 **Caution / implications**
 - Mounting `/var/run/docker.sock` gives the runner root-equivalent access to

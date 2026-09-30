@@ -1,13 +1,60 @@
+# deployments/compose/docker-compose.ci.yml
 # CI-only override (used as `-f docker-compose.dev.yml -f docker-compose.ci.yml`
 # together with `-p argus-ci`): the stacked jobs get their own project name,
 # network and volumes, and publish NO host ports — services are reached over
 # the compose network by DNS. This isolates CI runs completely from a
 # developer's local stack on the same host (no port conflicts, and CI's
 # `down -v` can never delete local dev volumes).
+#
+# It also replaces the dev file's one bind mount, which cannot work from a
+# containerized runner: bind-mount sources are resolved by the Docker host,
+# and the runner's checkout lives inside the runner container (Docker would
+# create an empty directory at the source path -> db init exits 126). CI
+# instead runs the same canonical scripts/db-init/01-roles.sh in the `dbinit`
+# one-shot service, straight from a built image over TCP. The script is
+# idempotent (converges role attributes), so running it after first init is
+# equivalent to the dev file's init-time execution.
 services:
   db:
     ports: !reset []
+    volumes: !override
+      - db-data:/var/lib/postgresql
+
+  dbinit:
+    build:
+      context: ../../scripts/db-init
+      dockerfile_inline: |
+        FROM timescale/timescaledb:2.30.1-pg18@sha256:9dede0e3ccc071cf71935b17f76bf243331df0b1575338c8ac294640fcf12a36
+        COPY 01-roles.sh /init/01-roles.sh
+        RUN chmod 0555 /init/01-roles.sh
+    command: ["sh", "/init/01-roles.sh"]
+    environment:
+      PGHOST: db
+      PGUSER: argus_owner
+      PGPASSWORD: ${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}
+      POSTGRES_USER: argus_owner
+      POSTGRES_DB: argus
+      ARGUS_DEV_DB_PASSWORD: ${ARGUS_DEV_DB_PASSWORD:-dev-db-change-me}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  migrate:
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+
+  seed:
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+
   server:
     ports: !reset []
+    depends_on:
+      dbinit:
+        condition: service_completed_successfully
+
   web:
     ports: !reset []
