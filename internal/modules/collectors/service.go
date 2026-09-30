@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	tokenTTLMin = time.Minute
+	minTokenTTL = time.Minute
 	tokenTTLMax = 7 * 24 * time.Hour
 	// StaleAfterMultiplier defines when a connected collector with no recent
 	// heartbeat is reported as stale (3x the policy interval, SPEC §4.1).
@@ -184,8 +184,8 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (EnrollResult, 
 // CreateEnrollmentToken mints a one-time, site-bound credential (raw returned
 // once; SHA-256 stored).
 func (s *Service) CreateEnrollmentToken(ctx context.Context, orgID, siteID uuid.UUID, ttl time.Duration, createdBy *uuid.UUID) (raw string, id uuid.UUID, expiresAt time.Time, err error) {
-	if ttl < tokenTTLMin || ttl > tokenTTLMax {
-		return "", uuid.Nil, time.Time{}, fmt.Errorf("collectors: ttl must be between %s and %s", tokenTTLMin, tokenTTLMax)
+	if ttl < minTokenTTL || ttl > tokenTTLMax {
+		return "", uuid.Nil, time.Time{}, fmt.Errorf("collectors: ttl must be between %s and %s", minTokenTTL, tokenTTLMax)
 	}
 	raw, hash, err := MintEnrollmentToken()
 	if err != nil {

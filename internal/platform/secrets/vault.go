@@ -74,7 +74,7 @@ func (c Context) validate() error {
 func ParseContext(raw []byte) (Context, error) {
 	var c Context
 	if err := json.Unmarshal(raw, &c); err != nil {
-		return Context{}, fmt.Errorf("%w: %v", ErrInvalidContext, err)
+		return Context{}, fmt.Errorf("%w: %w", ErrInvalidContext, err)
 	}
 	if err := c.validate(); err != nil {
 		return Context{}, err
@@ -98,7 +98,7 @@ type Envelope struct {
 // binds the ciphertext to {org, type, id, version} and Open verifies it
 // against the key material, but the vault cannot know which row the caller
 // meant to read. Callers must not mix columns of different rows.
-type SecretsVault interface {
+type SecretsVault interface { //nolint:revive // canonical abstraction name (architecture docs/06 §10.14); implementation is Vault
 	// Seal encrypts plaintext under a fresh per-secret DEK wrapped by the
 	// current KEK version. The returned Envelope is the storage row.
 	Seal(orgID uuid.UUID, secretType string, secretID uuid.UUID, plaintext []byte) (Envelope, error)

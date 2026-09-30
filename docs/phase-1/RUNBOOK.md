@@ -358,7 +358,16 @@ pins such as `2.337.0-ubuntu-noble` exist and are preferable when the exact
 agent version matters.
 
 `ACCESS_TOKEN=<PAT>` instead of `RUNNER_TOKEN` makes restarts survive token
-expiry.
+expiry: the image fetches a fresh registration token at every start. Use it:
+a one-time `RUNNER_TOKEN` is consumed on first registration, and the runner
+image deregisters and deletes its config on a graceful stop (e.g. Docker
+Desktop shutdown), so the next start crash-loops with a 404 until the
+container is recreated (observed 2026-09-30). Recommended PAT: fine-grained,
+repository access to this repo, permission Administration: Read and write.
+
+If queued jobs do not start while the log says `Listening for Jobs` (stale
+session after a re-registration), `docker restart argus-runner` resyncs it;
+jobs are picked up within seconds (observed 2026-09-30).
 
 **Step 3 â€” verify.** Repo â†’ Settings â†’ Actions â†’ Runners shows
 `argus-runner-1` (Idle). Then trigger any workflow (push, or *Actions â†’

@@ -43,7 +43,7 @@ func TestCredentialsAtRestEnvelope(t *testing.T) {
 	vault := secrets.New(kek)
 
 	credID := uuid.New()
-	secretType := "snmp_v2c"
+	secretType := "snmp_v2c" //nolint:gosec // test value, not a credential
 	plaintext := []byte("community-s3cr3t-" + newUUID())
 
 	env, err := vault.Seal(mustUUID(t, tn.OrgID), secretType, credID, plaintext)
@@ -182,7 +182,7 @@ func TestCredentialsAtRestEnvelope(t *testing.T) {
 	if strings.Contains(logText, string(plaintext)) {
 		t.Fatal("plaintext appears in vault logs")
 	}
-	keyFileRaw, err := os.ReadFile(keyPath)
+	keyFileRaw, err := os.ReadFile(keyPath) //nolint:gosec // test fixture path
 	must(t, err)
 	var keyRing struct {
 		Keys map[string][]byte `json:"keys"`

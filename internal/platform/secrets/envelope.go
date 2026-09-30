@@ -102,7 +102,7 @@ func encodeEnvelopeV1(keyVersion int, wrappedDEK, dataNonce, ciphertext []byte) 
 	// buf[3] reserved = 0
 	binary.BigEndian.PutUint16(buf[4:6], uint16(keyVersion))
 	// buf[6:8] reserved = 0
-	binary.BigEndian.PutUint16(buf[8:10], uint16(len(wrappedDEK)))
+	binary.BigEndian.PutUint16(buf[8:10], wrappedDEKLenV1)
 	buf = append(buf, wrappedDEK...)
 	buf = append(buf, dataNonce...)
 	buf = append(buf, ciphertext...)

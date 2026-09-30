@@ -27,7 +27,7 @@ func testVault(t *testing.T) *Vault {
 
 func TestSealOpenRoundTrip(t *testing.T) {
 	vault := testVault(t)
-	orgID, secretType, secretID := uuid.New(), "snmp_v2c", uuid.New()
+	orgID, secretType, secretID := uuid.New(), "snmp_v2c", uuid.New() //nolint:gosec // test value, not a credential
 	plaintext := []byte("community-string-fixture")
 
 	env, err := vault.Seal(orgID, secretType, secretID, plaintext)
@@ -99,7 +99,7 @@ func TestSealRejectsInvalidContext(t *testing.T) {
 // any other org, secret type, secret id, or version fails closed.
 func TestOpenRejectsWrongContext(t *testing.T) {
 	vault := testVault(t)
-	orgID, secretType, secretID := uuid.New(), "snmp_v2c", uuid.New()
+	orgID, secretType, secretID := uuid.New(), "snmp_v2c", uuid.New() //nolint:gosec // test value, not a credential
 	env, err := vault.Seal(orgID, secretType, secretID, []byte("bound secret"))
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
@@ -218,7 +218,7 @@ func TestEnvelopeCarriesNoPlaintext(t *testing.T) {
 }
 
 func TestContextJSONMapping(t *testing.T) {
-	want := Context{OrgID: uuid.New(), SecretType: "snmp_v2c", SecretID: uuid.New(), Version: 3}
+	want := Context{OrgID: uuid.New(), SecretType: "snmp_v2c", SecretID: uuid.New(), Version: 3} //nolint:gosec // test value, not a credential
 	raw, err := json.Marshal(want)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

@@ -174,7 +174,7 @@ func TestLocalKMSNeverOverwritesInvalidFile(t *testing.T) {
 	if _, err := LoadOrCreateLocalKMS(LocalConfig{Path: path, KeyID: "x", AllowGenerate: true}); err == nil {
 		t.Fatal("invalid key file must fail even in dev (never overwrite key material)")
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // test fixture path
 	if err != nil {
 		t.Fatalf("read back: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestLocalKMSLogsNoKeyMaterial(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "master.key")
 	kek := mustLoadLocalKMS(t, LocalConfig{Path: path, KeyID: "log-key", AllowGenerate: true, Logger: logger})
 
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) //nolint:gosec // test fixture path
 	if err != nil {
 		t.Fatalf("read key file: %v", err)
 	}
