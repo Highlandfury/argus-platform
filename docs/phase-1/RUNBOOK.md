@@ -294,3 +294,64 @@ cd web; npx playwright test
 ```
 Expected: collector `dev-collector` active, samples advancing, 6/6 Playwright
 tests green (login, registry, metrics chart, failure states, enrollment token).
+
+---
+
+## 17. CI runner (self-hosted)
+
+**Purpose:** run the repository's GitHub Actions workflows without
+GitHub-hosted minutes (the account's hosted-runner billing is locked). All jobs
+in `.github/workflows/ci.yml` target the labels **`self-hosted, linux, x64,
+argus`**.
+
+**Prerequisites:** Docker Desktop running; the repository exists on GitHub; you
+can open *Repo → Settings → Actions → Runners*.
+
+**Why a Linux-in-Docker runner:** the workflows are Bash/Docker-based
+(gofmt checks, testcontainers integration suites, `docker compose` smoke/e2e).
+A native Windows runner would require rewriting those steps; a Linux runner
+container reuses them unchanged.
+
+**Step 1 — registration token.** Repo → Settings → Actions → Runners → *New
+self-hosted runner* → Linux → copy the `--token` value (valid ~1 hour) **or**
+create a classic PAT with `repo` scope (the runner image uses it to fetch fresh
+tokens at every start; store it only on your machine).
+
+**Step 2 — start the runner (PowerShell):**
+
+```powershell
+docker run -d --name argus-runner --restart unless-stopped `
+  -e REPO_URL="https://github.com/<owner>/<repo>" `
+  -e RUNNER_TOKEN="<registration-token-or-PAT>" `
+  -e RUNNER_NAME="argus-runner-1" `
+  -e LABELS="self-hosted,linux,x64,argus" `
+  -e RUNNER_WORKDIR="/tmp/runner/work" `
+  -v //var/run/docker.sock:/var/run/docker.sock `
+  -v argus-runner-work:/tmp/runner `
+  myoung34/github-runner:ubuntu-24.04
+```
+
+`ACCESS_TOKEN=<PAT>` instead of `RUNNER_TOKEN` makes restarts survive token
+expiry.
+
+**Step 3 — verify.** Repo → Settings → Actions → Runners shows
+`argus-runner-1` (Idle). Then trigger any workflow (push, or *Actions →
+security-suite → Run workflow*). Inside the runner, both must work:
+`docker version` and `docker compose version`.
+
+**Caution / implications**
+- Mounting `/var/run/docker.sock` gives the runner root-equivalent access to
+  the host Docker daemon — acceptable on a development machine, never on a
+  shared host.
+- The nightly `failure-suite` (03:00 UTC) only runs when this machine and the
+  runner container are up; if the runner is offline the scheduled run waits for
+  a matching runner.
+- Runner disk usage grows with compose builds and testcontainers images; prune
+  with `docker system prune` when idle.
+- Secrets: the registration token/PAT stays in the local container env — it is
+  never committed. Revoke the PAT and delete the runner in Settings when you
+  stop using it.
+- **Revert:** if hosted minutes are restored, replace every `runs-on:
+  [self-hosted, linux, x64, argus]` in `ci.yml` with `ubuntu-latest`.
+- Uninstall: `docker rm -f argus-runner` and remove the runner entry in Repo →
+  Settings → Actions → Runners.
