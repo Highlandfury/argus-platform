@@ -299,6 +299,23 @@ tests green (login, registry, metrics chart, failure states, enrollment token).
 
 ## 17. CI runner (self-hosted)
 
+**Status note (2026-09-30):** this repository's GitHub account is
+billing-locked; GitHub refuses to start *any* Actions job — including on
+self-hosted runners — until the payment issue is resolved in *Settings →
+Billing & plans* (or the repository is made public, where Actions usage is not
+billed; publishing is a separate decision and requires a secret-hygiene pass).
+Until then, run the identical gates locally:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\ci-local.ps1
+# defaults: fmt, vet, build, test, lint, proto
+# add: -Race (Linux/WSL), -WithSuites, -WithStack, -WithWeb
+```
+
+(The bypass is needed because this host's PowerShell execution policy blocks
+direct `.ps1` invocation; `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+is the persistent alternative.)
+
 **Purpose:** run the repository's GitHub Actions workflows without
 GitHub-hosted minutes (the account's hosted-runner billing is locked). All jobs
 in `.github/workflows/ci.yml` target the labels **`self-hosted, linux, x64,
