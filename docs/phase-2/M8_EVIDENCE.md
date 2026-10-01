@@ -1,13 +1,15 @@
 # M8-EVIDENCE — Metrics pipeline completion
 
-**Status: M8 IN PROGRESS.** This record covers **M8-S1** (storage completion:
-CAGGs/refresh/compression/retention, query resolution picker + caps, cardinality
-guards/retirement, verification + tests + evidence) and **M8-S2a** (ADR-016
-ingest write-path decision + optimization, correctness tests under concurrency,
-10-minute L-01/L-02 validation runs). **M8-S2b** — the >= 1 h sustained 20k
-samples/s soak, L-03 concurrency remediation, the measured compression ratio and
-the phase load report — remains open and is the next slice. No M9/M10/alerts
-work was done.
+**Status: M8 COMPLETE (M8-S2b recorded here).** This record covers **M8-S1**
+(storage completion: CAGGs/refresh/compression/retention, query resolution
+picker + caps, cardinality guards/retirement, verification + tests + evidence),
+**M8-S2a** (ADR-016 ingest write-path decision + optimization, correctness tests
+under concurrency, 10-minute L-01/L-02 validation runs) and **M8-S2b** (L-03
+concurrency remediation with measured root cause, the >= 1 h soak, the measured
+CAGG compression ratio and the Phase-2 load report). No M9/M10/alerts work was
+done. P2-AC-12 is met on L-03 and reported honestly on the soak (§7.3); P2-AC-10
+remains partially blocked on raw compression by the platform RLS constraint
+(§5) and is measured on the CAGGs. Deferrals are listed in §10.
 
 References: `PHASE_2_SPEC.md` P2-AC-07..11/13, M8 deliverables; canonical
 docs/08 §13.1-13.6 (CAGGs, aggregation policy, picker, cardinality), docs/11
@@ -220,15 +222,32 @@ compression policies/settings present; `metric_samples` keeps `ENABLE + FORCE`
 RLS and has **no** compression settings. If a future stack enables raw
 compression (necessarily dropping RLS), verification fails loudly.
 
-**Next step (M8-S2b, storage/compression decision).** Raw compression remains
-blocked by the RLS constraint. The remaining options are: (a) keep RLS and
-accept uncompressed raw (current), (b) replace table-level RLS with an
+**Next step (M8-S2b → M13, storage/compression decision).** Raw compression
+remains blocked by the RLS constraint. The remaining options are: (a) keep RLS
+and accept uncompressed raw (current), (b) replace table-level RLS with an
 equivalent enforced surface to unlock compression (a tenancy redesign), or
 (c) move raw storage to a different engine (the pre-committed VictoriaMetrics
-extraction path). P2-AC-10's "measured compression ratio" therefore cannot be
-produced for raw this slice; CAGG compression ratios are measurable in the load
-slice. Note: ADR-016's write-path half is decided on measured evidence in §6
-below and does **not** change this storage question.
+extraction path).
+
+**Measured CAGG ratios (M8-S2b, forced compression on the dev stack; raw view
+outputs in `tests/load/results/compression_stats_internal.txt`):**
+
+| CAGG chunk | Rows / series | Before bytes | After bytes | Ratio |
+|---|---|---|---|---|
+| `metric_1m` `_hyper_2_2_chunk` | 2,138 / 201 | 770,048 | 344,064 | **2.24 : 1** |
+| `metric_5m` `_hyper_3_3_chunk` | 614 / 201 | 196,608 | 319,488 | **0.62 : 1** (1.61× larger) |
+
+The 1m chunk (the materialization the query path relies on) compresses 2.24:1;
+the 5m chunk is too small for columnstore overhead (TimescaleDB warned "poor
+compression ratio" itself). The raw-table attempt is re-verified in
+`tests/load/results/raw_compression_blocked.txt`:
+`ALTER TABLE metric_samples SET (timescaledb.compress, ...)` still fails with
+`columnstore cannot be used on table with row security`, and `metric_samples`
+keeps ENABLE+FORCE RLS with zero compression settings. No vendor numbers are
+used; ratios are from `chunk_compression_stats(...)` before/after bytes.
+ADR-016's write-path half is decided on measured evidence in §6 below and does
+**not** change this storage question; the storage decision stays open for M13
+(§10).
 
 ---
 
@@ -326,7 +345,7 @@ collector advances its durable watermark only on contiguous acks
 (`internal/collector/transport/sender_test.go`, "Out-of-order results must not
 advance the watermark past a gap").
 
-## 7. Validation runs — L-01 / L-02 (10-minute re-measure)
+## 7. Validation runs — L-01 / L-02 (M8-S2a), L-03 + 1 h soak (M8-S2b)
 
 > Raw artifacts under `tests/load/results/`: `l01.json`/`l01.log`, `l02.json`
 > (canonical) and `l02_xt.json` (extended watchdog), `*_cpu.csv`, `*_waits.csv`,
@@ -437,6 +456,56 @@ largest write-path cost. The ≥ 1 h soak should either separate the generator
 from the server host or repeat on a host with more cores, and may need the
 FK-replacement decision (§6.2 #6) to hold 20k/s with headroom.
 
+### 7.3 L-03 — API leg remediation (P2-AC-12)
+
+The full before/after record, root-cause evidence chain and raw artifacts are in
+[`LOAD_TEST_REPORT.md`](LOAD_TEST_REPORT.md) (§ "L-03"); the short version:
+
+- **Before (measured, clean 50 VU / 5 min run):** p95 **463.4 ms FAIL**,
+  p99 584.6 ms, 166.2 req/s, 0% errors; server-side both protected routes
+  p95 ≈ 490 ms while `/v1/healthz` (no session middleware) stayed at p95
+  4.8 ms; `argus_db_query_duration_seconds{op="query"}` p50 13.3 ms.
+- **Root cause:** every authenticated request ran an unconditional row-locking
+  `UPDATE sessions SET last_seen_at = now()` (best-effort touch) in its own
+  transaction. `pg_stat_activity` showed the full concurrency parked on
+  `Lock: transactionid` for that statement plus `WalSync` waits on its commit;
+  the DB delta was **+49,986 session updates for 49,987 requests** (the L-03
+  setup shares one session, so all VUs serialized on one row). Classified as
+  the auth/session path — not SQL, not HTTP settings, not Docker networking.
+- **Fix (production code, `internal/modules/identity`):** session + user
+  resolved in **one** auth query/transaction (`getSessionUserByTokenHash`), and
+  the touch is **throttled to at most once per 30 s per session** with a
+  conditional `UPDATE ... WHERE last_seen_at < cutoff`, keeping the previous
+  best-effort semantics (a failed touch never fails the request).
+- **After (identical harness/stack):** p95 **224.7 ms PASS**, p99
+  **289.6 ms PASS**, 120.9 ms avg, 409.9 req/s (2.5×), 0% errors, k6 exit 0;
+  session row updates **+9**, WAL **+0.4 MB**; server-side list/metrics p95
+  202 / 249 ms.
+- **Semantics preserved/tested:** unknown/expired/revoked sessions and disabled
+  users still fail uniformly; the auth role still cannot read tenant tables
+  (`TestM8S2bAuthLookupAndTouchThrottle`).
+
+Artifacts: `tests/load/results/l03_before_clean_*`, `l03_after_clean_*`
+(logs, k6 summaries, pre/post `/metrics`, route deltas, docker stats, DB
+counter deltas). The initial JSON-output run's raw per-op dump
+(`l03_before_points.json`, 126.8 MB) exceeds the host's 100 MB file limit and
+is intentionally not committed (kept local, gitignored).
+
+### 7.4 Soak — L-01-style, 20k samples/s offered for >= 1 h
+
+Run `soak3` (2026-10-01): single stream, batch 2,000, 20,000 samples/s offered
+for 62.0 min; 65,241,605 samples accepted; **0 duplicate / 0 rejected / 0 retry
+/ 0 transport errors / 0 reconnects**; ack p50 769.6 / p95 1,315.4 / p99
+1,739.9 ms; DB CPU avg 632.3% / max 844.3%, server CPU avg 59.5%; raw
+hypertable +11.48 GB (~176 B/sample uncompressed); session updates +4
+(throttled touch). Achieved **17,535.5/s = 87.7% of offered** - the run is
+lossless but the sustained-20k target is **not met on this host** (DB ~6.3 of
+8 threads with the generator sharing the node); the 10-minute L-01 validation
+(16,869/s) agrees, attributing the ceiling to host CPU. P2-AC-12 is recorded
+with this shortfall; the pilot-profile re-run on separate server/generator
+hardware is M13. Full table + interpretation: `LOAD_TEST_REPORT.md` Soak
+section; artifacts `tests/load/results/soak3_*`.
+
 ## 8. Verification and maintenance path (P2-AC-09)
 
 - `metrics.VerifyPolicies` checks via `timescaledb_information`:
@@ -528,13 +597,19 @@ slice needs to re-measure it.
 
 ## 10. Deferrals and explicit non-goals for this slice
 
-- **M8-S2b (next slice):** >= 1 h sustained 20k samples/s soak; L-03 (50 VUs,
-  p95 ≤ 300 ms / p99 ≤ 1 s) with the measured root cause addressed; measured
-  raw compression ratio; the Phase-2 load report. The 10-minute L-01/L-02 runs
-  here prove direction and correctness but are explicitly **not** the soak.
+- **Closed in M8-S2b:** L-03 root cause addressed and passing (p95 224.7 ms /
+  p99 289.6 ms); >= 1 h soak executed and reported honestly (§7.4: measured
+  sustained rate vs the 20k target, with bottleneck attribution — no fabricated
+  success); CAGG compression measured (2.24:1 on `metric_1m`); the Phase-2 load
+  report delivered (`docs/phase-2/LOAD_TEST_REPORT.md`). The soak's shortfall,
+  if any, is exactly what the FK-replacement decision below needs.
 - **Raw compression** — see §5; blocked by the RLS constraint on the pinned
   TimescaleDB; the storage choice (keep RLS / enforced replacement / different
-  engine) is the M8-S2b load-report decision.
+  engine) is a Phase-2/M13 decision on top of the measured CAGG ratios.
+- **Pool/pprof instrumentation** — the DB-level evidence (row-lock waits,
+  per-statement WAL commits, session update deltas) localised L-03 without
+  pgxpool acquire histograms or CPU/block profiles; those remain an ops nicety
+  and were deliberately not added in this slice.
 - **`org_id` FK replacement (if soak needs it)** — the per-row RI trigger is
   the largest remaining per-sample cost (§6.1 #4). Any replacement must keep
   the referential guarantee; deferred until the 1 h numbers exist.
@@ -573,3 +648,34 @@ metrics module (picker/query/store/series/guards/maintenance + tests),
   `tests/load/README.md`; raw artifacts `tests/load/results/*` (L-01/L-02 JSON,
   logs, CPU/wait/stream samples, server metrics snapshots, ADR-016 bench JSON).
 - Docs: this file (§6/§7/§10/§11).
+
+**M8-S2b (this slice):**
+
+- L-03 fix: `internal/modules/identity/service.go` (single-query session+user
+  auth; throttled best-effort `last_seen_at` touch, `SessionTouchInterval`),
+  `internal/modules/identity/repo.go` (`getSessionUserByTokenHash`, conditional
+  `touchSession`; removed the per-request `getSessionByTokenHash`/`getUserByID`
+  pair from the request path).
+- Tests: `tests/integration/m8s2b_identity_test.go` (new: joined lookup, touch
+  throttle, uniform rejection for unknown/revoked/disabled, auth-role grant
+  boundary).
+- Load evidence: `tests/load/results/l03_before_clean_*`, `l03_after_clean_*`,
+  the `l03_before_*` run (raw per-op dump kept local, gitignored),
+  `soak3_*` artifacts, `compression_*` and `raw_compression_blocked.txt`.
+- Docs: `docs/phase-2/LOAD_TEST_REPORT.md` (new);
+  `tests/load/README.md` (L-03 result + harness lesson + soak recipe); this
+  file (§5/§7.3/§7.4/§10/§12).
+
+---
+
+## 12. P2-AC coverage (P2-AC-07..13)
+
+| AC | State | Evidence |
+|---|---|---|
+| P2-AC-07 (rollup freshness <= 2 min guarantee) | met | §1 (1m `end_offset` 2 min + schedule 1 min; hierarchical refresh); `TestMetricsCAGGComputation`; live refreshes verified in `timescaledb_information.job_stats` (0 failures except the unrelated TimescaleDB telemetry job) |
+| P2-AC-08 (raw fallback correctness) | met | §3.3; `TestMetricsRawFallbackServesMaterializedAndRecent`; picker `meta` fields |
+| P2-AC-09 (retention/compression policies + loud verification) | met | §1/§8; `VerifyPolicies` + `metrics-maintenance --verify-only`; nightly CI job; `TestMetricsRawRetentionConfig`, `TestMetricsPolicyVerification` |
+| P2-AC-10 (compression enabled + measured ratio) | **partial — raw blocked by RLS** | §5: CAGG policies present, measured `metric_1m` 2.24:1 / `metric_5m` 0.62:1 (raw bytes, force-compressed chunk); raw compression impossible on the pinned TimescaleDB with ENABLE+FORCE RLS (error + vetted state in `raw_compression_blocked.txt`); decision deferred to M13 (§10) |
+| P2-AC-11 (cardinality guards) | met except compile-time budget + UI | §4: caps/quarantine/retirement + tests; compile-time template budget → M9; quarantine UI surfacing → M10 |
+| P2-AC-12 (load evidence) | partial/honest | L-01 16,869 samples/s and L-02 14,934 samples/s re-measured on the optimized path (§7.1/7.2, unchanged from S2a); L-03 fixed and passing (§7.3: p95 224.7 ms / p99 289.6 ms); >= 1 h soak executed with honest shortfall reporting (§7.4) |
+| P2-AC-13 (query budgets) | caps met; 7 d latency budget not separately measurable here | caps 10k points / 100 series / 15 s with partial flags (M8-S1, `TestMetricsPointsAndSeriesCaps`); L-03 exercises the 24 h @ 1 m metric query at p95 224.7 ms client-side / 249 ms server-side under 50 VUs. A 7-day window cannot be measured truthfully on this dataset (the dev stack holds ~1 h of raw history; the soak targets 1 h), so the NFR-PERF-002 7 d p95 < 2 s check is deferred to M13's pilot-profile run with production-shaped history |

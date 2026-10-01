@@ -1,0 +1,19 @@
+{
+  "mode": "single-stream",
+  "collectors": 1,
+  "duration_seconds": 3720.54,
+  "batch_size": 2000,
+  "offered_samples_per_sec": 20000,
+  "achieved_samples_per_sec": 17535.51,
+  "batches_ok": 32704,
+  "batches_duplicate": 0,
+  "batches_rejected": 0,
+  "batches_retry": 0,
+  "samples_accepted": 65241605,
+  "samples_duplicate": 0,
+  "transport_errors": 0,
+  "reconnects": 0,
+  "ack_p50_ms": 769.628,
+  "ack_p95_ms": 1315.363,
+  "ack_p99_ms": 1739.896
+}

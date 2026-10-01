@@ -1,0 +1,2 @@
+hypertable_size=5018214400 chunks=1
+series=3

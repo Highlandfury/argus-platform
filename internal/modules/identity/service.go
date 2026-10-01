@@ -123,18 +123,29 @@ func (s *Service) Login(ctx context.Context, orgSlug, email, password string) (L
 	return LoginResult{RawToken: rawToken, RawCSRF: rawCSRF, ExpiresAt: expiresAt, User: user, Org: org}, nil
 }
 
-// Authenticate resolves a raw session token, enforces validity, refreshes
-// last_seen_at, and returns the identity context for the middleware.
+// SessionTouchInterval bounds how often an authenticated request writes the
+// session's last_seen_at. Touching every request serialized all traffic of one
+// session on the session row lock and its WAL commit (measured: L-03 50 VUs,
+// pg_locks transactionid waits); last_seen_at is observability metadata, so a
+// throttle preserves its meaning without the herd.
+const SessionTouchInterval = 30 * time.Second
+
+// Authenticate resolves a raw session token, enforces validity, and refreshes
+// last_seen_at (throttled, best-effort), returning the identity context for
+// the middleware. The session and user are read in one transaction/query.
 func (s *Service) Authenticate(ctx context.Context, rawToken string) (Authenticated, error) {
 	if rawToken == "" {
 		return Authenticated{}, ErrSessionInvalid
 	}
 	tokenHash := security.HashToken(rawToken)
 
-	var sess Session
+	var (
+		sess Session
+		user User
+	)
 	err := database.WithAuthTx(ctx, s.auth, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		sess, err = getSessionByTokenHash(ctx, tx, tokenHash)
+		sess, user, err = getSessionUserByTokenHash(ctx, tx, tokenHash)
 		return err
 	})
 	if err != nil {
@@ -144,27 +155,18 @@ func (s *Service) Authenticate(ctx context.Context, rawToken string) (Authentica
 		return Authenticated{}, err
 	}
 	now := time.Now()
-	if sess.RevokedAt != nil || now.After(sess.ExpiresAt) {
+	if sess.RevokedAt != nil || now.After(sess.ExpiresAt) || user.Disabled {
 		return Authenticated{}, ErrSessionInvalid
 	}
 
-	var user User
-	err = database.WithAuthTx(ctx, s.auth, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		user, err = getUserByID(ctx, tx, sess.UserID)
-		return err
-	})
-	if err != nil {
-		return Authenticated{}, ErrSessionInvalid
+	// Best-effort touch: a failed refresh must not fail the request, and the
+	// conditional UPDATE runs at most once per SessionTouchInterval per session.
+	cutoff := now.Add(-SessionTouchInterval)
+	if sess.LastSeenAt == nil || sess.LastSeenAt.Before(cutoff) {
+		_ = database.WithAuthTx(ctx, s.auth, func(ctx context.Context, tx pgx.Tx) error {
+			return touchSession(ctx, tx, sess.ID, cutoff)
+		})
 	}
-	if user.Disabled {
-		return Authenticated{}, ErrSessionInvalid
-	}
-
-	// Best-effort touch: a failed refresh must not fail the request.
-	_ = database.WithAuthTx(ctx, s.auth, func(ctx context.Context, tx pgx.Tx) error {
-		return touchSession(ctx, tx, sess.ID)
-	})
 
 	return Authenticated{User: user, Session: sess}, nil
 }

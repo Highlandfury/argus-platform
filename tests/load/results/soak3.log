@@ -1,0 +1,9 @@
+enrolling 1 collector(s) (single-stream mode, batch 2000, target 20000 samples/s, 1h2m0s)...
+enrolled in 58ms; streaming...
+----- loadgen summary -----
+mode=single-stream collectors=1 duration=3720.5s batch=2000
+offered=20000 samples/s achieved=17536 samples/s
+batches: ok=32704 duplicate=0 rejected=0 retry=0 | samples accepted=65241605 duplicate=0
+ack latency: p50=769.6ms p95=1315.4ms p99=1739.9ms | transport_errors=0 reconnects=0
+summary written to tests\load\results\soak3.json
+RESULT: clean run

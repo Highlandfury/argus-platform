@@ -45,10 +45,11 @@ until a dev reset; that is the documented cleanup).
 
 ```powershell
 # from the repository root; K6_PASSWORD must be set for anything beyond the
-# documented dev credential
+# documented dev credential. Dev stacks using deployments/compose/.env:
+# take K6_PASSWORD from ARGUS_DEV_ADMIN_PASSWORD there (do not commit it).
 Get-Content tests\load\k6\api.js -Raw | docker run --rm -i --network argus-dev_default `
   -e BASE_URL=http://server:8080 `
-  -e K6_PASSWORD=dev-admin-change-me `
+  -e K6_PASSWORD=<dev admin password> `
   grafana/k6:2.3.0 run --summary-trend-stats 'min,avg,p(50),p(95),p(99),max' -
 ```
 
@@ -57,8 +58,20 @@ Canonical thresholds enforced by the script: `p(95) < 300 ms`,
 "24 h @ 10 s step", but the Phase-1 query contract capped results at 2000
 points (24 h @ 10 s -> 422 `query.points_exceeded`), so L-03 issued
 **24 h @ 1 m**. M8 reconciled the cap to the canonical 10k points (24 h @ 10 s
-= 8641 points now fits); the load slice re-baselines L-03 against the new
+= 8641 points now fits); the load slice re-baselined L-03 against the new
 contract.
+
+**M8-S2b result:** before the session-touch fix the same harness measured
+p95 463 ms (FAIL); after it p95 224.7 ms / p99 289.6 ms (PASS) with 0% errors.
+Root cause, fix and raw artifacts: `docs/phase-2/LOAD_TEST_REPORT.md` § L-03
+and `docs/phase-2/M8_EVIDENCE.md` §7.3.
+
+**Harness lesson (measured):** do **not** add `--out json=<file>` to L-03. The
+metrics query URL carries per-request `from`/`to` timestamps, so every request
+creates unique `url`-tagged series; k6 accumulates >100k series and its JSON
+writer stalled for minutes after a 5-minute run (the file kept growing after
+the test ended). Use the server's `/metrics` histograms
+(`argus_http_request_duration_seconds`) for per-route percentiles instead.
 
 ## Interpret results
 
@@ -90,6 +103,26 @@ stream (a real collector instead keeps the spool and replays); the opt-in
 `-ack-timeout` flag (default 15 s, unchanged) raises that watchdog to measure
 service capacity without the synthetic abandons. Both measurements are recorded
 in `docs/phase-2/M8_EVIDENCE.md` §7.2.
+
+## Run the >= 1 h soak (P2-AC-12)
+
+Single-stream, batch 2,000, 20,000 samples/s offered for 62 minutes, generator
+on the host (server/DB stay in Docker), detached with periodic monitoring:
+
+```powershell
+cd <repo>
+$env:ARGUS_DEV_ADMIN_PASSWORD = "<dev admin password>"   # or pass -password
+go build -o .dev\loadgen.exe ./tests\load\gen
+docker compose -f deployments\compose\docker-compose.dev.yml cp server:/var/lib/argus/ca/root.pem .dev\ca-root.pem
+.\.dev\loadgen.exe -mode single-stream -duration 62m -samples-per-sec 20000 -batch 2000 `
+  -name-prefix soak -ca-file .dev\ca-root.pem -json tests\load\results\soak.json `
+  *> tests\load\results\soak.log
+```
+
+Run it detached and poll; measure with `docker stats` sampling plus
+`pg_stat_*`/`timescaledb_information` snapshots (see
+`tests/load/results/soak_*`). Honest results (including any shortfall against
+20k/s) are in `docs/phase-2/LOAD_TEST_REPORT.md` § Soak.
 
 ## Query latency probe
 

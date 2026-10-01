@@ -1,0 +1,3 @@
+# HELP argus_ingest_samples_total Samples by status (SPEC -º15).
+# TYPE argus_ingest_samples_total counter
+argus_ingest_samples_total{status="accepted"} 2.8479003e+07
