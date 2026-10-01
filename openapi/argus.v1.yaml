@@ -215,7 +215,7 @@ paths:
         - { name: metric, in: query, required: true, schema: { type: string, enum: [collector_cpu_percent] } }
         - { name: from, in: query, required: true, schema: { type: string, format: date-time } }
         - { name: to, in: query, required: true, schema: { type: string, format: date-time } }
-        - { name: step, in: query, schema: { type: string, enum: [raw, 10s, 1m, 5m], default: 10s } }
+        - { name: step, in: query, schema: { type: string, enum: [auto, raw, 10s, 1m, 5m, 1h, 1d], default: auto }, description: "auto applies the canonical resolution picker (docs/08 §13.5); explicit steps are honored with a warning when finer than the picker's recommendation" }
       responses:
         '200':
           description: OK
@@ -226,7 +226,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422':
-          description: Query would exceed the 2000-point limit (query.points_exceeded)
+          description: Query exceeds the supported point budget (query.points_exceeded); responses otherwise cap at 10k points / 100 series with partial=true
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1221,7 +1221,7 @@ components:
       properties:
         metric: { type: string }
         unit: { type: string }
-        resolution: { type: string, enum: [raw, 10s, 1m, 5m] }
+        resolution: { type: string, enum: [raw, 10s, 1m, 5m, 1h, 1d] }
         from: { type: string, format: date-time }
         to: { type: string, format: date-time }
         status:
@@ -1246,6 +1246,7 @@ components:
             description: '[unix_seconds, value]; contiguous with step; gaps explicit in meta'
         meta:
           type: object
+          description: "Query metadata (M8): resolution class, caps and raw-fallback flags."
           properties:
             expected_points: { type: integer }
             returned_points: { type: integer }
@@ -1254,6 +1255,25 @@ components:
             sample_count:
               type: integer
               description: Raw samples matched in range (M4c addition).
+            resolution:
+              type: string
+              enum: [raw, rollup_1m, rollup_5m, rollup_1h, rollup_1d]
+              description: "Canonical resolution class (docs/12 §22.8 example)."
+            partial:
+              type: boolean
+              description: "True when the series or point caps truncated the response (P2-AC-13)."
+            series_total: { type: integer }
+            series_returned: { type: integer }
+            points_truncated: { type: boolean }
+            raw_fallback:
+              type: boolean
+              description: "True when the recent span was computed from raw samples because the CAGG has not materialized it yet (P2-AC-07)."
+            rollup_missing:
+              type: boolean
+              description: "True when no materialization existed for the older span and it was recomputed from raw."
+            resolution_warning:
+              type: string
+              description: "Present when an explicit step is finer than the picker's recommendation for the range."
 
 security:
   - sessionCookie: []
