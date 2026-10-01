@@ -7,7 +7,14 @@ import (
 	"github.com/argus-platform/argus/internal/platform/authz"
 )
 
+func checkRoute(path string) bool {
+	return strings.HasPrefix(path, "/v1/checks") || strings.HasSuffix(path, "/checks")
+}
+
 func inventoryRoute(path string) bool {
+	if checkRoute(path) {
+		return false
+	}
 	return strings.HasPrefix(path, "/v1/devices") ||
 		strings.HasPrefix(path, "/v1/interfaces") ||
 		strings.HasPrefix(path, "/v1/device-groups")
@@ -49,6 +56,45 @@ func TestInventoryRoutesDeclareCapabilityAndScope(t *testing.T) {
 	}
 	if inventory != 19 {
 		t.Fatalf("inventory routes = %d, want the 18 M7-S3 routes + 1 M9-S1 poll-health route", inventory)
+	}
+}
+
+// TestCheckRoutesDeclareCapabilityAndScope pins the M10-S0 on-demand check
+// surface: creation is an unsafe POST (CSRF + canonical diagnostic.run
+// capability, scope device); the read is a device.read GET. The viewer
+// derivation holds no diagnostic capability (docs/04 §6.4).
+func TestCheckRoutesDeclareCapabilityAndScope(t *testing.T) {
+	count := 0
+	for _, rt := range Routes() {
+		if !checkRoute(rt.Path) {
+			continue
+		}
+		count++
+		if !rt.Protected {
+			t.Errorf("%s %s: check route must require a session", rt.Method, rt.Path)
+		}
+		if rt.Scope != authz.ScopeDevice {
+			t.Errorf("%s %s: scope %q, want device", rt.Method, rt.Path, rt.Scope)
+		}
+		switch rt.Method {
+		case "POST":
+			if rt.Capability != authz.CapDiagnosticRun {
+				t.Errorf("%s %s: capability %q, want %q", rt.Method, rt.Path, rt.Capability, authz.CapDiagnosticRun)
+			}
+			if !rt.CSRF {
+				t.Errorf("%s %s: check creation must require CSRF", rt.Method, rt.Path)
+			}
+		case "GET":
+			if rt.Capability != authz.CapDeviceRead {
+				t.Errorf("%s %s: capability %q, want %q", rt.Method, rt.Path, rt.Capability, authz.CapDeviceRead)
+			}
+		}
+	}
+	if count != 2 {
+		t.Fatalf("check routes = %d, want the 2 M10-S0 routes", count)
+	}
+	if authz.Allowed("viewer", authz.CapDiagnosticRun) {
+		t.Error("viewer derives diagnostic.run; read-only principals must not trigger diagnostics")
 	}
 }
 

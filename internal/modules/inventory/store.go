@@ -49,7 +49,7 @@ func isIdentityConflict(err error) bool {
 // Columns are explicitly listed (text casts for inet/macaddr so scans are
 // driver-encoding independent) and shared by SELECT/RETURNING paths.
 const deviceColumns = `d.id, d.org_id, d.site_id, d.zone_id, d.name, d.kind, d.vendor_id, d.model_id,
-	d.sys_object_id, d.serial, d.firmware, host(d.mgmt_ip), d.status, d.poll_profile, d.confidence,
+	d.sys_object_id, d.serial, d.firmware, host(d.mgmt_ip), d.status, d.poll_profile, d.critical, d.confidence,
 	d.metadata, d.first_seen_at, d.last_seen_at, d.deleted_at, d.created_at, d.updated_at`
 
 const interfaceColumns = `i.id, i.org_id, i.device_id, i.if_index, i.if_name, i.if_alias, i.if_type,
@@ -64,7 +64,7 @@ const groupColumns = `g.id, g.org_id, g.name, g.selector, g.created_at, g.update
 func scanDevice(row pgx.Row) (Device, error) {
 	var d Device
 	err := row.Scan(&d.ID, &d.OrgID, &d.SiteID, &d.ZoneID, &d.Name, &d.Kind, &d.VendorID, &d.ModelID,
-		&d.SysObjectID, &d.Serial, &d.Firmware, &d.MgmtIP, &d.Status, &d.PollProfile, &d.Confidence,
+		&d.SysObjectID, &d.Serial, &d.Firmware, &d.MgmtIP, &d.Status, &d.PollProfile, &d.Critical, &d.Confidence,
 		&d.Metadata, &d.FirstSeenAt, &d.LastSeenAt, &d.DeletedAt, &d.CreatedAt, &d.UpdatedAt)
 	return d, err
 }
@@ -159,11 +159,11 @@ func listDevices(ctx context.Context, tx pgx.Tx, limit int, after *uuid.UUID, f 
 func insertDevice(ctx context.Context, tx pgx.Tx, d Device) (Device, error) {
 	row := tx.QueryRow(ctx, `
 		INSERT INTO devices AS d
-			(id, org_id, site_id, name, kind, sys_object_id, serial, firmware, mgmt_ip, status, poll_profile, confidence, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::inet, $10, $11, $12, $13::jsonb)
+			(id, org_id, site_id, name, kind, sys_object_id, serial, firmware, mgmt_ip, status, poll_profile, critical, confidence, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::inet, $10, $11, $12, $13, $14::jsonb)
 		RETURNING `+deviceColumns,
 		d.ID, d.OrgID, d.SiteID, d.Name, d.Kind, d.SysObjectID, d.Serial, d.Firmware, d.MgmtIP,
-		d.Status, d.PollProfile, d.Confidence, d.Metadata)
+		d.Status, d.PollProfile, d.Critical, d.Confidence, d.Metadata)
 	return scanDevice(row)
 }
 
@@ -183,8 +183,9 @@ func updateDeviceTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, p DevicePatch)
 			firmware      = CASE WHEN $16::boolean THEN $15::text   ELSE d.firmware END,
 			mgmt_ip       = CASE WHEN $18::boolean THEN $17::inet   ELSE d.mgmt_ip END,
 			metadata      = CASE WHEN $20::boolean THEN $19::jsonb  ELSE d.metadata END,
+			critical      = CASE WHEN $22::boolean THEN $21::boolean ELSE d.critical END,
 			updated_at    = now()
-		WHERE d.id = $21 AND d.deleted_at IS NULL
+		WHERE d.id = $23 AND d.deleted_at IS NULL
 		RETURNING `+deviceColumns,
 		p.Name, p.HasName,
 		p.Kind, p.HasKind,
@@ -196,6 +197,7 @@ func updateDeviceTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, p DevicePatch)
 		p.Firmware.Value, p.Firmware.Set,
 		p.MgmtIP.Value, p.MgmtIP.Set,
 		p.Metadata, p.HasMetadata,
+		p.Critical, p.HasCritical,
 		id)
 	d, err := scanDevice(row)
 	if errors.Is(err, pgx.ErrNoRows) {

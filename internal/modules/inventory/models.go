@@ -31,6 +31,9 @@ type Device struct {
 	MgmtIP      *string
 	Status      string
 	PollProfile string
+	// Critical lowers the collector's adaptive failure-backoff ceiling to the
+	// canonical 5 minutes (docs/07 §12.3; M10-S0 operator-facing source).
+	Critical    bool
 	Confidence  int
 	Metadata    json.RawMessage
 	FirstSeenAt time.Time
@@ -152,6 +155,8 @@ type DevicePatch struct {
 	HasStatus      bool
 	PollProfile    string
 	HasPollProfile bool
+	Critical       bool
+	HasCritical    bool
 	SysObjectID    NullableString
 	Serial         NullableString
 	Firmware       NullableString
@@ -194,6 +199,7 @@ type CreateDeviceInput struct {
 	Name        string
 	Kind        string
 	PollProfile string
+	Critical    bool
 	SysObjectID *string
 	Serial      *string
 	Firmware    *string

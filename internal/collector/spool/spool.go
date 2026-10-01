@@ -34,6 +34,9 @@ type Health struct {
 	ErrorClass          string    `json:"error_class"`
 	ConsecutiveFailures int       `json:"consecutive_failures"`
 	CheckedAt           time.Time `json:"checked_at"`
+	// Origin classifies the probe trigger (M10-S0): "scheduled" | "on_demand".
+	// Empty is normalized to scheduled by the server (old spool records).
+	Origin string `json:"origin,omitempty"`
 }
 
 // Batch is the unit of durable storage; payload is the exact wire message.
@@ -73,6 +76,7 @@ func (b *Batch) ToProto() *collectorv1.MetricBatch {
 			ErrorClass:          h.ErrorClass,
 			ConsecutiveFailures: int32(h.ConsecutiveFailures), //nolint:gosec // bounded by poll cadence
 			CheckedAt:           timestamppb.New(h.CheckedAt),
+			Origin:              h.Origin,
 		}
 	}
 	return &collectorv1.MetricBatch{
@@ -108,6 +112,7 @@ func batchFromPayload(payload []byte) (*Batch, error) {
 			ErrorClass:          h.GetErrorClass(),
 			ConsecutiveFailures: int(h.GetConsecutiveFailures()),
 			CheckedAt:           h.GetCheckedAt().AsTime(),
+			Origin:              h.GetOrigin(),
 		})
 	}
 	return b, nil

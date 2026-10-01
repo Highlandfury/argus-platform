@@ -40,6 +40,8 @@ type Record struct {
 	Outcome             string
 	ErrorClass          string
 	ConsecutiveFailures int
+	// Origin is the probe trigger: "scheduled" | "on_demand" (M10-S0).
+	Origin string
 }
 
 // Page is one page of poll outcomes, newest first.
@@ -77,7 +79,7 @@ func (s *Service) ListDeviceHealth(ctx context.Context, orgID, deviceID uuid.UUI
 	err := database.WithTenant(ctx, s.pool, orgID, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
 			SELECT id, device_id, collector_id, poll_type, ts, latency_ms, outcome,
-			       error_class, consecutive_failures
+			       error_class, consecutive_failures, origin
 			FROM poll_health
 			WHERE org_id = $1 AND device_id = $2
 			  AND ($3::timestamptz IS NULL OR (ts, id) < ($3::timestamptz, $4::uuid))
@@ -91,7 +93,7 @@ func (s *Service) ListDeviceHealth(ctx context.Context, orgID, deviceID uuid.UUI
 		for rows.Next() {
 			var r Record
 			if err := rows.Scan(&r.ID, &r.DeviceID, &r.CollectorID, &r.PollType, &r.CheckedAt,
-				&r.LatencyMS, &r.Outcome, &r.ErrorClass, &r.ConsecutiveFailures); err != nil {
+				&r.LatencyMS, &r.Outcome, &r.ErrorClass, &r.ConsecutiveFailures, &r.Origin); err != nil {
 				return fmt.Errorf("pollhealth: scan: %w", err)
 			}
 			page.Records = append(page.Records, r)

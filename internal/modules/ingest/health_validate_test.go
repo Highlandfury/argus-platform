@@ -36,6 +36,26 @@ func TestValidateBatchPayloadHealthOnly(t *testing.T) {
 	if health[0].DeviceID.String() != "0198d5a3-0000-7000-8000-000000000001" || health[0].LatencyMS != 12 {
 		t.Fatalf("health = %+v", health[0])
 	}
+	if health[0].Origin != "scheduled" {
+		t.Fatalf("empty origin must normalize to scheduled, got %q", health[0].Origin)
+	}
+}
+
+// TestValidateHealthOrigin proves the M10-S0 origin field: on_demand is
+// accepted and anything else is a permanent rejection.
+func TestValidateHealthOrigin(t *testing.T) {
+	now := time.Now().UTC()
+	onDemand := healthRecord(now)
+	onDemand.Origin = "on_demand"
+	_, health, rej := ValidateBatchPayload(&collectorv1.MetricBatch{BatchSeq: 1, Health: []*collectorv1.PollHealth{onDemand}}, nil, now)
+	if rej != nil || len(health) != 1 || health[0].Origin != "on_demand" {
+		t.Fatalf("on_demand origin: health=%+v rej=%v", health, rej)
+	}
+	bad := healthRecord(now)
+	bad.Origin = "manual"
+	if _, _, rej := ValidateBatchPayload(&collectorv1.MetricBatch{BatchSeq: 1, Health: []*collectorv1.PollHealth{bad}}, nil, now); rej == nil || rej.Reason != "validation.health_origin_invalid" {
+		t.Fatalf("bad origin rej = %+v", rej)
+	}
 }
 
 func TestValidateBatchPayloadHealthRejections(t *testing.T) {

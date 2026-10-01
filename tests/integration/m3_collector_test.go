@@ -36,6 +36,7 @@ import (
 	"github.com/argus-platform/argus/internal/collector/enrollclient"
 	collectoridentity "github.com/argus-platform/argus/internal/collector/identity"
 	"github.com/argus-platform/argus/internal/collector/stream"
+	"github.com/argus-platform/argus/internal/modules/checks"
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	identitymod "github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/ingest"
@@ -51,6 +52,7 @@ type m3Env struct {
 	ca         *collectors.CA
 	svc        *collectors.Service
 	registry   *collectors.SessionRegistry
+	checks     *checks.Service
 	caFile     string
 	enrollAddr string
 	streamAddr string
@@ -80,6 +82,9 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 	}
 	svc := collectors.New(appPool, authPool, ca, nil, svcOpts...)
 	registry := collectors.NewSessionRegistry()
+	// M10-S0: the checks service shares the session registry (live push) and is
+	// wired into the stream server as both redelivery source and result sink.
+	checksSvc := checks.New(appPool, registry)
 
 	enrollTCP, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
@@ -99,7 +104,7 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 
 	streamTCP, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
-	streamSrv := newStreamGRPC(ca, svc, registry, log)
+	streamSrv := newStreamGRPC(ca, svc, registry, checksSvc, log)
 	go func() { _ = streamSrv.Serve(streamTCP) }()
 
 	t.Cleanup(func() {
@@ -114,6 +119,7 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 		ca:         ca,
 		svc:        svc,
 		registry:   registry,
+		checks:     checksSvc,
 		caFile:     caFile,
 		enrollAddr: enrollTCP.Addr().String(),
 		streamAddr: streamTCP.Addr().String(),
@@ -122,7 +128,7 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 	}
 }
 
-func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collectors.SessionRegistry, log *slog.Logger) *grpc.Server {
+func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collectors.SessionRegistry, checksSvc *checks.Service, log *slog.Logger) *grpc.Server {
 	srv := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{
 			Certificates: []tls.Certificate{*ca.ServerTLS()},
@@ -132,7 +138,10 @@ func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collect
 		})),
 		grpc.MaxRecvMsgSize(16<<20),
 	)
-	collectorv1.RegisterCollectorServiceServer(srv, collectors.NewStreamServer(svc, registry, ingest.New(appPool, nil, nil, log), log))
+	streamServer := collectors.NewStreamServer(svc, registry, ingest.New(appPool, nil, nil, log), log)
+	streamServer.Checks = checksSvc
+	streamServer.CheckResults = checksSvc
+	collectorv1.RegisterCollectorServiceServer(srv, streamServer)
 	return srv
 }
 
@@ -153,7 +162,7 @@ func (e *m3Env) restartStream(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	must(t, err)
-	e.streamSrv = newStreamGRPC(e.ca, e.svc, e.registry, e.log)
+	e.streamSrv = newStreamGRPC(e.ca, e.svc, e.registry, e.checks, e.log)
 	go func() { _ = e.streamSrv.Serve(ln) }()
 }
 

@@ -45,6 +45,8 @@ type PolicyMetric struct {
 // `standard` so one bad operator value can never invalidate the whole signed
 // policy. PollType is `icmp` or `snmp`; Kind is the device kind used for SNMP
 // template selection (e.g. switch -> IF-MIB, host -> HOST-RESOURCES).
+// Critical (M10-S0) lowers the adaptive failure-backoff ceiling to the
+// canonical 5 minutes (docs/07 §12.3).
 type PolicyTarget struct {
 	DeviceID string `json:"device_id"`
 	MgmtIP   string `json:"mgmt_ip"`
@@ -52,6 +54,7 @@ type PolicyTarget struct {
 	Tier     string `json:"tier"`
 	PollType string `json:"poll_type,omitempty"`
 	Kind     string `json:"kind,omitempty"`
+	Critical bool   `json:"critical,omitempty"`
 }
 
 // MaxPolicyTargets bounds the targets list a policy document may carry. The

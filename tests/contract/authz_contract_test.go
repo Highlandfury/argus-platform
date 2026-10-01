@@ -17,9 +17,20 @@ import (
 	"github.com/argus-platform/argus/internal/platform/authz"
 )
 
+// isCheckPath reports whether a path belongs to the M10-S0 on-demand check
+// surface (/v1/devices/{id}/checks, /v1/checks/{id}).
+func isCheckPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/checks") || strings.HasSuffix(path, "/checks")
+}
+
 // isInventoryPath reports whether a path belongs to the M7-S3 inventory
-// surface (/v1/devices, /v1/interfaces, /v1/device-groups).
+// surface (/v1/devices, /v1/interfaces, /v1/device-groups). The M10-S0 check
+// surface shares the /v1/devices prefix but has its own capability vocabulary
+// (diagnostic.run on the creation POST) and is treated separately.
 func isInventoryPath(path string) bool {
+	if isCheckPath(path) {
+		return false
+	}
 	return strings.HasPrefix(path, "/v1/devices") ||
 		strings.HasPrefix(path, "/v1/interfaces") ||
 		strings.HasPrefix(path, "/v1/device-groups")
@@ -37,8 +48,12 @@ type authzMeta struct {
 }
 
 // capabilityInVocabulary reports whether capability belongs to the vocabulary
-// enforced for the given surface.
+// enforced for the given surface. Check routes mix vocabularies: creation uses
+// diagnostic.run, reads use device.read.
 func capabilityInVocabulary(path, capability string) bool {
+	if isCheckPath(path) {
+		return authz.IsDiagnosticCapability(capability) || authz.IsInventoryCapability(capability)
+	}
 	if isCredentialPath(path) {
 		return authz.IsCredentialCapability(capability)
 	}
@@ -47,7 +62,7 @@ func capabilityInVocabulary(path, capability string) bool {
 
 // TestInventoryAuthzMetadataMatchesRoutes compares the route registry's
 // enforced capability/scope metadata against the OpenAPI vendor extensions for
-// the inventory AND credential surfaces:
+// the inventory, credential AND on-demand check surfaces:
 //
 //   - an implemented route without capability/scope metadata fails;
 //   - an operation without x-argus-capability or x-argus-scope fails;
@@ -71,14 +86,17 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 
 	// Enforced metadata from the route registry.
 	enforced := map[routeKey]authzMeta{}
-	inventoryCount, credentialCount := 0, 0
+	inventoryCount, credentialCount, checkCount := 0, 0, 0
 	for _, rt := range api.Routes() {
-		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) {
+		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) && !isCheckPath(rt.Path) {
 			continue
 		}
-		if isCredentialPath(rt.Path) {
+		switch {
+		case isCheckPath(rt.Path):
+			checkCount++
+		case isCredentialPath(rt.Path):
 			credentialCount++
-		} else {
+		default:
 			inventoryCount++
 		}
 		enforced[routeKey{rt.Method, rt.Path}] = authzMeta{Capability: rt.Capability, Scope: rt.Scope}
@@ -88,6 +106,9 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	}
 	if credentialCount != 6 {
 		t.Fatalf("credential routes in registry = %d, want the 6 M7-S4 routes", credentialCount)
+	}
+	if checkCount != 2 {
+		t.Fatalf("check routes in registry = %d, want the 2 M10-S0 routes", checkCount)
 	}
 	for key, meta := range enforced {
 		if meta.Capability == "" {
@@ -110,7 +131,7 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	documented := map[routeKey]authzMeta{}
 	for pair := model.Model.Paths.PathItems.First(); pair != nil; pair = pair.Next() {
 		path := pair.Key()
-		if !isInventoryPath(path) && !isCredentialPath(path) {
+		if !isInventoryPath(path) && !isCredentialPath(path) && !isCheckPath(path) {
 			continue
 		}
 		item := pair.Value()
@@ -189,8 +210,12 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 }
 
 func vocabularyName(path string) string {
-	if isCredentialPath(path) {
+	switch {
+	case isCheckPath(path):
+		return "check"
+	case isCredentialPath(path):
 		return "credential"
+	default:
+		return "inventory"
 	}
-	return "inventory"
 }

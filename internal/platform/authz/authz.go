@@ -59,6 +59,14 @@ const (
 	CapCredentialUse          = "credential.use"           //nolint:gosec // RBAC-SC capability name, not a credential
 )
 
+// CapDiagnosticRun is the canonical diagnostic-trigger capability
+// (docs/04 §6.5). The on-demand device check (M10-S0) is the allowlisted
+// ICMP/SNMP diagnostic trigger this milestone implements; the canonical matrix
+// grants diagnostics to admin-tier and operator roles, never to read-only
+// principals (docs/04 §6.4), which under the Phase-1 admin/viewer model means
+// admin only.
+const CapDiagnosticRun = "diagnostic.run"
+
 // Scope types: nodes of the resource tree the authorizer resolves at. Device
 // scope resolves through the device's site binding (device-level bindings are
 // not representable in migration 000010).
@@ -83,6 +91,11 @@ var InventoryCapabilities = []string{
 var CredentialCapabilities = []string{
 	CapCredentialReadMetadata, CapCredentialWrite, CapCredentialRotate, CapCredentialUse,
 }
+
+// DiagnosticCapabilities is the diagnostic trigger capability set (M10-S0).
+// Admin holds it; viewer deliberately does not (the canonical matrix denies
+// diagnostics to read-only principals).
+var DiagnosticCapabilities = []string{CapDiagnosticRun}
 
 // ReadCapabilities are granted to the viewer role (all read-class inventory
 // capabilities).
@@ -110,8 +123,9 @@ func capabilitySet(caps ...string) map[string]bool {
 // which is the least privilege the canonical docs allow (credentials are
 // write-only and "never revealable" per docs/04 §6.2).
 var roleCapabilities = map[string]map[string]bool{
-	"admin":  capabilitySet(append(append([]string{}, InventoryCapabilities...), CredentialCapabilities...)...),
-	"viewer": capabilitySet(ReadCapabilities...), // deliberately no credential capabilities
+	"admin": capabilitySet(append(append(append([]string{},
+		InventoryCapabilities...), CredentialCapabilities...), DiagnosticCapabilities...)...),
+	"viewer": capabilitySet(ReadCapabilities...), // deliberately no credential or diagnostic capabilities
 }
 
 // Allowed reports whether the role holds the capability under the current role
@@ -138,6 +152,17 @@ func IsInventoryCapability(name string) bool {
 // vocabulary.
 func IsCredentialCapability(name string) bool {
 	for _, c := range CredentialCapabilities {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// IsDiagnosticCapability reports whether name is part of the M10-S0 diagnostic
+// trigger vocabulary.
+func IsDiagnosticCapability(name string) bool {
+	for _, c := range DiagnosticCapabilities {
 		if c == name {
 			return true
 		}

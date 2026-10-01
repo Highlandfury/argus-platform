@@ -140,13 +140,13 @@ func TestSchemaMatchesSpec(t *testing.T) {
 			 JOIN pg_namespace ns ON ns.oid = c.relnamespace
 			 WHERE ns.nspname = 'public' AND c.relkind = 'r'
 			   AND c.relrowsecurity AND c.relforcerowsecurity`).Scan(&n))
-		if n != 19 {
-			t.Fatalf("RLS-enabled+forced tables = %d, want 19 (11 Phase-1 + 6 M7-S1 + 1 M7-S3 + 1 M9-S1)", n)
+		if n != 20 {
+			t.Fatalf("RLS-enabled+forced tables = %d, want 20 (11 Phase-1 + 6 M7-S1 + 1 M7-S3 + 1 M9-S1 + 1 M10-S0)", n)
 		}
 		var policies int
 		must(t, ownerPool.QueryRow(ctx, `SELECT count(*) FROM pg_policies WHERE schemaname = 'public'`).Scan(&policies))
-		if policies != 19 {
-			t.Fatalf("tenant policies = %d, want 19 (11 Phase-1 + 6 M7-S1 + 1 M7-S3 + 1 M9-S1)", policies)
+		if policies != 20 {
+			t.Fatalf("tenant policies = %d, want 20 (11 Phase-1 + 6 M7-S1 + 1 M7-S3 + 1 M9-S1 + 1 M10-S0)", policies)
 		}
 	})
 

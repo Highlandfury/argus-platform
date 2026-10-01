@@ -138,6 +138,7 @@ func (s *Service) CreateDevice(ctx context.Context, orgID uuid.UUID, in CreateDe
 		MgmtIP:      in.MgmtIP,
 		Status:      "new",
 		PollProfile: pollProfile,
+		Critical:    in.Critical,
 		Confidence:  100,
 		Metadata:    metadata,
 	}

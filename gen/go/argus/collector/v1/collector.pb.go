@@ -91,7 +91,7 @@ func (x BatchResult_Status) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use BatchResult_Status.Descriptor instead.
 func (BatchResult_Status) EnumDescriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{11, 0}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{13, 0}
 }
 
 type Disconnect_Code int32
@@ -149,7 +149,7 @@ func (x Disconnect_Code) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use Disconnect_Code.Descriptor instead.
 func (Disconnect_Code) EnumDescriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{14, 0}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{16, 0}
 }
 
 type EnrollRequest struct {
@@ -357,6 +357,7 @@ type ClientMessage struct {
 	//	*ClientMessage_Heartbeat
 	//	*ClientMessage_Batch
 	//	*ClientMessage_PolicyAck
+	//	*ClientMessage_CheckResult
 	Msg           isClientMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -435,6 +436,15 @@ func (x *ClientMessage) GetPolicyAck() *PolicyAck {
 	return nil
 }
 
+func (x *ClientMessage) GetCheckResult() *CheckResult {
+	if x != nil {
+		if x, ok := x.Msg.(*ClientMessage_CheckResult); ok {
+			return x.CheckResult
+		}
+	}
+	return nil
+}
+
 type isClientMessage_Msg interface {
 	isClientMessage_Msg()
 }
@@ -455,6 +465,10 @@ type ClientMessage_PolicyAck struct {
 	PolicyAck *PolicyAck `protobuf:"bytes,4,opt,name=policy_ack,json=policyAck,proto3,oneof"` // acknowledgement of an applied policy
 }
 
+type ClientMessage_CheckResult struct {
+	CheckResult *CheckResult `protobuf:"bytes,5,opt,name=check_result,json=checkResult,proto3,oneof"` // terminal result of an on-demand check
+}
+
 func (*ClientMessage_Hello) isClientMessage_Msg() {}
 
 func (*ClientMessage_Heartbeat) isClientMessage_Msg() {}
@@ -462,6 +476,8 @@ func (*ClientMessage_Heartbeat) isClientMessage_Msg() {}
 func (*ClientMessage_Batch) isClientMessage_Msg() {}
 
 func (*ClientMessage_PolicyAck) isClientMessage_Msg() {}
+
+func (*ClientMessage_CheckResult) isClientMessage_Msg() {}
 
 type ClientHello struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -791,7 +807,12 @@ type PollHealth struct {
 	// (0 after a success). Drives M9-S4 adaptive backoff.
 	ConsecutiveFailures int32 `protobuf:"varint,6,opt,name=consecutive_failures,json=consecutiveFailures,proto3" json:"consecutive_failures,omitempty"`
 	// Observation time (collector clock). Server validates |ts - now| <= 7 days.
-	CheckedAt     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=checked_at,json=checkedAt,proto3" json:"checked_at,omitempty"`
+	CheckedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=checked_at,json=checkedAt,proto3" json:"checked_at,omitempty"`
+	// PROTOCOL CHANGE M10-S0 (2026-10-01): probe trigger classification.
+	// "scheduled" (default; also used by old collectors when empty) for the
+	// periodic scheduler, "on_demand" for a check triggered through
+	// POST /v1/devices/{id}/checks. Additive: absent means scheduled.
+	Origin        string `protobuf:"bytes,8,opt,name=origin,proto3" json:"origin,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -873,6 +894,13 @@ func (x *PollHealth) GetCheckedAt() *timestamppb.Timestamp {
 		return x.CheckedAt
 	}
 	return nil
+}
+
+func (x *PollHealth) GetOrigin() string {
+	if x != nil {
+		return x.Origin
+	}
+	return ""
 }
 
 type MetricBatch struct {
@@ -1010,6 +1038,85 @@ func (x *PolicyAck) GetError() string {
 	return ""
 }
 
+// CheckResult is the terminal outcome of one on-demand check (M10-S0). The
+// collector executes the probe immediately (bypassing the schedule) and sends
+// exactly one result per CheckRequest. The server applies it idempotently
+// (status pending -> completed only once), so a replayed result never
+// double-applies; there is no batch-claim ledger on this path (a result lost
+// with the stream leaves the check pending until its server-side TTL).
+type CheckResult struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Check UUID issued by POST /v1/devices/{id}/checks.
+	CheckId string `protobuf:"bytes,1,opt,name=check_id,json=checkId,proto3" json:"check_id,omitempty"`
+	// Terminal outcome of the probe: "success" | "failure".
+	Outcome string `protobuf:"bytes,2,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	// Failure classification ("" on success without loss), same vocabulary as
+	// poll health (timeout, unreachable, loss, auth_failure, rate_limited, ...).
+	ErrorClass string `protobuf:"bytes,3,opt,name=error_class,json=errorClass,proto3" json:"error_class,omitempty"`
+	// Whole-probe duration in milliseconds.
+	LatencyMs     int32 `protobuf:"varint,4,opt,name=latency_ms,json=latencyMs,proto3" json:"latency_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CheckResult) Reset() {
+	*x = CheckResult{}
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckResult) ProtoMessage() {}
+
+func (x *CheckResult) ProtoReflect() protoreflect.Message {
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckResult.ProtoReflect.Descriptor instead.
+func (*CheckResult) Descriptor() ([]byte, []int) {
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *CheckResult) GetCheckId() string {
+	if x != nil {
+		return x.CheckId
+	}
+	return ""
+}
+
+func (x *CheckResult) GetOutcome() string {
+	if x != nil {
+		return x.Outcome
+	}
+	return ""
+}
+
+func (x *CheckResult) GetErrorClass() string {
+	if x != nil {
+		return x.ErrorClass
+	}
+	return ""
+}
+
+func (x *CheckResult) GetLatencyMs() int32 {
+	if x != nil {
+		return x.LatencyMs
+	}
+	return 0
+}
+
 type ServerMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -1019,6 +1126,7 @@ type ServerMessage struct {
 	//	*ServerMessage_PolicyUpdate
 	//	*ServerMessage_Ping
 	//	*ServerMessage_Disconnect
+	//	*ServerMessage_CheckRequest
 	Msg           isServerMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1026,7 +1134,7 @@ type ServerMessage struct {
 
 func (x *ServerMessage) Reset() {
 	*x = ServerMessage{}
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[9]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1038,7 +1146,7 @@ func (x *ServerMessage) String() string {
 func (*ServerMessage) ProtoMessage() {}
 
 func (x *ServerMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[9]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1051,7 +1159,7 @@ func (x *ServerMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerMessage.ProtoReflect.Descriptor instead.
 func (*ServerMessage) Descriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{9}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ServerMessage) GetMsg() isServerMessage_Msg {
@@ -1106,6 +1214,15 @@ func (x *ServerMessage) GetDisconnect() *Disconnect {
 	return nil
 }
 
+func (x *ServerMessage) GetCheckRequest() *CheckRequest {
+	if x != nil {
+		if x, ok := x.Msg.(*ServerMessage_CheckRequest); ok {
+			return x.CheckRequest
+		}
+	}
+	return nil
+}
+
 type isServerMessage_Msg interface {
 	isServerMessage_Msg()
 }
@@ -1130,6 +1247,10 @@ type ServerMessage_Disconnect struct {
 	Disconnect *Disconnect `protobuf:"bytes,5,opt,name=disconnect,proto3,oneof"`
 }
 
+type ServerMessage_CheckRequest struct {
+	CheckRequest *CheckRequest `protobuf:"bytes,6,opt,name=check_request,json=checkRequest,proto3,oneof"` // on-demand probe order (M10-S0)
+}
+
 func (*ServerMessage_Hello) isServerMessage_Msg() {}
 
 func (*ServerMessage_BatchResult) isServerMessage_Msg() {}
@@ -1139,6 +1260,74 @@ func (*ServerMessage_PolicyUpdate) isServerMessage_Msg() {}
 func (*ServerMessage_Ping) isServerMessage_Msg() {}
 
 func (*ServerMessage_Disconnect) isServerMessage_Msg() {}
+
+func (*ServerMessage_CheckRequest) isServerMessage_Msg() {}
+
+// CheckRequest orders one immediate probe for a device (M10-S0). Delivered on
+// the existing control stream (same push mechanism as PolicyUpdate); the
+// server redelivers non-expired pending checks when a collector reconnects.
+type CheckRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Check UUID issued by POST /v1/devices/{id}/checks.
+	CheckId string `protobuf:"bytes,1,opt,name=check_id,json=checkId,proto3" json:"check_id,omitempty"`
+	// Device UUID from the signed policy's poll targets.
+	DeviceId string `protobuf:"bytes,2,opt,name=device_id,json=deviceId,proto3" json:"device_id,omitempty"`
+	// "icmp" | "snmp" (matches the device's poll targets).
+	PollType      string `protobuf:"bytes,3,opt,name=poll_type,json=pollType,proto3" json:"poll_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CheckRequest) Reset() {
+	*x = CheckRequest{}
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CheckRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CheckRequest) ProtoMessage() {}
+
+func (x *CheckRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CheckRequest.ProtoReflect.Descriptor instead.
+func (*CheckRequest) Descriptor() ([]byte, []int) {
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *CheckRequest) GetCheckId() string {
+	if x != nil {
+		return x.CheckId
+	}
+	return ""
+}
+
+func (x *CheckRequest) GetDeviceId() string {
+	if x != nil {
+		return x.DeviceId
+	}
+	return ""
+}
+
+func (x *CheckRequest) GetPollType() string {
+	if x != nil {
+		return x.PollType
+	}
+	return ""
+}
 
 type ServerHello struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -1161,7 +1350,7 @@ type ServerHello struct {
 
 func (x *ServerHello) Reset() {
 	*x = ServerHello{}
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[10]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1173,7 +1362,7 @@ func (x *ServerHello) String() string {
 func (*ServerHello) ProtoMessage() {}
 
 func (x *ServerHello) ProtoReflect() protoreflect.Message {
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[10]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1186,7 +1375,7 @@ func (x *ServerHello) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerHello.ProtoReflect.Descriptor instead.
 func (*ServerHello) Descriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{10}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ServerHello) GetServerTime() *timestamppb.Timestamp {
@@ -1255,7 +1444,7 @@ type BatchResult struct {
 
 func (x *BatchResult) Reset() {
 	*x = BatchResult{}
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[11]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1267,7 +1456,7 @@ func (x *BatchResult) String() string {
 func (*BatchResult) ProtoMessage() {}
 
 func (x *BatchResult) ProtoReflect() protoreflect.Message {
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[11]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1280,7 +1469,7 @@ func (x *BatchResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BatchResult.ProtoReflect.Descriptor instead.
 func (*BatchResult) Descriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{11}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *BatchResult) GetBatchSeq() int64 {
@@ -1334,7 +1523,7 @@ type PolicyUpdate struct {
 
 func (x *PolicyUpdate) Reset() {
 	*x = PolicyUpdate{}
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[12]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1346,7 +1535,7 @@ func (x *PolicyUpdate) String() string {
 func (*PolicyUpdate) ProtoMessage() {}
 
 func (x *PolicyUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[12]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1359,7 +1548,7 @@ func (x *PolicyUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PolicyUpdate.ProtoReflect.Descriptor instead.
 func (*PolicyUpdate) Descriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{12}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PolicyUpdate) GetPolicy() *Policy {
@@ -1378,7 +1567,7 @@ type ServerPing struct {
 
 func (x *ServerPing) Reset() {
 	*x = ServerPing{}
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[13]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1390,7 +1579,7 @@ func (x *ServerPing) String() string {
 func (*ServerPing) ProtoMessage() {}
 
 func (x *ServerPing) ProtoReflect() protoreflect.Message {
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[13]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1403,7 +1592,7 @@ func (x *ServerPing) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ServerPing.ProtoReflect.Descriptor instead.
 func (*ServerPing) Descriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{13}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ServerPing) GetServerTime() *timestamppb.Timestamp {
@@ -1423,7 +1612,7 @@ type Disconnect struct {
 
 func (x *Disconnect) Reset() {
 	*x = Disconnect{}
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[14]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1435,7 +1624,7 @@ func (x *Disconnect) String() string {
 func (*Disconnect) ProtoMessage() {}
 
 func (x *Disconnect) ProtoReflect() protoreflect.Message {
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[14]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1448,7 +1637,7 @@ func (x *Disconnect) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Disconnect.ProtoReflect.Descriptor instead.
 func (*Disconnect) Descriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{14}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Disconnect) GetCode() Disconnect_Code {
@@ -1498,7 +1687,7 @@ type Policy struct {
 
 func (x *Policy) Reset() {
 	*x = Policy{}
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[15]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1510,7 +1699,7 @@ func (x *Policy) String() string {
 func (*Policy) ProtoMessage() {}
 
 func (x *Policy) ProtoReflect() protoreflect.Message {
-	mi := &file_argus_collector_v1_collector_proto_msgTypes[15]
+	mi := &file_argus_collector_v1_collector_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1523,7 +1712,7 @@ func (x *Policy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Policy.ProtoReflect.Descriptor instead.
 func (*Policy) Descriptor() ([]byte, []int) {
-	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{15}
+	return file_argus_collector_v1_collector_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Policy) GetVersion() int64 {
@@ -1582,13 +1771,14 @@ const file_argus_collector_v1_collector_proto_rawDesc = "" +
 	"\x06policy\x18\x05 \x01(\v2\x1a.argus.collector.v1.PolicyR\x06policy\x12;\n" +
 	"\vserver_time\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"serverTime\x129\n" +
-	"\x19policy_signing_public_key\x18\a \x01(\fR\x16policySigningPublicKey\"\x87\x02\n" +
+	"\x19policy_signing_public_key\x18\a \x01(\fR\x16policySigningPublicKey\"\xcd\x02\n" +
 	"\rClientMessage\x127\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1f.argus.collector.v1.ClientHelloH\x00R\x05hello\x12=\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x1d.argus.collector.v1.HeartbeatH\x00R\theartbeat\x127\n" +
 	"\x05batch\x18\x03 \x01(\v2\x1f.argus.collector.v1.MetricBatchH\x00R\x05batch\x12>\n" +
 	"\n" +
-	"policy_ack\x18\x04 \x01(\v2\x1d.argus.collector.v1.PolicyAckH\x00R\tpolicyAckB\x05\n" +
+	"policy_ack\x18\x04 \x01(\v2\x1d.argus.collector.v1.PolicyAckH\x00R\tpolicyAck\x12D\n" +
+	"\fcheck_result\x18\x05 \x01(\v2\x1f.argus.collector.v1.CheckResultH\x00R\vcheckResultB\x05\n" +
 	"\x03msg\"\x8f\x02\n" +
 	"\vClientHello\x12!\n" +
 	"\fcollector_id\x18\x01 \x01(\tR\vcollectorId\x12#\n" +
@@ -1624,7 +1814,7 @@ const file_argus_collector_v1_collector_proto_rawDesc = "" +
 	"\tdevice_id\x18\x06 \x01(\tR\bdeviceId\x1a=\n" +
 	"\x0fDimensionsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x8e\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa6\x02\n" +
 	"\n" +
 	"PollHealth\x12\x1b\n" +
 	"\tdevice_id\x18\x01 \x01(\tR\bdeviceId\x12\x1b\n" +
@@ -1636,7 +1826,8 @@ const file_argus_collector_v1_collector_proto_rawDesc = "" +
 	"errorClass\x121\n" +
 	"\x14consecutive_failures\x18\x06 \x01(\x05R\x13consecutiveFailures\x129\n" +
 	"\n" +
-	"checked_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcheckedAt\"\xd9\x01\n" +
+	"checked_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcheckedAt\x12\x16\n" +
+	"\x06origin\x18\b \x01(\tR\x06origin\"\xd9\x01\n" +
 	"\vMetricBatch\x12\x1b\n" +
 	"\tbatch_seq\x18\x01 \x01(\x03R\bbatchSeq\x12:\n" +
 	"\asamples\x18\x02 \x03(\v2 .argus.collector.v1.MetricSampleR\asamples\x129\n" +
@@ -1646,7 +1837,14 @@ const file_argus_collector_v1_collector_proto_rawDesc = "" +
 	"\tPolicyAck\x12%\n" +
 	"\x0epolicy_version\x18\x01 \x01(\x03R\rpolicyVersion\x12\x18\n" +
 	"\aapplied\x18\x02 \x01(\bR\aapplied\x12\x14\n" +
-	"\x05error\x18\x03 \x01(\tR\x05error\"\xd6\x02\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\"\x82\x01\n" +
+	"\vCheckResult\x12\x19\n" +
+	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12\x18\n" +
+	"\aoutcome\x18\x02 \x01(\tR\aoutcome\x12\x1f\n" +
+	"\verror_class\x18\x03 \x01(\tR\n" +
+	"errorClass\x12\x1d\n" +
+	"\n" +
+	"latency_ms\x18\x04 \x01(\x05R\tlatencyMs\"\x9f\x03\n" +
 	"\rServerMessage\x127\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1f.argus.collector.v1.ServerHelloH\x00R\x05hello\x12D\n" +
 	"\fbatch_result\x18\x02 \x01(\v2\x1f.argus.collector.v1.BatchResultH\x00R\vbatchResult\x12G\n" +
@@ -1654,8 +1852,13 @@ const file_argus_collector_v1_collector_proto_rawDesc = "" +
 	"\x04ping\x18\x04 \x01(\v2\x1e.argus.collector.v1.ServerPingH\x00R\x04ping\x12@\n" +
 	"\n" +
 	"disconnect\x18\x05 \x01(\v2\x1e.argus.collector.v1.DisconnectH\x00R\n" +
-	"disconnectB\x05\n" +
-	"\x03msg\"\x84\x03\n" +
+	"disconnect\x12G\n" +
+	"\rcheck_request\x18\x06 \x01(\v2 .argus.collector.v1.CheckRequestH\x00R\fcheckRequestB\x05\n" +
+	"\x03msg\"c\n" +
+	"\fCheckRequest\x12\x19\n" +
+	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12\x1b\n" +
+	"\tdevice_id\x18\x02 \x01(\tR\bdeviceId\x12\x1b\n" +
+	"\tpoll_type\x18\x03 \x01(\tR\bpollType\"\x84\x03\n" +
 	"\vServerHello\x12;\n" +
 	"\vserver_time\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"serverTime\x12)\n" +
@@ -1721,7 +1924,7 @@ func file_argus_collector_v1_collector_proto_rawDescGZIP() []byte {
 }
 
 var file_argus_collector_v1_collector_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_argus_collector_v1_collector_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_argus_collector_v1_collector_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_argus_collector_v1_collector_proto_goTypes = []any{
 	(BatchResult_Status)(0),       // 0: argus.collector.v1.BatchResult.Status
 	(Disconnect_Code)(0),          // 1: argus.collector.v1.Disconnect.Code
@@ -1734,53 +1937,57 @@ var file_argus_collector_v1_collector_proto_goTypes = []any{
 	(*PollHealth)(nil),            // 8: argus.collector.v1.PollHealth
 	(*MetricBatch)(nil),           // 9: argus.collector.v1.MetricBatch
 	(*PolicyAck)(nil),             // 10: argus.collector.v1.PolicyAck
-	(*ServerMessage)(nil),         // 11: argus.collector.v1.ServerMessage
-	(*ServerHello)(nil),           // 12: argus.collector.v1.ServerHello
-	(*BatchResult)(nil),           // 13: argus.collector.v1.BatchResult
-	(*PolicyUpdate)(nil),          // 14: argus.collector.v1.PolicyUpdate
-	(*ServerPing)(nil),            // 15: argus.collector.v1.ServerPing
-	(*Disconnect)(nil),            // 16: argus.collector.v1.Disconnect
-	(*Policy)(nil),                // 17: argus.collector.v1.Policy
-	nil,                           // 18: argus.collector.v1.MetricSample.DimensionsEntry
-	(*timestamppb.Timestamp)(nil), // 19: google.protobuf.Timestamp
+	(*CheckResult)(nil),           // 11: argus.collector.v1.CheckResult
+	(*ServerMessage)(nil),         // 12: argus.collector.v1.ServerMessage
+	(*CheckRequest)(nil),          // 13: argus.collector.v1.CheckRequest
+	(*ServerHello)(nil),           // 14: argus.collector.v1.ServerHello
+	(*BatchResult)(nil),           // 15: argus.collector.v1.BatchResult
+	(*PolicyUpdate)(nil),          // 16: argus.collector.v1.PolicyUpdate
+	(*ServerPing)(nil),            // 17: argus.collector.v1.ServerPing
+	(*Disconnect)(nil),            // 18: argus.collector.v1.Disconnect
+	(*Policy)(nil),                // 19: argus.collector.v1.Policy
+	nil,                           // 20: argus.collector.v1.MetricSample.DimensionsEntry
+	(*timestamppb.Timestamp)(nil), // 21: google.protobuf.Timestamp
 }
 var file_argus_collector_v1_collector_proto_depIdxs = []int32{
-	19, // 0: argus.collector.v1.EnrollResponse.cert_not_after:type_name -> google.protobuf.Timestamp
-	17, // 1: argus.collector.v1.EnrollResponse.policy:type_name -> argus.collector.v1.Policy
-	19, // 2: argus.collector.v1.EnrollResponse.server_time:type_name -> google.protobuf.Timestamp
+	21, // 0: argus.collector.v1.EnrollResponse.cert_not_after:type_name -> google.protobuf.Timestamp
+	19, // 1: argus.collector.v1.EnrollResponse.policy:type_name -> argus.collector.v1.Policy
+	21, // 2: argus.collector.v1.EnrollResponse.server_time:type_name -> google.protobuf.Timestamp
 	5,  // 3: argus.collector.v1.ClientMessage.hello:type_name -> argus.collector.v1.ClientHello
 	6,  // 4: argus.collector.v1.ClientMessage.heartbeat:type_name -> argus.collector.v1.Heartbeat
 	9,  // 5: argus.collector.v1.ClientMessage.batch:type_name -> argus.collector.v1.MetricBatch
 	10, // 6: argus.collector.v1.ClientMessage.policy_ack:type_name -> argus.collector.v1.PolicyAck
-	19, // 7: argus.collector.v1.ClientHello.started_at:type_name -> google.protobuf.Timestamp
-	19, // 8: argus.collector.v1.Heartbeat.sent_at:type_name -> google.protobuf.Timestamp
-	18, // 9: argus.collector.v1.MetricSample.dimensions:type_name -> argus.collector.v1.MetricSample.DimensionsEntry
-	19, // 10: argus.collector.v1.MetricSample.ts:type_name -> google.protobuf.Timestamp
-	19, // 11: argus.collector.v1.PollHealth.checked_at:type_name -> google.protobuf.Timestamp
-	7,  // 12: argus.collector.v1.MetricBatch.samples:type_name -> argus.collector.v1.MetricSample
-	19, // 13: argus.collector.v1.MetricBatch.created_at:type_name -> google.protobuf.Timestamp
-	8,  // 14: argus.collector.v1.MetricBatch.health:type_name -> argus.collector.v1.PollHealth
-	12, // 15: argus.collector.v1.ServerMessage.hello:type_name -> argus.collector.v1.ServerHello
-	13, // 16: argus.collector.v1.ServerMessage.batch_result:type_name -> argus.collector.v1.BatchResult
-	14, // 17: argus.collector.v1.ServerMessage.policy_update:type_name -> argus.collector.v1.PolicyUpdate
-	15, // 18: argus.collector.v1.ServerMessage.ping:type_name -> argus.collector.v1.ServerPing
-	16, // 19: argus.collector.v1.ServerMessage.disconnect:type_name -> argus.collector.v1.Disconnect
-	19, // 20: argus.collector.v1.ServerHello.server_time:type_name -> google.protobuf.Timestamp
-	17, // 21: argus.collector.v1.ServerHello.policy:type_name -> argus.collector.v1.Policy
-	0,  // 22: argus.collector.v1.BatchResult.status:type_name -> argus.collector.v1.BatchResult.Status
-	19, // 23: argus.collector.v1.BatchResult.ingested_at:type_name -> google.protobuf.Timestamp
-	17, // 24: argus.collector.v1.PolicyUpdate.policy:type_name -> argus.collector.v1.Policy
-	19, // 25: argus.collector.v1.ServerPing.server_time:type_name -> google.protobuf.Timestamp
-	1,  // 26: argus.collector.v1.Disconnect.code:type_name -> argus.collector.v1.Disconnect.Code
-	2,  // 27: argus.collector.v1.EnrollmentService.Enroll:input_type -> argus.collector.v1.EnrollRequest
-	4,  // 28: argus.collector.v1.CollectorService.Stream:input_type -> argus.collector.v1.ClientMessage
-	3,  // 29: argus.collector.v1.EnrollmentService.Enroll:output_type -> argus.collector.v1.EnrollResponse
-	11, // 30: argus.collector.v1.CollectorService.Stream:output_type -> argus.collector.v1.ServerMessage
-	29, // [29:31] is the sub-list for method output_type
-	27, // [27:29] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	11, // 7: argus.collector.v1.ClientMessage.check_result:type_name -> argus.collector.v1.CheckResult
+	21, // 8: argus.collector.v1.ClientHello.started_at:type_name -> google.protobuf.Timestamp
+	21, // 9: argus.collector.v1.Heartbeat.sent_at:type_name -> google.protobuf.Timestamp
+	20, // 10: argus.collector.v1.MetricSample.dimensions:type_name -> argus.collector.v1.MetricSample.DimensionsEntry
+	21, // 11: argus.collector.v1.MetricSample.ts:type_name -> google.protobuf.Timestamp
+	21, // 12: argus.collector.v1.PollHealth.checked_at:type_name -> google.protobuf.Timestamp
+	7,  // 13: argus.collector.v1.MetricBatch.samples:type_name -> argus.collector.v1.MetricSample
+	21, // 14: argus.collector.v1.MetricBatch.created_at:type_name -> google.protobuf.Timestamp
+	8,  // 15: argus.collector.v1.MetricBatch.health:type_name -> argus.collector.v1.PollHealth
+	14, // 16: argus.collector.v1.ServerMessage.hello:type_name -> argus.collector.v1.ServerHello
+	15, // 17: argus.collector.v1.ServerMessage.batch_result:type_name -> argus.collector.v1.BatchResult
+	16, // 18: argus.collector.v1.ServerMessage.policy_update:type_name -> argus.collector.v1.PolicyUpdate
+	17, // 19: argus.collector.v1.ServerMessage.ping:type_name -> argus.collector.v1.ServerPing
+	18, // 20: argus.collector.v1.ServerMessage.disconnect:type_name -> argus.collector.v1.Disconnect
+	13, // 21: argus.collector.v1.ServerMessage.check_request:type_name -> argus.collector.v1.CheckRequest
+	21, // 22: argus.collector.v1.ServerHello.server_time:type_name -> google.protobuf.Timestamp
+	19, // 23: argus.collector.v1.ServerHello.policy:type_name -> argus.collector.v1.Policy
+	0,  // 24: argus.collector.v1.BatchResult.status:type_name -> argus.collector.v1.BatchResult.Status
+	21, // 25: argus.collector.v1.BatchResult.ingested_at:type_name -> google.protobuf.Timestamp
+	19, // 26: argus.collector.v1.PolicyUpdate.policy:type_name -> argus.collector.v1.Policy
+	21, // 27: argus.collector.v1.ServerPing.server_time:type_name -> google.protobuf.Timestamp
+	1,  // 28: argus.collector.v1.Disconnect.code:type_name -> argus.collector.v1.Disconnect.Code
+	2,  // 29: argus.collector.v1.EnrollmentService.Enroll:input_type -> argus.collector.v1.EnrollRequest
+	4,  // 30: argus.collector.v1.CollectorService.Stream:input_type -> argus.collector.v1.ClientMessage
+	3,  // 31: argus.collector.v1.EnrollmentService.Enroll:output_type -> argus.collector.v1.EnrollResponse
+	12, // 32: argus.collector.v1.CollectorService.Stream:output_type -> argus.collector.v1.ServerMessage
+	31, // [31:33] is the sub-list for method output_type
+	29, // [29:31] is the sub-list for method input_type
+	29, // [29:29] is the sub-list for extension type_name
+	29, // [29:29] is the sub-list for extension extendee
+	0,  // [0:29] is the sub-list for field type_name
 }
 
 func init() { file_argus_collector_v1_collector_proto_init() }
@@ -1793,13 +2000,15 @@ func file_argus_collector_v1_collector_proto_init() {
 		(*ClientMessage_Heartbeat)(nil),
 		(*ClientMessage_Batch)(nil),
 		(*ClientMessage_PolicyAck)(nil),
+		(*ClientMessage_CheckResult)(nil),
 	}
-	file_argus_collector_v1_collector_proto_msgTypes[9].OneofWrappers = []any{
+	file_argus_collector_v1_collector_proto_msgTypes[10].OneofWrappers = []any{
 		(*ServerMessage_Hello)(nil),
 		(*ServerMessage_BatchResult)(nil),
 		(*ServerMessage_PolicyUpdate)(nil),
 		(*ServerMessage_Ping)(nil),
 		(*ServerMessage_Disconnect)(nil),
+		(*ServerMessage_CheckRequest)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1807,7 +2016,7 @@ func file_argus_collector_v1_collector_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_argus_collector_v1_collector_proto_rawDesc), len(file_argus_collector_v1_collector_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   17,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

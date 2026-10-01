@@ -67,6 +67,7 @@ type Metric struct {
 // normalized by the poll engine (never a policy rejection: one operator typo
 // must not disable polling for the whole collector). PollType selects ICMP or
 // SNMP (unknown values normalize to ICMP); Kind selects SNMP template packs.
+// Critical (M10-S0) lowers the adaptive failure-backoff ceiling to 5 minutes.
 type Target struct {
 	DeviceID string `json:"device_id"`
 	MgmtIP   string `json:"mgmt_ip"`
@@ -74,6 +75,7 @@ type Target struct {
 	Tier     string `json:"tier"`
 	PollType string `json:"poll_type,omitempty"`
 	Kind     string `json:"kind,omitempty"`
+	Critical bool   `json:"critical,omitempty"`
 }
 
 // VerifyAndValidate checks the signature against the pinned Ed25519 key and

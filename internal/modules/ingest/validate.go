@@ -69,6 +69,9 @@ type ValidatedHealth struct {
 	ErrorClass          string
 	ConsecutiveFailures int
 	CheckedAt           time.Time
+	// Origin is the normalized probe trigger: "scheduled" | "on_demand"
+	// (M10-S0; empty from old collectors normalizes to scheduled).
+	Origin string
 }
 
 // ValidateBatch checks and normalizes the sample section of a batch against
@@ -238,6 +241,16 @@ func validateHealth(records []*collectorv1.PollHealth, now time.Time) ([]Validat
 			return nil, &RejectError{"validation.health_ts_out_of_range",
 				fmt.Sprintf("health %d: checked_at %s outside ±%s of now", i, checkedAt.UTC().Format(time.RFC3339), TimestampTolerance)}
 		}
+		// Probe origin (M10-S0): empty normalizes to scheduled so old
+		// collectors and spool records replay unchanged.
+		origin := h.GetOrigin()
+		if origin == "" {
+			origin = "scheduled"
+		}
+		if origin != "scheduled" && origin != "on_demand" {
+			return nil, &RejectError{"validation.health_origin_invalid",
+				fmt.Sprintf("health %d: origin %q must be scheduled|on_demand", i, origin)}
+		}
 		out = append(out, ValidatedHealth{
 			DeviceID:            id,
 			PollType:            pollType,
@@ -246,6 +259,7 @@ func validateHealth(records []*collectorv1.PollHealth, now time.Time) ([]Validat
 			ErrorClass:          h.GetErrorClass(),
 			ConsecutiveFailures: failures,
 			CheckedAt:           checkedAt.UTC(),
+			Origin:              origin,
 		})
 	}
 	return out, nil

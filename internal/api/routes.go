@@ -38,6 +38,8 @@ var routeTable = []Route{
 	{Method: "DELETE", Path: "/v1/devices/{id}", Protected: true, CSRF: true, Capability: authz.CapDeviceWrite, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/identity-history", Protected: true, Capability: authz.CapDeviceIdentityRead, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/poll-health", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
+	{Method: "POST", Path: "/v1/devices/{id}/checks", Protected: true, CSRF: true, Capability: authz.CapDiagnosticRun, Scope: authz.ScopeDevice},
+	{Method: "GET", Path: "/v1/checks/{id}", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/devices/{id}/merge", Protected: true, CSRF: true, Capability: authz.CapDeviceMerge, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/devices/{id}/split", Protected: true, CSRF: true, Capability: authz.CapDeviceSplit, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/interfaces", Protected: true, Capability: authz.CapInterfaceRead, Scope: authz.ScopeDevice},

@@ -208,11 +208,12 @@ func cmdRun(args []string) int {
 		Credentials: poll.NewChainCredentialSource(bundleCreds, snmpCredentials(cfg)),
 		Logger:      logger,
 	})
+	multiProber := poll.NewMultiProber(map[string]poll.Prober{
+		poll.PollICMP: poll.NewICMPProber(poll.ICMPConfig{}),
+		poll.PollSNMP: snmpProber,
+	}).WithLogger(logger)
 	pollEngine := poll.NewEngine(poll.Config{
-		Prober: poll.NewMultiProber(map[string]poll.Prober{
-			poll.PollICMP: poll.NewICMPProber(poll.ICMPConfig{}),
-			poll.PollSNMP: snmpProber,
-		}).WithLogger(logger),
+		Prober: multiProber,
 		// M9-S4 adaptive scheduling (P2-AC-17): consecutive failures double
 		// the per-target cadence to the 15 min ceiling (critical devices
 		// 5 min), recovery gets a rapid re-check, hrProcessorLoad pressure
@@ -238,6 +239,16 @@ func cmdRun(args []string) int {
 			case <-runCtx.Done():
 			}
 		},
+	})
+	// On-demand checks (M10-S0): the same probers and applied target set,
+	// bypassing the schedule. Metric samples are never emitted for a check;
+	// the probe shows up as an origin=on_demand poll_health row and as the
+	// CheckResult on the control stream.
+	checkRunner := poll.NewCheckExecutor(multiProber, pollEngine.Targets, func(h poll.Health) {
+		select {
+		case healthCh <- h:
+		case <-runCtx.Done():
+		}
 	})
 	if doc, err := policy.LoadAndValidate(policyDir, id.PolicyVersion); err == nil {
 		rp.set(doc)
@@ -288,6 +299,7 @@ func cmdRun(args []string) int {
 		},
 		OnClockSkew: cmet.SetClockSkew,
 		Credentials: bundleCreds,
+		Checks:      checkRunnerAdapter{runner: checkRunner},
 		OnPolicyApplied: func(version int64) {
 			if err := idStore.UpdatePolicyVersion(id, version); err != nil {
 				logger.Error("persist policy version", "error", err)
@@ -476,9 +488,28 @@ func toSpoolHealth(in []poll.Health) []spool.Health {
 			ErrorClass:          h.ErrorClass,
 			ConsecutiveFailures: h.ConsecutiveFailures,
 			CheckedAt:           h.CheckedAt,
+			Origin:              h.Origin,
 		}
 	}
 	return out
+}
+
+// checkRunnerAdapter maps the poll-level on-demand executor (M10-S0) onto the
+// stream client's check surface. A device/poll-type that is not in the applied
+// policy completes as a target_missing failure (the operator gets a terminal
+// answer instead of a pending check).
+type checkRunnerAdapter struct{ runner *poll.CheckExecutor }
+
+func (a checkRunnerAdapter) ExecuteCheck(ctx context.Context, req stream.CheckRequest) stream.CheckOutcome {
+	res, ok := a.runner.RunCheck(ctx, req.DeviceID, req.PollType)
+	if !ok {
+		return stream.CheckOutcome{Outcome: poll.OutcomeFailure, ErrorClass: poll.ErrorTargetMissing}
+	}
+	return stream.CheckOutcome{
+		Outcome:    res.Outcome(),
+		ErrorClass: res.ErrorClass,
+		LatencyMS:  int(res.Latency.Milliseconds()),
+	}
 }
 
 // pollTargets converts signed-policy targets into engine targets. The policy
@@ -495,6 +526,7 @@ func pollTargets(doc policy.Document, logger *slog.Logger) []poll.Target {
 			Tier:     t.Tier,
 			PollType: t.PollType,
 			Kind:     t.Kind,
+			Critical: t.Critical,
 		})
 		if err != nil {
 			logger.Error("policy target dropped", "device_id", t.DeviceID, "error", err)

@@ -392,6 +392,58 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /v1/devices/{id}/checks:
+    post:
+      tags: [inventory]
+      summary: Trigger an immediate on-demand ICMP/SNMP check for a device (admin; Idempotency-Key required, 202 + status_url)
+      x-argus-capability: diagnostic.run
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, maxLength: 128 }
+          description: Required. A replay with the same key (same device) returns the original check with Idempotent-Replayed true.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckCreate' }
+      responses:
+        '202':
+          description: Accepted; the check runs on the device site's collector (pending until the result arrives)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Check' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: No collector for the device site, per-device pending ceiling reached (check.pending_limit), or a different device already owns the key
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/checks/{id}:
+    get:
+      tags: [inventory]
+      summary: On-demand check status/outcome (pending until the collector reports; 404 for unknown or out-of-scope checks)
+      x-argus-capability: device.read
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Check' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /v1/devices/{id}/merge:
     post:
       tags: [inventory]
@@ -1026,7 +1078,7 @@ components:
                 last_sample_at: { type: [string, 'null'], format: date-time }
     Device:
       type: object
-      required: [id, site_id, name, kind, status, poll_profile, confidence, first_seen_at, created_at, updated_at]
+      required: [id, site_id, name, kind, status, poll_profile, critical, confidence, first_seen_at, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         site_id: { type: string, format: uuid }
@@ -1041,6 +1093,7 @@ components:
         mgmt_ip: { type: [string, 'null'], description: PostgreSQL inet rendered as text }
         status: { type: string, enum: [new, up, down, degraded, maintenance, retired] }
         poll_profile: { type: string }
+        critical: { type: boolean, description: 'Critical device: the collector lowers the failure-backoff ceiling to 5 min (docs/07 §12.3)' }
         confidence: { type: integer, minimum: 0, maximum: 100 }
         metadata: { type: object, additionalProperties: true }
         first_seen_at: { type: string, format: date-time }
@@ -1056,6 +1109,7 @@ components:
         name: { type: string, maxLength: 200 }
         kind: { type: string }
         poll_profile: { type: string, default: standard }
+        critical: { type: boolean, default: false, description: 'Critical device: collector failure-backoff ceiling 5 min instead of 15' }
         sys_object_id: { type: [string, 'null'] }
         serial: { type: [string, 'null'] }
         firmware: { type: [string, 'null'] }
@@ -1079,6 +1133,7 @@ components:
         kind: { type: string }
         status: { type: string, enum: [new, up, down, degraded, maintenance, retired] }
         poll_profile: { type: string }
+        critical: { type: boolean }
         sys_object_id: { type: [string, 'null'] }
         serial: { type: [string, 'null'] }
         firmware: { type: [string, 'null'] }
@@ -1099,6 +1154,26 @@ components:
         kind: { type: string, description: Defaults to the source device's kind }
         site_id: { type: string, format: uuid, description: Defaults to the source device's site }
         reason: { type: string }
+    CheckCreate:
+      type: object
+      required: [poll_type]
+      properties:
+        poll_type: { type: string, enum: [icmp, snmp] }
+    Check:
+      type: object
+      required: [check_id, device_id, poll_type, status, outcome, error_class, created_at, status_url]
+      properties:
+        check_id: { type: string, format: uuid }
+        device_id: { type: string, format: uuid }
+        collector_id: { type: [string, 'null'], format: uuid, description: Collector selected at request time }
+        poll_type: { type: string, enum: [icmp, snmp] }
+        status: { type: string, enum: [pending, completed, failed], description: 'pending until the collector reports; failed = server-side non-execution (expired)' }
+        outcome: { type: string, enum: ['', success, failure], description: 'Probe outcome; empty until completed' }
+        error_class: { type: string, description: 'timeout | unreachable | loss | auth_failure | rate_limited | target_missing | expired | ... (same vocabulary as poll health)' }
+        latency_ms: { type: [integer, 'null'], minimum: 0, description: Whole-probe duration in milliseconds }
+        created_at: { type: string, format: date-time }
+        completed_at: { type: [string, 'null'], format: date-time }
+        status_url: { type: string, description: 'GET path for this check' }
     IdentityRecord:
       type: object
       required: [id, device_id, identifier_type, identifier_value, source, first_seen_at, created_at]
@@ -1113,7 +1188,7 @@ components:
         created_at: { type: string, format: date-time }
     PollHealthRecord:
       type: object
-      required: [id, device_id, collector_id, poll_type, checked_at, latency_ms, outcome, error_class, consecutive_failures]
+      required: [id, device_id, collector_id, poll_type, checked_at, latency_ms, outcome, error_class, consecutive_failures, origin]
       properties:
         id: { type: string, format: uuid }
         device_id: { type: string, format: uuid }
@@ -1124,6 +1199,7 @@ components:
         outcome: { type: string, enum: [success, failure] }
         error_class: { type: string, description: 'timeout | loss | unreachable | unsupported | ... (empty on success without loss)' }
         consecutive_failures: { type: integer, minimum: 0 }
+        origin: { type: string, enum: [scheduled, on_demand], description: 'Probe trigger: scheduled cadence or on-demand check (M10-S0)' }
     Interface:
       type: object
       required: [id, device_id, if_index, if_name, role, monitored, first_seen_at]

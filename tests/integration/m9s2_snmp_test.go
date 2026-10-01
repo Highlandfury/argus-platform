@@ -253,6 +253,7 @@ func toSpoolHealthIT(in []poll.Health) []spool.Health {
 			DeviceID: h.DeviceID, PollType: h.PollType, LatencyMS: h.LatencyMS,
 			Outcome: h.Outcome, ErrorClass: h.ErrorClass,
 			ConsecutiveFailures: h.ConsecutiveFailures, CheckedAt: h.CheckedAt,
+			Origin: h.Origin,
 		}
 	}
 	return out

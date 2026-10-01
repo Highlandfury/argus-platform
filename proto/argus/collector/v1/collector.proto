@@ -100,6 +100,7 @@ message ClientMessage {
     Heartbeat heartbeat = 2;    // periodic liveness + spool/health accounting
     MetricBatch batch = 3;      // telemetry
     PolicyAck policy_ack = 4;   // acknowledgement of an applied policy
+    CheckResult check_result = 5; // terminal result of an on-demand check
   }
 }
 
@@ -196,6 +197,12 @@ message PollHealth {
 
   // Observation time (collector clock). Server validates |ts - now| <= 7 days.
   google.protobuf.Timestamp checked_at = 7;
+
+  // PROTOCOL CHANGE M10-S0 (2026-10-01): probe trigger classification.
+  // "scheduled" (default; also used by old collectors when empty) for the
+  // periodic scheduler, "on_demand" for a check triggered through
+  // POST /v1/devices/{id}/checks. Additive: absent means scheduled.
+  string origin = 8;
 }
 
 message MetricBatch {
@@ -221,6 +228,27 @@ message PolicyAck {
   string error = 3; // empty when applied
 }
 
+// CheckResult is the terminal outcome of one on-demand check (M10-S0). The
+// collector executes the probe immediately (bypassing the schedule) and sends
+// exactly one result per CheckRequest. The server applies it idempotently
+// (status pending -> completed only once), so a replayed result never
+// double-applies; there is no batch-claim ledger on this path (a result lost
+// with the stream leaves the check pending until its server-side TTL).
+message CheckResult {
+  // Check UUID issued by POST /v1/devices/{id}/checks.
+  string check_id = 1;
+
+  // Terminal outcome of the probe: "success" | "failure".
+  string outcome = 2;
+
+  // Failure classification ("" on success without loss), same vocabulary as
+  // poll health (timeout, unreachable, loss, auth_failure, rate_limited, ...).
+  string error_class = 3;
+
+  // Whole-probe duration in milliseconds.
+  int32 latency_ms = 4;
+}
+
 message ServerMessage {
   oneof msg {
     ServerHello hello = 1;
@@ -228,7 +256,22 @@ message ServerMessage {
     PolicyUpdate policy_update = 3;
     ServerPing ping = 4;
     Disconnect disconnect = 5;
+    CheckRequest check_request = 6; // on-demand probe order (M10-S0)
   }
+}
+
+// CheckRequest orders one immediate probe for a device (M10-S0). Delivered on
+// the existing control stream (same push mechanism as PolicyUpdate); the
+// server redelivers non-expired pending checks when a collector reconnects.
+message CheckRequest {
+  // Check UUID issued by POST /v1/devices/{id}/checks.
+  string check_id = 1;
+
+  // Device UUID from the signed policy's poll targets.
+  string device_id = 2;
+
+  // "icmp" | "snmp" (matches the device's poll targets).
+  string poll_type = 3;
 }
 
 message ServerHello {

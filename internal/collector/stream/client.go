@@ -56,6 +56,34 @@ type CredentialSink interface {
 	Clear()
 }
 
+// CheckRequest is one on-demand probe order delivered on the control stream
+// (M10-S0).
+type CheckRequest struct {
+	CheckID  string
+	DeviceID string
+	PollType string
+}
+
+// CheckOutcome is the terminal result of one on-demand check. Outcome is
+// "success" | "failure"; ErrorClass carries the poll classification.
+type CheckOutcome struct {
+	Outcome    string
+	ErrorClass string
+	LatencyMS  int
+}
+
+// CheckErrorBusy is the terminal class reported when the collector's check
+// workers are saturated (the check completes as a failure instead of hanging
+// pending). It is a check-transport class, not a probe classification.
+const CheckErrorBusy = "busy"
+
+// CheckExecutor runs one on-demand probe immediately (bypassing the schedule).
+// Implementations must never emit scheduled metric samples (poll.CheckExecutor
+// is the production implementation).
+type CheckExecutor interface {
+	ExecuteCheck(ctx context.Context, req CheckRequest) CheckOutcome
+}
+
 // DisconnectError carries a server-ordered disconnect code.
 type DisconnectError struct {
 	Code   collectorv1.Disconnect_Code
@@ -108,6 +136,12 @@ type Config struct {
 	// X25519 keypair per stream session and includes the public half in the
 	// hello; the private half never leaves RAM.
 	Credentials CredentialSink
+	// Checks, when set, executes on-demand check orders delivered on the
+	// control stream (M10-S0). Every order gets exactly one CheckResult on the
+	// same stream (the server applies results idempotently). Nil reports a
+	// terminal `unsupported` result so a check never hangs pending on a build
+	// without the executor.
+	Checks CheckExecutor
 }
 
 // TelemetryStats is the spool/sender accounting published in heartbeats.
@@ -128,11 +162,22 @@ type Client struct {
 	// consumed by Run to reset the reconnect backoff after a successful
 	// reconnection (single-goroutine access).
 	connectedThisSession bool
+	// checkSem bounds concurrent on-demand probes per session (M10-S0); it is
+	// acquired non-blockingly so check orders can never stall the receive loop.
+	checkSem chan struct{}
 }
+
+// On-demand check concurrency/queue bounds (M10-S0). The server already caps
+// pending checks per device; this keeps one stream from running an unbounded
+// number of probes at once.
+const (
+	maxConcurrentChecks = 4
+	maxCheckResults     = 16
+)
 
 // New creates a stream client bound to a state machine.
 func New(cfg Config, machine *collector.Machine) *Client {
-	return &Client{cfg: cfg, machine: machine}
+	return &Client{cfg: cfg, machine: machine, checkSem: make(chan struct{}, maxConcurrentChecks)}
 }
 
 func (c *Client) log() *slog.Logger {
@@ -373,6 +418,55 @@ func (c *Client) runOnce(ctx context.Context) error {
 		pumpCh = pumpTicker.C
 	}
 
+	// On-demand checks (M10-S0): probe orders arrive on the control stream, run
+	// on bounded workers, and their terminal results are sent from this loop
+	// only (one concurrent Send is the gRPC stream contract). A busy collector
+	// reports a terminal `busy` failure rather than leaving the check pending.
+	sctx := gstream.Context()
+	checkResults := make(chan *collectorv1.ClientMessage, maxCheckResults)
+	postCheckResult := func(checkID string, out CheckOutcome) {
+		outcome := out.Outcome
+		if outcome != "success" && outcome != "failure" {
+			outcome = "failure"
+		}
+		latency := out.LatencyMS
+		if latency < 0 {
+			latency = 0
+		}
+		msg := &collectorv1.ClientMessage{
+			Msg: &collectorv1.ClientMessage_CheckResult{CheckResult: &collectorv1.CheckResult{
+				CheckId:    checkID,
+				Outcome:    outcome,
+				ErrorClass: out.ErrorClass,
+				LatencyMs:  int32(latency), //nolint:gosec // bounded by the executor timeout
+			}},
+		}
+		select {
+		case checkResults <- msg:
+		case <-sctx.Done():
+		}
+	}
+	dispatchCheck := func(req *collectorv1.CheckRequest) {
+		if req == nil || req.GetCheckId() == "" {
+			return
+		}
+		order := CheckRequest{CheckID: req.GetCheckId(), DeviceID: req.GetDeviceId(), PollType: req.GetPollType()}
+		if c.cfg.Checks == nil {
+			postCheckResult(order.CheckID, CheckOutcome{Outcome: "failure", ErrorClass: "unsupported"})
+			return
+		}
+		select {
+		case c.checkSem <- struct{}{}:
+		default:
+			postCheckResult(order.CheckID, CheckOutcome{Outcome: "failure", ErrorClass: CheckErrorBusy})
+			return
+		}
+		go func() {
+			defer func() { <-c.checkSem }()
+			postCheckResult(order.CheckID, c.cfg.Checks.ExecuteCheck(sctx, order))
+		}()
+	}
+
 	heartbeatEvery := time.Duration(hello.GetHeartbeatIntervalSeconds()) * time.Second
 	if heartbeatEvery <= 0 {
 		heartbeatEvery = 30 * time.Second
@@ -410,6 +504,8 @@ func (c *Client) runOnce(ctx context.Context) error {
 					source.BatchResult(msg.GetBatchResult())
 				}
 				pump()
+			case msg.GetCheckRequest() != nil:
+				dispatchCheck(msg.GetCheckRequest())
 			case msg.GetHello() != nil:
 				return c.disconnectErr(collectorv1.Disconnect_CODE_PROTOCOL_ERROR, "duplicate ServerHello")
 			case msg.GetDisconnect() != nil:
@@ -419,6 +515,10 @@ func (c *Client) runOnce(ctx context.Context) error {
 			pump()
 		case <-pumpCh:
 			pump()
+		case out := <-checkResults:
+			if err := send(out); err != nil {
+				return normalize(err)
+			}
 		case <-ticker.C:
 			hb := &collectorv1.Heartbeat{
 				SentAt:        timestamppb.Now(),

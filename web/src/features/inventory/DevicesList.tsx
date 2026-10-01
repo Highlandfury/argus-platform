@@ -8,6 +8,7 @@ interface Device {
   name: string;
   kind: string;
   status: string;
+  critical: boolean;
   mgmt_ip: string | null;
   first_seen_at: string;
   last_seen_at: string | null;
@@ -120,7 +121,18 @@ export default function DevicesList({ refreshKey = 0 }: { refreshKey?: number })
       <tbody>
         {devices.map((d) => (
           <tr key={d.id}>
-            <td>{d.name}</td>
+            <td>
+              {d.name}
+              {d.critical && (
+                <span
+                  className="status status-stale"
+                  style={{ marginLeft: 8 }}
+                  title="Critical device (5-minute failure backoff ceiling)"
+                >
+                  critical
+                </span>
+              )}
+            </td>
             <td className="muted">{d.kind}</td>
             <td className="muted">{siteName.get(d.site_id) ?? "—"}</td>
             <td>

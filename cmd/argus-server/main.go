@@ -22,6 +22,7 @@ import (
 
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
 	"github.com/argus-platform/argus/internal/api"
+	"github.com/argus-platform/argus/internal/modules/checks"
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/credentials"
 	"github.com/argus-platform/argus/internal/modules/identity"
@@ -193,6 +194,7 @@ func cmdServe(args []string) int {
 	var (
 		collectorsSvc  *collectors.Service
 		sessions       *collectors.SessionRegistry
+		checksSvc      *checks.Service
 		metricsQuery   *metrics.QueryService
 		enrollGRPC     *grpc.Server
 		streamGRPC     *grpc.Server
@@ -206,6 +208,10 @@ func cmdServe(args []string) int {
 		}
 		collectorsSvc = collectors.New(appPool, authPool, ca, tel, collectorOpts...)
 		sessions = collectors.NewSessionRegistry()
+		// On-demand checks (M10-S0): the session registry is the live push
+		// path; the checks service is also the reconnect redelivery source and
+		// the idempotent result sink wired into the stream server below.
+		checksSvc = checks.New(appPool, sessions)
 		metricsQuery = metrics.NewQueryService(appPool, collectorsSvc, argus)
 
 		enrollGRPC = grpc.NewServer(
@@ -233,8 +239,10 @@ func cmdServe(args []string) int {
 			grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
 			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: false}),
 		)
-		collectorv1.RegisterCollectorServiceServer(streamGRPC,
-			collectors.NewStreamServer(collectorsSvc, sessions, ingest.New(appPool, nil, argus, logger), logger))
+		streamServer := collectors.NewStreamServer(collectorsSvc, sessions, ingest.New(appPool, nil, argus, logger), logger)
+		streamServer.Checks = checksSvc
+		streamServer.CheckResults = checksSvc
+		collectorv1.RegisterCollectorServiceServer(streamGRPC, streamServer)
 
 		if enrollListener, err = net.Listen("tcp", cfg.EnrollAddr); err != nil {
 			fmt.Fprintln(os.Stderr, "enrollment listener:", err)
@@ -276,6 +284,7 @@ func cmdServe(args []string) int {
 		Inventory:         inventorySvc,
 		Credentials:       credentialsSvc,
 		PollHealth:        pollHealthSvc,
+		Checks:            checksSvc,
 	}
 
 	httpSrv := &http.Server{

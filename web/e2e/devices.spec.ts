@@ -86,6 +86,9 @@ test("add device form creates a device that appears in the list", async () => {
   await page.getByTestId("device-mgmt-ip").fill(mgmtIP);
   await page.getByTestId("device-serial").fill(serial);
   await page.getByTestId("device-sys-object-id").fill(sysObjectID);
+  // M10-S0: critical devices lower the collector failure-backoff ceiling to
+  // 5 minutes; the checkbox posts `critical: true` and the row shows a badge.
+  await page.getByTestId("device-critical").check();
   await page.getByTestId("device-submit").click();
 
   await expect(page.getByTestId("device-create-result")).toContainText(name, {
@@ -97,6 +100,7 @@ test("add device form creates a device that appears in the list", async () => {
   await expect(row).toContainText("router");
   await expect(row).toContainText(site.name);
   await expect(row).toContainText(mgmtIP);
+  await expect(row).toContainText("critical");
 });
 
 // M7-S4a: problem+json mapping — server validation renders the field error

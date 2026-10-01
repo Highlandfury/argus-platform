@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -47,10 +48,34 @@ type StreamServer struct {
 	Ingest   ingest.Ingester
 	Log      *slog.Logger
 
+	// Checks supplies pending on-demand check orders for reconnect redelivery
+	// (M10-S0). Nil disables redelivery; live pushes still flow through the
+	// session registry.
+	Checks CheckSource
+	// CheckResults applies collector-reported check results (M10-S0). Nil
+	// drops results (never double-applies: application is idempotent anyway).
+	CheckResults CheckResultSink
+
 	// ingestGlobal is the process-wide batch-transaction budget (see
 	// streamIngestConcurrency). Initialized by NewStreamServer.
 	ingestGlobal chan struct{}
 }
+
+// CheckSource lists the pending on-demand checks for one collector so a
+// reconnecting collector receives orders issued while it was offline (M10-S0).
+type CheckSource interface {
+	PendingCheckRequests(ctx context.Context, orgID, collectorID uuid.UUID, limit int) ([]*collectorv1.CheckRequest, error)
+}
+
+// CheckResultSink applies one collector-reported CheckResult. The update is
+// idempotent: applied=false means the check was already terminal (a replay)
+// or unknown to this collector.
+type CheckResultSink interface {
+	RecordCheckResult(ctx context.Context, orgID, collectorID uuid.UUID, result *collectorv1.CheckResult) (applied bool, err error)
+}
+
+// maxPendingCheckDelivery bounds the reconnect redelivery batch (M10-S0).
+const maxPendingCheckDelivery = 64
 
 // NewStreamServer wires the collector stream service. ingester may be nil in
 // degraded configurations (batches are then explicitly rejected, never
@@ -148,6 +173,10 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 	default:
 		metrics.connects.WithLabelValues("ok").Inc()
 	}
+
+	// M10-S0: redeliver non-expired pending checks issued while this collector
+	// was offline (bounded; leftovers stay pending and expire server-side).
+	s.redeliverPendingChecks(ctx, ident.OrgID, ident.CollectorID, session, reqID)
 
 	// ServerHello: latest signed policy is always included; when the collector
 	// presented an ephemeral session key (M9-S3) the document additionally
@@ -268,6 +297,19 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 				if err := s.Svc.RecordPolicyAck(ctx, ident.OrgID, ident.CollectorID, ack.GetPolicyVersion(), ack.GetApplied()); err != nil && s.Log != nil {
 					s.Log.Error("record policy ack", "request_id", reqID, "collector_id", ident.CollectorID, "error", err)
 				}
+			case msg.GetCheckResult() != nil:
+				cr := msg.GetCheckResult()
+				metrics.checkResults.WithLabelValues(checkResultLabel(cr)).Inc()
+				if s.CheckResults == nil {
+					break
+				}
+				applied, err := s.CheckResults.RecordCheckResult(ctx, ident.OrgID, ident.CollectorID, cr)
+				if err != nil && s.Log != nil {
+					s.Log.Error("record check result", "request_id", reqID, "collector_id", ident.CollectorID, "error", err)
+				}
+				if applied {
+					metrics.checkApplied.Inc()
+				}
 			case msg.GetBatch() != nil:
 				dispatchBatch(msg.GetBatch(), allowlist)
 			case msg.GetHello() != nil:
@@ -297,6 +339,13 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 			_ = gstream.Send(&collectorv1.ServerMessage{
 				Msg: &collectorv1.ServerMessage_PolicyUpdate{PolicyUpdate: &collectorv1.PolicyUpdate{Policy: policyToProto(sp)}},
 			})
+		case cr := <-session.Checks():
+			metrics.checkPushes.Inc()
+			if err := gstream.Send(&collectorv1.ServerMessage{
+				Msg: &collectorv1.ServerMessage_CheckRequest{CheckRequest: cr},
+			}); err != nil {
+				return normalizeStreamErr(err)
+			}
 		case err := <-recvErr:
 			s.countStreamError(err)
 			return normalizeStreamErr(err)
@@ -309,6 +358,42 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 func disconnectMsg(code collectorv1.Disconnect_Code, reason string) *collectorv1.ServerMessage {
 	return &collectorv1.ServerMessage{
 		Msg: &collectorv1.ServerMessage_Disconnect{Disconnect: &collectorv1.Disconnect{Code: code, Reason: reason}},
+	}
+}
+
+// redeliverPendingChecks pushes bounded pending check orders into a new
+// session (M10-S0). Orders beyond the session buffer stay pending and are
+// bounded by the server-side pending TTL.
+func (s *StreamServer) redeliverPendingChecks(ctx context.Context, orgID, collectorID uuid.UUID, session *Session, reqID string) {
+	if s.Checks == nil {
+		return
+	}
+	pending, err := s.Checks.PendingCheckRequests(ctx, orgID, collectorID, maxPendingCheckDelivery)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Error("pending checks lookup", "request_id", reqID, "collector_id", collectorID, "error", err)
+		}
+		return
+	}
+	delivered := 0
+	for _, req := range pending {
+		if !session.PushCheck(req) {
+			break
+		}
+		delivered++
+	}
+	if delivered > 0 && s.Log != nil {
+		s.Log.Info("pending checks redelivered", "request_id", reqID, "collector_id", collectorID, "count", delivered)
+	}
+}
+
+// checkResultLabel buckets a CheckResult for the metric counter.
+func checkResultLabel(cr *collectorv1.CheckResult) string {
+	switch cr.GetOutcome() {
+	case "success", "failure":
+		return cr.GetOutcome()
+	default:
+		return "invalid"
 	}
 }
 

@@ -361,6 +361,7 @@ func (e *Engine) probe(ctx context.Context, st *targetState) {
 			ErrorClass:          class,
 			ConsecutiveFailures: failures,
 			CheckedAt:           finished,
+			Origin:              OriginScheduled,
 		})
 	}
 	// A target removed while its probe was in flight is simply discarded

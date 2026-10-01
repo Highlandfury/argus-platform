@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/argus-platform/argus/internal/modules/checks"
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/credentials"
 	"github.com/argus-platform/argus/internal/modules/identity"
@@ -47,6 +48,7 @@ type Options struct {
 	Inventory         *inventory.Service
 	Credentials       *credentials.Service
 	PollHealth        *pollhealth.Service
+	Checks            *checks.Service
 }
 
 type handlers struct {
@@ -59,6 +61,7 @@ type handlers struct {
 	inventoryHTTP   *inventory.HTTP
 	credentialsHTTP *credentials.HTTP
 	pollHealthHTTP  *pollhealth.HTTP
+	checksHTTP      *checks.HTTP
 }
 
 func newHandlers(o Options) *handlers {
@@ -100,6 +103,9 @@ func newHandlers(o Options) *handlers {
 	}
 	if o.PollHealth != nil && o.Inventory != nil {
 		h.pollHealthHTTP = &pollhealth.HTTP{Svc: o.PollHealth, Devices: o.Inventory}
+	}
+	if o.Checks != nil && o.Inventory != nil {
+		h.checksHTTP = &checks.HTTP{Svc: o.Checks, Devices: o.Inventory}
 	}
 	return h
 }
@@ -274,6 +280,22 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 				return
 			}
 			h.pollHealthHTTP.ListDevicePollHealth(w, r)
+		})
+	case "/v1/devices/{id}/checks":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.checksHTTP == nil {
+				serviceUnavailable(w, r, "checks service not configured")
+				return
+			}
+			h.checksHTTP.CreateDeviceCheck(w, r)
+		})
+	case "/v1/checks/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.checksHTTP == nil {
+				serviceUnavailable(w, r, "checks service not configured")
+				return
+			}
+			h.checksHTTP.GetCheck(w, r)
 		})
 	case "/v1/devices/{id}/merge":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

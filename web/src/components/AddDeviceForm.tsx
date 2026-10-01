@@ -52,6 +52,7 @@ export default function AddDeviceForm({
   const [mgmtIP, setMgmtIP] = useState("");
   const [serial, setSerial] = useState("");
   const [sysObjectID, setSysObjectID] = useState("");
+  const [critical, setCritical] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -64,10 +65,11 @@ export default function AddDeviceForm({
     setFieldErrors([]);
     setBusy(true);
     try {
-      const body: Record<string, string> = {
+      const body: Record<string, string | boolean> = {
         site_id: siteID,
         name: name.trim(),
         kind,
+        critical,
       };
       if (mgmtIP.trim() !== "") body.mgmt_ip = mgmtIP.trim();
       if (serial.trim() !== "") body.serial = serial.trim();
@@ -175,6 +177,20 @@ export default function AddDeviceForm({
             data-testid="device-sys-object-id"
             placeholder="1.3.6.1.4.1.9"
           />
+          <label
+            htmlFor="device-critical"
+            style={{ display: "flex", alignItems: "center", gap: 8 }}
+          >
+            <input
+              id="device-critical"
+              type="checkbox"
+              checked={critical}
+              onChange={(e) => setCritical(e.target.checked)}
+              data-testid="device-critical"
+              style={{ width: "auto" }}
+            />
+            Critical device (faster failure backoff)
+          </label>
           <button
             type="submit"
             disabled={busy}

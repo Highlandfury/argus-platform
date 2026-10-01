@@ -165,12 +165,14 @@ func maxPolicyVersion(ctx context.Context, tx pgx.Tx, collectorID uuid.UUID) (in
 // applicable SNMP credential binding exists (device/site/org scope;
 // group-scope selector resolution is not available before S3's dispatch
 // resolution), an additional SNMP target carrying the device kind for
-// template selection. Must run inside a tenant transaction. host() strips any
+// template selection. The device's `critical` flag rides both target types
+// (M10-S0: the collector lowers the failure-backoff ceiling to 5 min for it).
+// Must run inside a tenant transaction. host() strips any
 // /32 suffix an operator may have stored so the collector always receives a
 // bare address.
 func listPolicyTargets(ctx context.Context, tx pgx.Tx) ([]PolicyTarget, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT d.id, host(d.mgmt_ip), d.name, d.poll_profile, d.kind,
+		SELECT d.id, host(d.mgmt_ip), d.name, d.poll_profile, d.kind, d.critical,
 		       EXISTS (
 		           SELECT 1
 		           FROM credential_bindings b
@@ -196,7 +198,7 @@ func listPolicyTargets(ctx context.Context, tx pgx.Tx) ([]PolicyTarget, error) {
 		var id uuid.UUID
 		var t PolicyTarget
 		var snmpBound bool
-		if err := rows.Scan(&id, &t.MgmtIP, &t.Name, &t.Tier, &t.Kind, &snmpBound); err != nil {
+		if err := rows.Scan(&id, &t.MgmtIP, &t.Name, &t.Tier, &t.Kind, &t.Critical, &snmpBound); err != nil {
 			return nil, err
 		}
 		t.DeviceID = id.String()

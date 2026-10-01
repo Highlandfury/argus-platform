@@ -107,5 +107,6 @@ func recordPayload(rec Record) map[string]any {
 		"outcome":              rec.Outcome,
 		"error_class":          rec.ErrorClass,
 		"consecutive_failures": rec.ConsecutiveFailures,
+		"origin":               rec.Origin,
 	}
 }

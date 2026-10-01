@@ -17,6 +17,9 @@ type metrics struct {
 	heartbeats    prometheus.Counter
 	policyAcks    *prometheus.CounterVec
 	policyPushes  prometheus.Counter
+	checkPushes   prometheus.Counter
+	checkResults  *prometheus.CounterVec
+	checkApplied  prometheus.Counter
 }
 
 func newMetrics(tel *telemetry.Registry) *metrics {
@@ -49,9 +52,22 @@ func newMetrics(tel *telemetry.Registry) *metrics {
 			Namespace: "argus", Subsystem: "collector", Name: "policy_pushes_total",
 			Help: "Policy updates pushed to live streams.",
 		}),
+		checkPushes: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "argus", Subsystem: "collector", Name: "check_requests_pushed_total",
+			Help: "On-demand check orders pushed to live streams (M10-S0).",
+		}),
+		checkResults: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "argus", Subsystem: "collector", Name: "check_results_total",
+			Help: "On-demand check results received by outcome (M10-S0).",
+		}, []string{"outcome"}),
+		checkApplied: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "argus", Subsystem: "collector", Name: "check_results_applied_total",
+			Help: "On-demand check results that transitioned a pending check (M10-S0; replays are excluded).",
+		}),
 	}
 	if tel != nil {
-		tel.MustRegister(m.enrollments, m.streamsActive, m.malformed, m.connects, m.heartbeats, m.policyAcks, m.policyPushes)
+		tel.MustRegister(m.enrollments, m.streamsActive, m.malformed, m.connects, m.heartbeats,
+			m.policyAcks, m.policyPushes, m.checkPushes, m.checkResults, m.checkApplied)
 	}
 	return m
 }

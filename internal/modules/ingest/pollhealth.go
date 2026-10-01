@@ -28,6 +28,7 @@ func insertPollHealth(ctx context.Context, tx pgx.Tx, orgID, collectorID uuid.UU
 	outcomes := make([]string, n)
 	classes := make([]string, n)
 	failures := make([]int32, n)
+	origins := make([]string, n)
 	for i, r := range records {
 		id, err := uuid.NewV7()
 		if err != nil {
@@ -43,13 +44,14 @@ func insertPollHealth(ctx context.Context, tx pgx.Tx, orgID, collectorID uuid.UU
 		outcomes[i] = r.Outcome
 		classes[i] = r.ErrorClass
 		failures[i] = int32(r.ConsecutiveFailures) //nolint:gosec // bounded by validator
+		origins[i] = r.Origin
 	}
 	tag, err := tx.Exec(ctx, `
-		INSERT INTO poll_health (id, org_id, collector_id, device_id, ts, poll_type, latency_ms, outcome, error_class, consecutive_failures)
+		INSERT INTO poll_health (id, org_id, collector_id, device_id, ts, poll_type, latency_ms, outcome, error_class, consecutive_failures, origin)
 		SELECT * FROM unnest(
 			$1::uuid[], $2::uuid[], $3::uuid[], $4::uuid[], $5::timestamptz[],
-			$6::text[], $7::int4[], $8::text[], $9::text[], $10::int4[])`,
-		ids, orgs, collectors, devices, timestamps, pollTypes, latencies, outcomes, classes, failures)
+			$6::text[], $7::int4[], $8::text[], $9::text[], $10::int4[], $11::text[])`,
+		ids, orgs, collectors, devices, timestamps, pollTypes, latencies, outcomes, classes, failures, origins)
 	if err != nil {
 		return 0, fmt.Errorf("ingest: insert poll health: %w", err)
 	}

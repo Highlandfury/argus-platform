@@ -82,11 +82,10 @@ type Target struct {
 	// Kind is the device kind from inventory; it selects SNMP templates
 	// (M9-S2). Empty is treated as unknown (system template only).
 	Kind string
-	// Critical lowerers the adaptive backoff ceiling to 5 min (canonical
-	// docs/07 §12.3: "critical devices 5 min ceiling"). The collector honors
-	// the flag; Phase 2 has no operator-facing criticality source in the
-	// signed bundle yet, so production targets are non-critical until that
-	// source lands (documented in M9_EVIDENCE §S4).
+	// Critical lowers the adaptive backoff ceiling to 5 min (canonical
+	// docs/07 §12.3: "critical devices 5 min ceiling"). The flag is the
+	// operator-facing devices.critical field carried through the signed
+	// policy bundle (M10-S0).
 	Critical bool
 }
 
@@ -102,6 +101,7 @@ type TargetSpec struct {
 	Tier     string
 	PollType string
 	Kind     string
+	Critical bool
 }
 
 // NormalizePollType maps a policy poll-type string onto a canonical type.
@@ -135,6 +135,7 @@ func TargetFromPolicy(spec TargetSpec) (Target, error) {
 		Tier:     NormalizeTier(spec.Tier),
 		PollType: NormalizePollType(spec.PollType),
 		Kind:     strings.TrimSpace(spec.Kind),
+		Critical: spec.Critical,
 	}, nil
 }
 
@@ -158,7 +159,17 @@ type Health struct {
 	ErrorClass          string
 	ConsecutiveFailures int
 	CheckedAt           time.Time
+	// Origin classifies the probe trigger (M10-S0): OriginScheduled for the
+	// periodic scheduler, OriginOnDemand for a check run through the
+	// on-demand check endpoint. Empty normalizes to scheduled server-side.
+	Origin string
 }
+
+// Probe origins (proto PollHealth.origin / poll_health.origin).
+const (
+	OriginScheduled = "scheduled"
+	OriginOnDemand  = "on_demand"
+)
 
 // Outcome values (proto/DB contract).
 const (
@@ -188,6 +199,10 @@ const (
 	ErrorCredentialInvalid = "credential_invalid" //nolint:gosec // poll-health class string, not a secret
 	ErrorRateLimited       = "rate_limited"
 	ErrorCPUPressure       = "cpu_pressure"
+	// ErrorTargetMissing is an on-demand-check class (M10-S0): the ordered
+	// device/poll-type is no longer in the collector's applied policy (device
+	// removed, poll type not provisioned, or policy not yet caught up).
+	ErrorTargetMissing = "target_missing"
 )
 
 // Poll types.

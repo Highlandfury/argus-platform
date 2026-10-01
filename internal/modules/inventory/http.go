@@ -176,6 +176,7 @@ func devicePayload(d Device) map[string]any {
 		"mgmt_ip":       d.MgmtIP,
 		"status":        d.Status,
 		"poll_profile":  d.PollProfile,
+		"critical":      d.Critical,
 		"confidence":    d.Confidence,
 		"metadata":      d.Metadata,
 		"first_seen_at": d.FirstSeenAt.UTC().Format(time.RFC3339),
@@ -303,6 +304,7 @@ type createDeviceRequest struct {
 	Name        string          `json:"name"`
 	Kind        string          `json:"kind"`
 	PollProfile string          `json:"poll_profile"`
+	Critical    bool            `json:"critical"`
 	SysObjectID *string         `json:"sys_object_id"`
 	Serial      *string         `json:"serial"`
 	Firmware    *string         `json:"firmware"`
@@ -378,6 +380,7 @@ func (h *HTTP) CreateDevice(w http.ResponseWriter, r *http.Request) {
 		Name:        req.Name,
 		Kind:        req.Kind,
 		PollProfile: req.PollProfile,
+		Critical:    req.Critical,
 		SysObjectID: req.SysObjectID,
 		Serial:      req.Serial,
 		Firmware:    req.Firmware,
@@ -435,7 +438,7 @@ func (h *HTTP) GetDevice(w http.ResponseWriter, r *http.Request) {
 
 // devicePatchFields is the PATCH /v1/devices/{id} allowlist.
 var devicePatchFields = map[string]bool{
-	"name": true, "kind": true, "site_id": true, "status": true, "poll_profile": true,
+	"name": true, "kind": true, "site_id": true, "status": true, "poll_profile": true, "critical": true,
 	"sys_object_id": true, "serial": true, "firmware": true, "mgmt_ip": true, "metadata": true,
 }
 
@@ -518,6 +521,14 @@ func decodeDevicePatch(w http.ResponseWriter, r *http.Request) (DevicePatch, boo
 			errs = append(errs, httpx.FieldError{Field: "poll_profile", Code: "invalid", Message: "poll_profile must not be blank"})
 		} else {
 			p.PollProfile, p.HasPollProfile = profile, true
+		}
+	}
+	if v, ok := raw["critical"]; ok {
+		var critical bool
+		if err := json.Unmarshal(v, &critical); err != nil {
+			errs = append(errs, httpx.FieldError{Field: "critical", Code: "invalid", Message: "critical must be a boolean"})
+		} else {
+			p.Critical, p.HasCritical = critical, true
 		}
 	}
 	p.SysObjectID = patchNullable(raw, "sys_object_id", &errs)
