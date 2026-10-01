@@ -117,7 +117,7 @@ if ($WithSuites) {
 
 if ($WithIntegration) {
   Step 'integration (full suite, testcontainers)' {
-    & $go test ./tests/integration/... -count=1
+    & $go test ./tests/integration/... -count=1 -timeout 30m
   }
 }
 
