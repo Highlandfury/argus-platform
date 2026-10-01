@@ -123,6 +123,7 @@ columns:
 tables:
   - name: t
     walk: "1.2.3"
+    max_rows: 1
 `,
 		"counter width": `
 name: bad
@@ -136,6 +137,7 @@ columns:
 tables:
   - name: t
     walk: "1.2.3"
+    max_rows: 1
 `,
 		"missing unit": `
 name: bad
@@ -147,6 +149,7 @@ columns:
 tables:
   - name: t
     walk: "1.2.3"
+    max_rows: 1
 `,
 		"unknown field": `
 name: bad
@@ -176,6 +179,7 @@ columns:
 tables:
   - name: t
     walk: "1.2.3"
+    max_rows: 1
 `
 	fsys := fstest.MapFS{
 		"templates/a.yaml": &fstest.MapFile{Data: []byte(yaml)},

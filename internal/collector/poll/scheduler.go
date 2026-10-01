@@ -29,9 +29,11 @@ func (RealClock) After(d time.Duration) <-chan time.Time {
 	return time.After(d)
 }
 
-// BackoffPolicy is the M9-S4 extension point for adaptive scheduling. M9-S1
-// ships FixedBackoff; S4 replaces it with the failure-doubling/jitter/rate-cap
-// policy mandated by P2-AC-17 while this engine keeps calling the hook.
+// BackoffPolicy is the M9-S1 extension point for adaptive scheduling. M9-S1
+// ships FixedBackoff; M9-S4 supplies AdaptiveBackoff (failure doubling to the
+// tier ceiling, critical 5-minute ceiling, rapid recovery re-check, CPU-stress
+// step-down and ±10% jitter) and the engine prefers the richer
+// AdaptiveBackoffPolicy surface when the configured policy implements it.
 type BackoffPolicy interface {
 	// NextInterval returns the delay before the next run of a target whose
 	// last run left consecutiveFailures failures (0 after a success). base is
@@ -75,7 +77,9 @@ type TargetRemovedHook interface {
 
 // Engine is the deterministic poll scheduler. Every state transition is
 // computed from the clock and the target set: given the same inputs, the same
-// due sequence results (no wall-clock reads outside Clock, no random values).
+// due sequence results (no wall-clock reads outside Clock; jitter randomness
+// comes from the injected BackoffPolicy). Schedules are collector-local and
+// survive server outages: Run keeps stepping the last applied target set.
 type Engine struct {
 	cfg     Config
 	clock   Clock
@@ -87,6 +91,12 @@ type Engine struct {
 	targets map[string]*targetState
 	// wake interrupts Run's sleep when a policy target change arrives.
 	wake chan struct{}
+	// cycleProbed/cycleFailed count the probes of the current Step; when a
+	// whole cycle fails the engine-level failure streak grows and floors the
+	// next wait with the canonical 30→60→300 ladder (docs/06 §10.4).
+	cycleProbed    int
+	cycleFailed    int
+	engineFailures int
 }
 
 type targetState struct {
@@ -94,6 +104,9 @@ type targetState struct {
 	next     time.Time
 	failures int
 	running  bool
+	// cpuPressureSteps counts consecutive successful SNMP polls that reported
+	// high hrProcessorLoad (device-CPU guard, docs/07 §12.7).
+	cpuPressureSteps int
 }
 
 // NewEngine builds the scheduler.
@@ -191,6 +204,10 @@ func (e *Engine) Targets() []Target {
 // which makes the scheduler deterministic under a test clock. Returns the
 // number of targets probed.
 func (e *Engine) Step(ctx context.Context, now time.Time) int {
+	e.mu.Lock()
+	e.cycleProbed, e.cycleFailed = 0, 0
+	e.mu.Unlock()
+
 	due := e.reserveDue(now)
 	if len(due) == 0 {
 		return 0
@@ -203,6 +220,7 @@ func (e *Engine) Step(ctx context.Context, now time.Time) int {
 			wg.Wait()
 			// Release any reservation that was never probed.
 			e.releaseReservations(due)
+			e.finishCycle()
 			return len(due)
 		}
 		wg.Add(1)
@@ -213,7 +231,24 @@ func (e *Engine) Step(ctx context.Context, now time.Time) int {
 		}(st)
 	}
 	wg.Wait()
+	e.finishCycle()
 	return len(due)
+}
+
+// finishCycle updates the engine-level failure streak after a Step: a cycle
+// whose probes all failed grows the streak (floored waits, 30→60→300 s); any
+// success resets it. An empty cycle changes nothing.
+func (e *Engine) finishCycle() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cycleProbed == 0 {
+		return
+	}
+	if e.cycleFailed == e.cycleProbed {
+		e.engineFailures++
+		return
+	}
+	e.engineFailures = 0
 }
 
 // Run drives the scheduler until ctx ends. It steps on every due target and
@@ -272,30 +307,58 @@ func (e *Engine) probe(ctx context.Context, st *targetState) {
 	}
 
 	e.mu.Lock()
-	failures := st.failures
+	prevFailures := st.failures
+	failures := prevFailures
 	if res.Reachable() {
 		failures = 0
 	} else {
 		failures++
 	}
 	st.failures = failures
-	interval := e.backoff.NextInterval(TierInterval(target.Tier), failures)
+	pressure := res.CPULoadHigh && res.Reachable()
+	prevPressure := st.cpuPressureSteps
+	if pressure {
+		st.cpuPressureSteps++
+	} else {
+		st.cpuPressureSteps = 0
+	}
+	// A recovery is the first success after a failure streak, or the first
+	// poll without CPU pressure after a pressure streak: both get the
+	// canonical rapid re-check before the tier cadence resumes (docs/07 §12.4).
+	recovered := res.Reachable() && !pressure && (prevFailures > 0 || prevPressure > 0)
+	interval := e.nextInterval(BackoffContext{
+		Base:                TierInterval(target.Tier),
+		ConsecutiveFailures: failures,
+		Critical:            target.Critical,
+		Recovered:           recovered,
+		CPUPressureSteps:    st.cpuPressureSteps,
+	})
 	// Never schedule in the past relative to the completed run.
 	if interval <= 0 {
 		interval = time.Second
 	}
 	st.next = finished.Add(interval)
+	e.cycleProbed++
+	if !res.Reachable() {
+		e.cycleFailed++
+	}
 	st.running = false
 	_, stillCurrent := e.targets[target.Key()]
 	e.mu.Unlock()
 
 	if e.cfg.OnHealth != nil {
+		class := res.ErrorClass
+		if pressure && class == "" {
+			// The device answered; high agent-reported CPU is recorded as a
+			// success class (like template_drift) so M11/M12 can alert on it.
+			class = ErrorCPUPressure
+		}
 		e.cfg.OnHealth(Health{
 			DeviceID:            target.DeviceID,
 			PollType:            res.PollType,
 			LatencyMS:           int(res.Latency.Milliseconds()),
 			Outcome:             res.Outcome(),
-			ErrorClass:          res.ErrorClass,
+			ErrorClass:          class,
 			ConsecutiveFailures: failures,
 			CheckedAt:           finished,
 		})
@@ -305,9 +368,21 @@ func (e *Engine) probe(ctx context.Context, st *targetState) {
 	_ = stillCurrent
 }
 
+// nextInterval consults the adaptive policy when it implements the richer
+// BackoffContext surface and falls back to the M9-S1 hook otherwise.
+func (e *Engine) nextInterval(bc BackoffContext) time.Duration {
+	if p, ok := e.backoff.(AdaptiveBackoffPolicy); ok {
+		return p.NextIntervalFor(bc)
+	}
+	return e.backoff.NextInterval(bc.Base, bc.ConsecutiveFailures)
+}
+
 // untilNext returns the wait until the earliest scheduled run (idle bound when
-// no target is scheduled). ApplyTargets wakes Run early, so this may be the
-// full tier cadence.
+// no target is scheduled). While the engine-level failure streak is non-zero
+// (every probe of the last cycles failed), the wait is floored by the
+// canonical 30→60→300 s ladder (docs/06 §10.4) so a collector-wide outage
+// cannot hammer targets at their per-target cadence. ApplyTargets wakes Run
+// early, so a policy change is still applied immediately.
 func (e *Engine) untilNext(now time.Time) time.Duration {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -321,6 +396,9 @@ func (e *Engine) untilNext(now time.Time) time.Duration {
 		if first || d < wait {
 			wait, first = d, false
 		}
+	}
+	if floor := EngineBackoffLadder(e.engineFailures); floor > wait {
+		wait = floor
 	}
 	if wait < 0 {
 		wait = 0

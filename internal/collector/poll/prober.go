@@ -56,6 +56,10 @@ type Result struct {
 	SnmpSamples       []Sample
 	SnmpMetricsSeen   int
 	SnmpMetricsExpect int
+	// CPULoadHigh reports that the device answered while one of its
+	// hrProcessorLoad values crossed the M9-S4 guard threshold (docs/07
+	// §12.7): healthy poll, but the scheduler steps the cadence down.
+	CPULoadHigh bool
 }
 
 // Reachable reports whether the poll produced a completed, usable result. For

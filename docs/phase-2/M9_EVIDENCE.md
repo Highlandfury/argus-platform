@@ -1,20 +1,26 @@
 # M9-EVIDENCE — Polling engine (ICMP + SNMP)
 
-**Status: M9-S1 COMPLETE, M9-S2 COMPLETE and M9-S3 COMPLETE (all recorded
-here).** This record covers **M9-S1**, the polling foundation end-to-end with
-ICMP, **M9-S2**, SNMP v2c/v3 polling with the declarative core template pack,
-the counter state machine, snmpsim fixtures and the scheduler/wire integration,
-and **M9-S3**, real credential materialization into the signed policy bundles
-(per-session ECDH+AEAD, RAM-only, revocation). **No full adaptive
-backoff/jitter/rate caps (S4), no M10 UI and no alerts exist or are claimed.**
-P2-AC-14 is satisfied for ICMP; P2-AC-15 (SNMP client/templates/fixtures/no
-SET), P2-AC-16 (counter correctness) and P2-AC-19 (credential use flow:
-signed-bundle delivery, per-session encryption, RAM-only, revocation, log
-scan, server-side bindings) are satisfied for the S1-S3 scope; P2-AC-20's
-error classification includes the SNMP classes. P2-AC-17/18 completion
-(doubling/jitter/caps) and the remaining failure-suite additions named in
-P2-AC-17/18 (poll outage, restart mid-poll) remain S4 work; the scheduler
-exposes the hooks they will use.
+**Status: M9-S1, M9-S2, M9-S3 and M9-S4 COMPLETE (all recorded here).** This
+record covers **M9-S1**, the polling foundation end-to-end with ICMP,
+**M9-S2**, SNMP v2c/v3 polling with the declarative core template pack, the
+counter state machine, snmpsim fixtures and the scheduler/wire integration,
+**M9-S3**, real credential materialization into the signed policy bundles
+(per-session ECDH+AEAD, RAM-only, revocation), and **M9-S4**, adaptive
+scheduling (failure doubling, critical ceiling, recovery re-check, ±10% jitter,
+engine-level 30/60/300 ladder, hrProcessorLoad CPU guard), rate/safety limits
+(per-device request budget, tier session caps, ~100 global sessions, one walk
+in flight per device), the template compile-time series-budget gate and the
+canonical polling failure-suite additions. The final per-acceptance-criterion
+coverage table is §15. **No M10 UI and no alert engine exist or are claimed.**
+P2-AC-14 is satisfied for scheduled ICMP (on-demand checks remain the M9
+deferral), P2-AC-15 (SNMP client/templates/fixtures/no SET), P2-AC-16 (counter
+correctness; audited ifIndex rebinding needs the M10 interface model),
+P2-AC-17 (adaptive scheduling; criticality has no operator-facing source yet),
+P2-AC-18 (safety limits, with the CPU guard scoped to packs that expose
+hrProcessorLoad), P2-AC-19 (credential use flow; `credential.use` audit
+deferred) and P2-AC-20 (poll health + classification + API; events/UI views are
+M11/M10) are satisfied for the recorded scope. The P2-AC-11 compile-time
+template budget clause is closed by §14.3.
 
 References: `PHASE_2_SPEC.md` M9 deliverables + P2-AC-14/17/19/20; canonical
 `docs/07 §12.2-12.4/§12.7` (ICMP requirements, tiers, failure modes),
@@ -35,7 +41,7 @@ equivalents; `M7_EVIDENCE.md` (credentials resolver/vault) and `M8_EVIDENCE.md`
 | **S1** | Poll targets in the signed bundle; collector scheduler + ICMP prober; `net.icmp.*` samples through the existing spool/stream/ingest path; `poll_health` end-to-end; read API; tests/evidence | **done** |
 | **S2** | SNMP v2c/v3 client (GETBULK/GETNEXT, no SET), declarative core template pack, counter state machine, snmpsim fixtures, targets carry poll type + template inputs | **done** (see §12) |
 | **S3** | Credential materialization in signed bundles (per-session ECDH+AEAD, RAM-only, revocation) | **done** (see §13) |
-| **S4** | Full adaptive backoff/jitter/rate/safety caps (one walk in flight, per-tier sessions, ~100 sessions), failure-suite additions (poll outage, restart mid-poll) | hooks present (`BackoffPolicy`, per-device walk lock); policy fixed-tier |
+| **S4** | Full adaptive backoff/jitter/rate/safety caps (one walk in flight, per-tier sessions, ~100 sessions), CPU-impact guard, template compile-time series budget, failure-suite additions (target removal, credential removal, restart, rate-limit isolation, jitter bounds) | **done** (see §14; final AC table §15) |
 | M10/M11 | Device/interface UI, status rollups, alerts | untouched |
 
 ---
@@ -295,12 +301,17 @@ device_id parsing).
 
 - SNMP v2c/v3, templates, counter correctness — **closed in S2 (§12)**.
 - `mibgen` compilation of vendor MIBs into template skeletons + vendor packs,
-  sysObjectID-based template selection, and operator-loaded template packs —
-  future M9 work (§12.7/§12.8 record the core-pack-only limitation).
+  sysObjectID-based template selection, operator-loaded template packs —
+  future M9 work (§12.7/§12.8 record the core-pack-only limitation); the
+  compile-time series-budget gate they must pass is now live (§14.3).
 - Credential materialization in signed bundles — **closed in S3 (§13)**;
   `credential.use` audit events remain deferred (see §13.7).
-- Adaptive doubling/jitter, safety caps (one walk in flight,
-  ≤300 req/min, session caps), failure-suite additions — S4.
+- Adaptive doubling/jitter, safety caps (one walk in flight, ≤300 req/min,
+  session caps), CPU-impact guard, template compile-time budget, failure-suite
+  additions — **closed in S4 (§14)**.
+- On-demand check endpoints (P2-AC-14 wording), server-pushed schedules/jitter
+  seeds (`poll_schedules`), v3 engine-ID caching/session pooling, audited
+  ifIndex rebinding — still deferred (§14.7).
 - Device/interface UI, status rollups — M10; alerts/events — M11; dashboards —
   M12.
 
@@ -792,3 +803,218 @@ cross-tenant isolation, tamper rejection).
   `tests/integration/m9s3_credentials_test.go`,
   `tests/integration/m3_collector_test.go` (resolver option).
 - Docs: this file.
+
+---
+
+## 14. M9-S4 — adaptive scheduling, safety limits, failure-suite completion
+
+**Status: COMPLETE (this section).** The collector engine now adapts per-target
+cadence on failures (doubling to the canonical 15-minute ceiling, 5 minutes for
+critical devices), re-checks quickly after recovery, steps down under
+agent-reported CPU pressure, jitters every interval ±10%, enforces per-device
+request budgets and tier/global SNMP session ceilings, refuses over-budget
+templates at compile time, and ships the canonical polling failure cases. The
+final P2-AC-14..20 status table is §15.
+
+### 14.1 Adaptive scheduling (P2-AC-17)
+
+Canonical references: docs/07 §12.3 (failure doubling to 15 min; critical
+devices 5 min; recovery resets fast), docs/07 §12.4 (tier cadences; step
+cadence down on CPU-stress signals; rapid re-check on recovery), docs/06 §9.8
+(all schedules jittered ±10%), docs/06 §10.4 (engine-level 30s→60s→300s),
+docs/15 §27 (ceilings e.g. 15 min; critical 5 min; queue overflow = skip +
+count).
+
+| Rule | Implementation | Constants |
+|---|---|---|
+| Failure doubling | `AdaptiveBackoff.NextIntervalFor`: `base × 2^consecutive_failures`, clamped to the ceiling | `BackoffCeiling` 15 min; `CriticalBackoffCeiling` 5 min |
+| Recovery | first success after a failure streak schedules `min(base, 30 s)` once, then the tier cadence resumes; failure counter resets | `RecoveryRecheckMax` 30 s |
+| CPU-stress step-down | consecutive polls with `sys.cpu.util` (hrProcessorLoad) at/above the guard double the cadence per step, same ceiling, recorded as success + `cpu_pressure`; clearing the streak gets the recovery re-check | `DefaultCPUGuardPercent` 80 (canonical silent; documented choice) |
+| Jitter | every computed interval ±10% through the injectable `RandSource` (production math/rand/v2; tests inject fixed/sequence sources) | `JitterPercent` 10 |
+| Engine ladder | when **every** probe of a Step cycle fails, the engine failure streak floors the next wait with 30s → 60s → 300s; any success resets; floors never shorten a wait; `ApplyTargets` still wakes the engine immediately | `EngineBackoffFloor/Mid/Cap` |
+| S1 hook preserved | `BackoffPolicy` is unchanged; the engine prefers the richer `AdaptiveBackoffPolicy` (`NextIntervalFor(BackoffContext)`) and falls back to `NextInterval`; `Config.Backoff` still defaults to `FixedBackoff` (S1-S3 tests untouched) | — |
+| Collector autonomy | schedules stay collector-local: `Engine.Run` steps the last applied signed policy; the spool buffers during server outages (T2/T10) | docs/06 §9.8 |
+
+The `BackoffContext` also carries `Critical` (default false — see limitation
+14.6.1) and `Recovered`. Health records keep `consecutive_failures` and gain
+the `cpu_pressure` success class (the same pattern as `template_drift`) so
+M11/M12 can alert without treating a healthy device as down.
+
+### 14.2 Rate and safety limits (P2-AC-18)
+
+| Limit | Value | Enforcement |
+|---|---|---|
+| One walk in flight per device | — | `snmpClient` mutex serializes walks; the scheduler also reserves the target; unit-pinned |
+| Per-device request budget | standard 300/min (canonical docs/07 §12.3); fast 300; slow 120; inventory 60 (canonical silent on these profiles; conservative documented choices) | sliding 60 s window per device behind `RequestLimiter`; **every** GET and walk RPC consumes one slot before the wire; exhaustion aborts the walk with `ErrSNMPBudgetExceeded` → poll health `rate_limited` (failure, backs off); denied requests are not recorded |
+| Per-device session caps by tier | fast 1, standard 2, slow 2 (canonical docs/07 §12.3); inventory 1 (documented) | `SessionLimiter.Acquire` before building the client; over-cap probes are skipped + counted (`rate_limited`), never queued (docs/15 §27) |
+| Global concurrent SNMP sessions | ~100 (canonical docs/07 §12.3, docs/15 §27) | same limiter, collector-wide |
+| Device-CPU impact guard | hrProcessorLoad ≥ 80 % (documented conservative; canonical silent) | `Result.CPULoadHigh` → cadence step-down + `cpu_pressure` health class (docs/07 §12.7 "auto-step cadence + event"; the event surface today is poll health + logs, M11 wires alerting) |
+
+Budgets, counters and the limiter live in the per-device prober state and are
+released when the device's last SNMP target disappears (`TargetRemoved`), so
+removed devices leak nothing and returning devices start clean.
+
+### 14.3 Template compile-time series-budget gate (P2-AC-11 clause)
+
+The M8 deferral ("template compile-time budget check → M9") is closed:
+
+- `SNMPTemplate.EstimatedSeries()` implements the canonical estimate
+  (docs/07 §12.2 "worst-case series (interfaces × metrics + table rows)";
+  docs/08 §13.3 estimation check): every emitting scalar counts once; every
+  emitting table column counts the declared `max_rows` of its most specific
+  table walk root.
+- `series_budget` is per-template configurable and defaults to the canonical
+  **250 series/device** (docs/08 §13.3, adopted by PHASE_2_SPEC consistency
+  item 2 and enforced at ingest by M8).
+- Validation **fails loudly**: a template whose estimate exceeds its budget is
+  rejected at load (`LoadSNMPTemplates`), a table with emitting columns but no
+  `max_rows` is rejected, and `NewSNMPProber` panics on a broken embedded pack
+  rather than silently truncating series at runtime.
+- Core pack estimates: `core/system` 1, `core/if-mib` 7 × 25 = 175 (25 =
+  canonical site average interfaces, docs/07 §12.8), `core/host-resources`
+  64 × 1 = 64 (documented CPU ceiling); every kind's selected total ≤ 250.
+- The CI gate test `TestM9S4TemplateSeriesBudgetGate` runs in
+  `go test ./internal/...` (the CI `build-test` job), pinning the estimates and
+  the per-kind totals; `TestTemplateOverBudgetRejectedLoudly` proves a synthetic
+  400-series template is rejected and only compiles with an explicit
+  `series_budget` override (which does not raise the M8 ingest cap — that stays
+  authoritative and quarantine-based).
+
+### 14.4 Failure-suite additions (M9 verification list)
+
+New integration scenarios in `tests/integration/m9s4_failure_test.go`, all
+against the containerized DB, the pinned snmpsim fixture and the real
+spool → gRPC → ingest path:
+
+| Test | Scenario | Proves |
+|---|---|---|
+| `TestM9S4BackoffCadenceAndRecovery` | fast target: 3 timeouts then successes | poll_health shows failures 1/2/3 then 0/0 with observed cadence 60 s → 120 s → 240 s → **30 s rapid re-check**; no early wake |
+| `TestM9S4TargetRemovedMidRunAndUnreachable` | unreachable management IP + a target removed mid-run, then re-added | timeout/unreachable classification and backoff; removal stops probes with no stale schedule; counter state reseeds on return (no false rates) |
+| `TestM9S4CredentialRemovedMidRunBackoff` | S3 materialized credential removed mid-run (bundle without material), then restored | fail-closed `credential_missing`, cadence doubling, recovery re-check; RAM-only removal path unchanged |
+| `TestM9S4RestartResetsPollAndCounterState` | collector restart (new engine + prober, same clock) | fresh schedule due immediately (no stale next-run), counter baselines reseed (first poll emits no rates), rates resume; zero failure health across the restart |
+| `TestM9S4RateLimitDoesNotStarveTargets` | saturated table-walk device + light device on one prober | `rate_limited` per-device shedding while the other target keeps succeeding |
+| `TestM9S4JitterBoundsObserved` | scripted RNG at 0 and 0.9999 | intervals land exactly at 0.9× and inside 1.1×, and the scheduler wakes exactly at the jittered time |
+
+T1–T10 (`TestFailureSuite`), M8, M7 and all M9 S1/S2/S3 suites stay green
+(§14.5).
+
+### 14.5 Verification (observed 2026-10-01)
+
+Environment: Windows 11 dev host, Docker Desktop 29.8.1 (WSL2), pinned
+TimescaleDB 2.30.1-pg18 + snmpsim fixtures (testcontainers), Go 1.27.1 local
+toolchain, golangci-lint v2.14.0.
+
+| Command | Result |
+|---|---|
+| `go build ./...` | pass (Windows) |
+| `GOOS=linux GOARCH=amd64 go build ./...` / `arm64` | pass |
+| `go test ./internal/... -count=1` | pass (all packages; new backoff/rate/limits/budget tests included) |
+| `go test ./tests/integration/ -run '^TestM9' -count=1 -v` | **pass, 22/22** (S1 6, S2 4, S3 6, S4 6) |
+| `go test ./tests/integration/ -count=1` | **pass, full suite (244.8 s)** — T1–T10 (`TestFailureSuite`), M8, M7, M9 all four slices |
+| `go test ./tests/contract/... -count=1` | pass |
+| `gofmt -l internal cmd tests` | empty |
+| `golangci-lint run --timeout 10m ./...` (v2.14.0, docker) | **0 issues** |
+| Proto/gen | untouched by S4 (no `buf` gate needed; `go build ./gen/...` covered by `go build ./...`) |
+
+New unit tests: `internal/collector/poll/backoff_test.go` (jitter bounds and
+midpoint, doubling/ceilings, critical ceiling, recovery re-check, CPU-pressure
+steps, engine ladder, observed cadence via the engine, ladder floor + reset,
+fixed-backoff compatibility), `rate_test.go` (per-profile budgets, sliding
+window, tier/global session caps incl. idempotent release, budget-exceeded
+classification, one-walk-in-flight), `snmp_limits_test.go` (CPU guard flag and
+threshold, session-ceiling skip, per-device budget isolation, window recovery),
+`snmp_template_budget_test.go` (core-pack gate + pinned estimates, over-budget
+rejection, override, max_rows requirement).
+
+### 14.6 Design decisions and limitations
+
+1. **Criticality has no operator-facing source.** `poll.Target.Critical` is
+   honored end to end in the collector (5-minute ceiling unit-tested), but the
+   signed bundle carries no criticality field in Phase 2 and the server has no
+   critical flag/column, so production targets are non-critical until that
+   source is designed (M10+). Recorded rather than inventing a heuristic.
+2. **CPU guard scope.** The guard fires when the selected packs produce
+   `sys.cpu.util`; the core pack collects hrProcessorLoad for host/server kinds
+   (walking HOST-RESOURCES on switches would classify missing tables as drift).
+   Network gear therefore gets the failure-doubling and rate limits but not the
+   CPU step-down yet; extending template selection is template work, not engine
+   work. Threshold 80 % is a documented conservative choice (canonical silent).
+3. **`rate_limited` is a new failure class** (additive string in the existing
+   poll_health free-text column), so saturated devices show up and back off;
+   this is load shedding, not a device fault, and is recorded as such.
+4. **Sliding-window budget** (not a token bucket) so "≤ N requests/min" is
+   strict over any 60 s window and deterministic under the injected clock.
+5. **Budget window is in RAM**; a restart clears it. The first minute after a
+   restart could therefore admit a full fresh budget for a device that had just
+   been saturated (one-minute window, conservative direction not guaranteed
+   across restart). Counters are likewise RAM-only by design.
+6. **Engine ladder is for collector-wide outage cycles** (all probes of a
+   cycle failed). Mixed cycles rely on per-target backoff; the ladder only
+   floors waits and never shortens one.
+7. **Jitter seeds are not persisted**: the collector recomputes jitter at each
+   reschedule; no `jitter_seed` field is pushed yet (the docs/15 §27 schedule
+   entry with jitter_seed belongs to server-side schedule push).
+8. **Session pooling / v3 engine-ID caching remain unbuilt** (one client per
+   probe). The session ceilings and budgets are enforced regardless, so the
+   safety properties hold; pooling is a performance refinement.
+
+### 14.7 Deferred (explicit, S4 remainder)
+
+- On-demand check endpoints with idempotency keys (P2-AC-14 "scheduled and
+  on-demand runs") — the remaining M9 deliverable/Step 12.
+- Operator-facing device criticality source (5-minute ceiling wiring).
+- Server-side schedule push (`poll_schedules`, jitter seeds, per-site target
+  assignment) — future server orchestrator work.
+- v3 engine-ID caching and SNMP session pooling.
+- Audited ifIndex rebinding + the interfaces row association — M10 (the series
+  model still has no interface FK; ifIndex is already never the identity).
+- `credential.use` audit events — M10/M11 (unchanged from §13.7).
+- Alert/event wiring and UI views for `cpu_pressure` / `rate_limited` /
+  quarantine — M10/M11/M12.
+
+### 14.8 Files changed (M9-S4)
+
+- Collector engine: `internal/collector/poll/backoff.go` (new:
+  `AdaptiveBackoff`, `BackoffContext`, jitter, engine ladder),
+  `rate.go` (new: per-profile budgets, `RequestLimiter`, `SessionLimiter`),
+  `scheduler.go` (adaptive hook, recovery/pressure state, engine failure
+  ladder floor, health `cpu_pressure`), `poll.go` (`Target.Critical`,
+  `rate_limited`/`cpu_pressure` classes, `sys.cpu.util` key),
+  `prober.go` (`Result.CPULoadHigh`), `snmp.go` (budget gate per RPC,
+  `ErrSNMPBudgetExceeded`, classification), `snmp_prober.go` (session caps,
+  per-device limiter, CPU guard threshold, config seams),
+  `snmp_template.go` (series estimate + budget validation, `max_rows`),
+  `templates/core/{ifmib,hostresources}.yaml` (`max_rows`).
+- Collector wiring: `cmd/argus-collector/run.go` (`AdaptiveBackoff`).
+- Tests: `internal/collector/poll/{backoff_test.go,rate_test.go,
+  snmp_limits_test.go,snmp_template_budget_test.go}` (new),
+  `snmp_template_test.go` (fixtures declare `max_rows`);
+  `tests/integration/m9s4_failure_test.go` (new).
+- Docs: this file.
+
+---
+
+## 15. Final P2-AC-14..20 coverage and M9 gate readiness
+
+Honest per-criterion status across all four slices. "Met" means implemented,
+tested and evidenced here; every exception is named.
+
+| AC | Status | Notes / evidence |
+|---|---|---|
+| P2-AC-14 | **Met for scheduled runs; on-demand deferred** | ICMP availability/loss/RTT from policy targets through spool/stream/ingest (§2-§4, §8); raw-socket + unprivileged fallback, RUNBOOK §17; scheduled cadence §14.1. On-demand check endpoints (idempotency-keyed) are explicitly the remaining M9 deliverable (§14.7) |
+| P2-AC-15 | **Met** | v2c (warning posture) + v3 authPriv SHA-2/AES (§12.1-12.2); core templates; pinned snmpsim fixtures; GETBULK 10-25 + GETNEXT + TooBig fallback; 2 s / 2 retries; no SET, client-surface pinned (§12.1) |
+| P2-AC-16 | **Met except audited ifIndex rebinding** | wrap/reset/reboot/discontinuity reseed, false-spike guard, fixture matrix (§12.3-12.4). ifIndex is never the identity, but the interfaces-row association + automatic audited rebinding need the M10 interface model (no interface FK in the series schema today; §12.7.2) |
+| P2-AC-17 | **Met with one documented caveat** | tiers fast 30 s / standard 60 s / slow 5-15 min / inventory 6-24 h; failure doubling to 15 min (5 min critical); engine 30/60/300; ±10% jitter; collector-local autonomy (§14.1). Caveat: no operator-facing criticality source yet, so the 5-min ceiling is mechanism-tested with `Target.Critical` default false (§14.6.1) |
+| P2-AC-18 | **Met** | one walk in flight; ≤ 300 req/min standard per-device budget (conservative profile constants); tier session caps (fast 1 / standard 2 / slow 2) and ~100 global sessions; CPU-impact guard via hrProcessorLoad with the documented 80 % threshold (scope: packs exposing the metric, §14.6.2); deterministic unit tests + failure test §14.4 |
+| P2-AC-19 | **Met except `credential.use` audit** | signed-bundle delivery, per-session ECDH+AEAD, RAM-only disk/log scans, revocation/binding removal fail-closed, server-side bindings (§13). The canonical use-audit row stays deferred (§13.7.7) |
+| P2-AC-20 | **Met except events/UI views** | `latency_ms`/`outcome`/`error_class`/`consecutive_failures` recorded and API-surfaced; classification timeout/auth_failure/walk_truncation/template_drift plus `credential_missing`/`credential_invalid` (§12.1, §13) and now `rate_limited`/`cpu_pressure` (§14.1-14.2); `consecutive_failures` drives backoff (§14.4). Platform events are M11 and the collector health views are M10/M12 |
+| P2-AC-11 clause | **Closed** | compile-time template series-budget gate (§14.3); the other P2-AC-11 guards landed in M8 (§4 of M8_EVIDENCE) and quarantine UI surfacing remains M10 |
+
+**M9 gate readiness.** All M9 acceptance criteria are met for the recorded
+scope; the only open items are explicitly deferred and outside S4's boundary
+(on-demand checks, M10/M11/M12 surfaces, criticality source, engine-ID
+caching). T1-T10 plus the full integration, contract and unit suites are green
+and lint/gofmt/builds are clean (§14.5), so M9 is ready for the user-signed
+gate review. Nothing in this slice touched RLS, ack/idempotency, credential
+RAM-only semantics or emitted SNMP SET.
+

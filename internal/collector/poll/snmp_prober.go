@@ -28,14 +28,37 @@ type SNMPProberConfig struct {
 	// interval math (defaults to time.Now). The scheduler's Clock drives
 	// cadence; this keeps counter math deterministic under tests.
 	Now func() time.Time
+	// Sessions enforces the per-device tier caps and the global concurrent
+	// session ceiling (M9-S4, docs/07 §12.3). Defaults to the canonical
+	// limiter (~100 global).
+	Sessions *SessionLimiter
+	// RequestBudget returns the per-device requests-per-minute budget for a
+	// tier (M9-S4); defaults to RequestsPerMinute.
+	RequestBudget func(tier string) int
+	// CPUGuardPercent is the hrProcessorLoad threshold for the device-CPU
+	// impact guard (M9-S4); 0 takes DefaultCPUGuardPercent.
+	CPUGuardPercent int
 }
 
-// snmpDeviceState is the collector-side counter state, per device (S4 adds
-// persistence and rate budgets; S2 keeps it in memory like scheduler state).
+// DefaultCPUGuardPercent is the M9-S4 hrProcessorLoad guard threshold: a
+// device whose agent reports at or above this one-minute average CPU load has
+// its cadence stepped down (docs/07 §12.7 "if hrProcessorLoad rises during
+// polls, auto-step cadence + event"). Canonical gives no number; the
+// conservative documented choice is 80%.
+const DefaultCPUGuardPercent = 80
+
+// snmpDeviceState is the collector-side counter state, per device (S4 adds the
+// per-device request budget; both stay in memory like scheduler state and are
+// released when the device's last SNMP target disappears).
 type snmpDeviceState struct {
 	sysUpRaw  uint64
 	sysUpSeen bool
 	rows      map[string]*snmpRowState
+	// limiter is the per-device sliding-window request budget (docs/07 §12.3);
+	// budget records the tier budget it was built for so a tier change
+	// rebuilds the window.
+	limiter *RequestLimiter
+	budget  int
 }
 
 type snmpRowState struct {
@@ -50,6 +73,9 @@ type SNMPProber struct {
 	cfg       SNMPProberConfig
 	templates *SNMPTemplateSet
 	log       *snmpLogger
+	sessions  *SessionLimiter
+	budget    func(tier string) int
+	cpuGuard  int
 
 	mu      sync.Mutex
 	devices map[string]*snmpDeviceState
@@ -73,16 +99,29 @@ func NewSNMPProber(cfg SNMPProberConfig) *SNMPProber {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Sessions == nil {
+		cfg.Sessions = NewSessionLimiter(DefaultGlobalSessionCap)
+	}
+	if cfg.RequestBudget == nil {
+		cfg.RequestBudget = RequestsPerMinute
+	}
+	if cfg.CPUGuardPercent <= 0 {
+		cfg.CPUGuardPercent = DefaultCPUGuardPercent
+	}
 	return &SNMPProber{
 		cfg:       cfg,
 		templates: cfg.Templates,
 		log:       newSNMPLogger(cfg.Logger),
+		sessions:  cfg.Sessions,
+		budget:    cfg.RequestBudget,
+		cpuGuard:  cfg.CPUGuardPercent,
 		devices:   make(map[string]*snmpDeviceState),
 	}
 }
 
-// TargetRemoved implements TargetRemovedHook: counter state for a device whose
-// last SNMP target disappeared from the policy is dropped.
+// TargetRemoved implements TargetRemovedHook: counter and request-budget
+// state for a device whose last SNMP target disappeared from the policy is
+// dropped (a returning target reseeds a fresh budget).
 func (p *SNMPProber) TargetRemoved(deviceID, pollType string) {
 	if pollType != "" && NormalizePollType(pollType) != PollSNMP {
 		return
@@ -98,6 +137,14 @@ func (p *SNMPProber) Probe(ctx context.Context, target Target) Result {
 	res := Result{PollType: PollSNMP}
 	finish := func() Result {
 		res.Latency = time.Since(start)
+		if res.Reachable() && len(res.SnmpSamples) > 0 {
+			for _, s := range res.SnmpSamples {
+				if s.MetricKey == MetricSysCPUUtil && s.Value >= float64(p.cpuGuard) {
+					res.CPULoadHigh = true
+					break
+				}
+			}
+		}
 		return res
 	}
 	// Cancellation is checked before dialing; in-flight RPCs are bounded by
@@ -127,8 +174,24 @@ func (p *SNMPProber) Probe(ctx context.Context, target Target) Result {
 		p.log.warnV2c(target.DeviceID)
 	}
 
+	// Session ceilings (docs/07 §12.3): per-device tier cap and the global
+	// concurrent session cap. At the cap the probe is skipped and accounted,
+	// never queued unboundedly (docs/15 §27).
+	release, acquired := p.sessions.Acquire(target.DeviceID, target.Tier)
+	if !acquired {
+		res.ErrorClass = ErrorRateLimited
+		if p.log != nil && p.log.log != nil {
+			p.log.log.Warn("SNMP session ceiling reached; poll skipped",
+				"device_id", target.DeviceID, "tier", target.Tier)
+		}
+		return finish()
+	}
+	defer release()
+
 	packs := p.templates.Select(target.Kind)
-	client, err := p.cfg.ClientFactory(target.MgmtIP, creds, p.cfg.Client)
+	cfg := p.cfg.Client
+	cfg.Limiter = p.limiterFor(target.DeviceID, target.Tier)
+	client, err := p.cfg.ClientFactory(target.MgmtIP, creds, cfg)
 	if err != nil {
 		res.ErrorClass = classifySNMPErrorClass(err)
 		return finish()
@@ -401,6 +464,21 @@ func (p *SNMPProber) deviceStateLocked(deviceID string) *snmpDeviceState {
 		p.devices[deviceID] = st
 	}
 	return st
+}
+
+// limiterFor returns the device's per-device request budget, rebuilding it
+// when the tier (and therefore the budget) changed. The budget persists across
+// probes; TargetRemoved releases it with the rest of the device state.
+func (p *SNMPProber) limiterFor(deviceID, tier string) *RequestLimiter {
+	budget := p.budget(tier)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.deviceStateLocked(deviceID)
+	if st.limiter == nil || st.budget != budget {
+		st.limiter = NewRequestLimiter(budget, p.cfg.Now)
+		st.budget = budget
+	}
+	return st.limiter
 }
 
 // resolveIdentity picks the first non-empty value of each identity chain and

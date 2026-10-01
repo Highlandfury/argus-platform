@@ -9,8 +9,9 @@
 //     declarative core templates, counter state machine (wrap/reset/reboot/
 //     discontinuity), snmpsim-backed tests.
 //   - S3: credential materialization behind CredentialSource.
-//   - S4 adds adaptive backoff profiles, jitter and rate/safety caps through
-//     the BackoffPolicy hook (present here) and Config limits.
+//   - S4: adaptive backoff profiles, ±10% jitter, recovery re-check, CPU
+//     guard, per-device request budgets and session ceilings through the
+//     BackoffPolicy hook (present here) and Config limits.
 package poll
 
 import (
@@ -81,6 +82,12 @@ type Target struct {
 	// Kind is the device kind from inventory; it selects SNMP templates
 	// (M9-S2). Empty is treated as unknown (system template only).
 	Kind string
+	// Critical lowerers the adaptive backoff ceiling to 5 min (canonical
+	// docs/07 §12.3: "critical devices 5 min ceiling"). The collector honors
+	// the flag; Phase 2 has no operator-facing criticality source in the
+	// signed bundle yet, so production targets are non-critical until that
+	// source lands (documented in M9_EVIDENCE §S4).
+	Critical bool
 }
 
 // Key is the engine's scheduling identity. One device may carry both an ICMP
@@ -164,7 +171,10 @@ const (
 // table walk terminated early or the agent stopped making progress) and
 // template_drift (the device answered but an expected table/metric produced no
 // data). credential_missing/credential_invalid cover the seam M9-S3 fills with
-// materialized credentials.
+// materialized credentials. M9-S4 adds rate_limited (the per-device request
+// budget or a session ceiling was hit; skip + count, docs/07 §12.3) and
+// cpu_pressure (success outcome: the agent-reported hrProcessorLoad crossed
+// the guard threshold, docs/07 §12.7).
 const (
 	ErrorNone              = ""
 	ErrorTimeout           = "timeout"
@@ -176,6 +186,8 @@ const (
 	ErrorTemplateDrift     = "template_drift"
 	ErrorCredentialMissing = "credential_missing" //nolint:gosec // poll-health class string, not a secret
 	ErrorCredentialInvalid = "credential_invalid" //nolint:gosec // poll-health class string, not a secret
+	ErrorRateLimited       = "rate_limited"
+	ErrorCPUPressure       = "cpu_pressure"
 )
 
 // Poll types.
@@ -199,3 +211,8 @@ const (
 	UnitMS      = "ms"
 	UnitPercent = "percent"
 )
+
+// MetricSysCPUUtil is the core SNMP pack's HOST-RESOURCES hrProcessorLoad
+// series key (M9-S2). M9-S4's device-CPU impact guard (docs/07 §12.7) checks
+// its values against a threshold before stepping the cadence down.
+const MetricSysCPUUtil = "sys.cpu.util"

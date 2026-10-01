@@ -58,6 +58,10 @@ var (
 	// ErrSNMPTruncated signals a walk that did not complete (non-increasing
 	// OIDs, no progress, or the request cap).
 	ErrSNMPTruncated = errors.New("snmp: walk truncated")
+	// ErrSNMPBudgetExceeded signals that the per-device request budget
+	// (docs/07 §12.3 rate safety) is exhausted: the request is skipped and
+	// accounted, never queued.
+	ErrSNMPBudgetExceeded = errors.New("snmp: request budget exceeded")
 	// ErrSNMPUnreachable covers socket/transport errors other than timeouts.
 	ErrSNMPUnreachable = errors.New("snmp: unreachable")
 )
@@ -274,6 +278,11 @@ type ClientConfig struct {
 	Timeout        time.Duration
 	Retries        int
 	MaxRepetitions int
+	// Limiter is the per-device request budget (M9-S4, docs/07 §12.3). Every
+	// RPC issued by the client (a GET or one walk request) consumes one slot;
+	// exhaustion aborts with ErrSNMPBudgetExceeded. nil disables the gate
+	// (fixture/dev factories that ignore the field).
+	Limiter *RequestLimiter
 }
 
 func (c ClientConfig) withDefaults() ClientConfig {
@@ -339,19 +348,24 @@ func NewGosnmpClient(target netip.Addr, creds SNMPCredentials, cfg ClientConfig)
 	if err := g.Connect(); err != nil {
 		return nil, classifySNMPError(err)
 	}
-	return &snmpClient{session: &gosnmpSession{conn: g}, maxRepetitions: cfg.MaxRepetitions}, nil
+	return &snmpClient{session: &gosnmpSession{conn: g}, maxRepetitions: cfg.MaxRepetitions, limiter: cfg.Limiter}, nil
 }
 
-// snmpClient wraps a session with the walk policy (bulk sizing, fallback) and
-// the one-walk-in-flight-per-device guarantee (canonical docs/07 §12.3).
+// snmpClient wraps a session with the walk policy (bulk sizing, fallback),
+// the one-walk-in-flight-per-device guarantee and the per-device request
+// budget (canonical docs/07 §12.3).
 type snmpClient struct {
 	session        snmpSession
 	maxRepetitions int
+	limiter        *RequestLimiter
 	mu             sync.Mutex // serializes walks on this client/device
 }
 
 // Get implements SNMPClient.
 func (c *snmpClient) Get(oids []string) ([]SNMPVarBind, error) {
+	if !c.limiter.Allow() {
+		return nil, ErrSNMPBudgetExceeded
+	}
 	return c.session.Get(oids...)
 }
 
@@ -359,16 +373,23 @@ func (c *snmpClient) Get(oids []string) ([]SNMPVarBind, error) {
 func (c *snmpClient) Walk(rootOID string) ([]SNMPVarBind, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return walkOID(c.session, rootOID, c.maxRepetitions)
+	return walkOIDBudget(c.session, rootOID, c.maxRepetitions, c.limiter)
 }
 
 // Close implements SNMPClient.
 func (c *snmpClient) Close() error { return c.session.Close() }
 
-// walkOID walks one subtree. Strategy (canonical docs/07 §12.3): GETBULK with
-// max-repetitions; on a TooBig response halve the bulk size down to the
-// documented lower bound, then fall back to GETNEXT for the remainder.
+// walkOID walks one subtree without a request budget (M9-S2 call sites).
 func walkOID(s snmpSession, rootOID string, maxRepetitions int) ([]SNMPVarBind, error) {
+	return walkOIDBudget(s, rootOID, maxRepetitions, nil)
+}
+
+// walkOIDBudget walks one subtree. Strategy (canonical docs/07 §12.3):
+// GETBULK with max-repetitions; on a TooBig response halve the bulk size down
+// to the documented lower bound, then fall back to GETNEXT for the remainder.
+// Every RPC first passes the per-device budget gate: exceeding it aborts the
+// walk with ErrSNMPBudgetExceeded (partial results are returned).
+func walkOIDBudget(s snmpSession, rootOID string, maxRepetitions int, limiter *RequestLimiter) ([]SNMPVarBind, error) {
 	root := strings.TrimPrefix(strings.TrimSpace(rootOID), ".")
 	if root == "" {
 		return nil, errors.New("snmp: walk needs a root OID")
@@ -388,6 +409,9 @@ func walkOID(s snmpSession, rootOID string, maxRepetitions int) ([]SNMPVarBind, 
 	useBulk := true
 	reps := maxRepetitions
 	for requests := 0; requests < maxWalkRequests; requests++ {
+		if !limiter.Allow() {
+			return out, ErrSNMPBudgetExceeded
+		}
 		var (
 			vars []SNMPVarBind
 			err  error
@@ -590,7 +614,7 @@ func classifySNMPError(err error) error {
 	}
 	if errors.Is(err, ErrSNMPTimeout) || errors.Is(err, ErrSNMPAuthFailure) ||
 		errors.Is(err, ErrSNMPTooBig) || errors.Is(err, ErrSNMPTruncated) ||
-		errors.Is(err, ErrSNMPUnreachable) {
+		errors.Is(err, ErrSNMPBudgetExceeded) || errors.Is(err, ErrSNMPUnreachable) {
 		return err
 	}
 	if errors.Is(err, context.DeadlineExceeded) ||
@@ -635,6 +659,8 @@ func classifySNMPErrorClass(err error) string {
 		return ErrorAuthFailure
 	case errors.Is(err, ErrSNMPTruncated):
 		return ErrorWalkTruncation
+	case errors.Is(err, ErrSNMPBudgetExceeded):
+		return ErrorRateLimited
 	default:
 		return ErrorUnreachable
 	}

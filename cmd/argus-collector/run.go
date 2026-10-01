@@ -213,7 +213,12 @@ func cmdRun(args []string) int {
 			poll.PollICMP: poll.NewICMPProber(poll.ICMPConfig{}),
 			poll.PollSNMP: snmpProber,
 		}).WithLogger(logger),
-		Log: logger,
+		// M9-S4 adaptive scheduling (P2-AC-17): consecutive failures double
+		// the per-target cadence to the 15 min ceiling (critical devices
+		// 5 min), recovery gets a rapid re-check, hrProcessorLoad pressure
+		// steps the cadence down, and every interval is jittered ±10%.
+		Backoff: poll.AdaptiveBackoff{},
+		Log:     logger,
 		OnSample: func(s poll.Sample) {
 			select {
 			case sampleCh <- metrics.Sample{

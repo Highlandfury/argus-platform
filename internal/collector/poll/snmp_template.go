@@ -57,11 +57,17 @@ type SNMPColumn struct {
 	Dim     string  `yaml:"dim"`
 }
 
-// SNMPTable is one table walk.
+// SNMPTable is one table walk. MaxRows is the static worst-case row bound used
+// by the compile-time per-device series-budget check (P2-AC-11 clause
+// "template compile-time budget check rejects over-budget templates in CI",
+// PHASE_2_SPEC; docs/08 §13.3, docs/07 §12.2 "estimated-series budget per
+// template"). It is not a runtime limit: the ingest-time per-device cap (M8)
+// remains the hard guard.
 type SNMPTable struct {
 	Name     string `yaml:"name"`
 	Walk     string `yaml:"walk"`
 	Required bool   `yaml:"required"`
+	MaxRows  int    `yaml:"max_rows"`
 }
 
 // SNMPTemplate is one declarative pack. Tables are walked once per poll; rows
@@ -77,7 +83,17 @@ type SNMPTemplate struct {
 	Scalars     []SNMPColumn   `yaml:"scalars"`
 	Tables      []SNMPTable    `yaml:"tables"`
 	Columns     []SNMPColumn   `yaml:"columns"`
+	// SeriesBudget overrides the default per-device series budget this
+	// template may contribute (0 = DefaultSeriesBudget); the compile-time
+	// check rejects a template whose estimate exceeds it.
+	SeriesBudget int `yaml:"series_budget"`
 }
+
+// DefaultSeriesBudget is the canonical per-device series cap adopted by
+// PHASE_2_SPEC consistency item 2 (docs/08 §13.3; reconciles docs/11's "200
+// typical") and enforced at ingest by M8; templates are checked against it at
+// compile time.
+const DefaultSeriesBudget = 250
 
 // Emits reports whether a column produces a persisted metric series.
 func (c SNMPColumn) Emits() bool {
@@ -90,6 +106,76 @@ func (c SNMPColumn) EffectiveScale() float64 {
 		return 1
 	}
 	return c.Scale
+}
+
+// SeriesBudgetOrDefault returns the template's declared per-device series
+// budget, or the canonical default.
+func (t SNMPTemplate) SeriesBudgetOrDefault() int {
+	if t.SeriesBudget > 0 {
+		return t.SeriesBudget
+	}
+	return DefaultSeriesBudget
+}
+
+// EstimatedSeries returns the static worst-case per-device series this
+// template may produce: every emitting scalar counts once; every emitting table
+// column counts the declared MaxRows of its most specific table walk root
+// (docs/07 §12.2 "worst-case series (interfaces × metrics + table rows)";
+// docs/08 §13.5 estimation check). A column not under any declared table walk
+// counts once.
+func (t SNMPTemplate) EstimatedSeries() int {
+	n := 0
+	for _, c := range t.Scalars {
+		if c.Emits() {
+			n++
+		}
+	}
+	for _, c := range t.Columns {
+		if !c.Emits() {
+			continue
+		}
+		rows := 1
+		if idx := t.tableIndexFor(c.OID); idx >= 0 {
+			rows = t.Tables[idx].MaxRows
+			if rows < 1 {
+				rows = 1
+			}
+		}
+		n += rows
+	}
+	return n
+}
+
+// tableIndexFor returns the index of the table whose walk root is the longest
+// prefix of oid, or -1 when the column belongs to no declared table.
+func (t SNMPTemplate) tableIndexFor(oid string) int {
+	oid = strings.TrimPrefix(strings.TrimSpace(oid), ".")
+	best, bestLen := -1, -1
+	for i, tbl := range t.Tables {
+		root := strings.TrimPrefix(strings.TrimSpace(tbl.Walk), ".")
+		if root == "" {
+			continue
+		}
+		if oid != root && !strings.HasPrefix(oid, root+".") {
+			continue
+		}
+		if len(root) > bestLen {
+			best, bestLen = i, len(root)
+		}
+	}
+	return best
+}
+
+// tableEmittingColumnCount returns how many emitting columns a table
+// contributes (used by validation to require a row bound).
+func (t SNMPTemplate) tableEmittingColumnCount(idx int) int {
+	n := 0
+	for _, c := range t.Columns {
+		if c.Emits() && t.tableIndexFor(c.OID) == idx {
+			n++
+		}
+	}
+	return n
 }
 
 // SNMPTemplateSet is a loaded, validated collection of template packs.
@@ -149,6 +235,17 @@ func LoadSNMPTemplates(fsys fs.FS, dir string) (*SNMPTemplateSet, error) {
 // Packs returns the loaded packs (description/validation tests).
 func (s *SNMPTemplateSet) Packs() []SNMPTemplate { return s.packs }
 
+// EstimateForKind returns the static worst-case per-device series estimate of
+// every pack selected for a device kind. The M9-S4 CI gate asserts it stays
+// within the canonical per-device budget (docs/08 §13.3).
+func (s *SNMPTemplateSet) EstimateForKind(kind string) int {
+	total := 0
+	for _, p := range s.Select(kind) {
+		total += p.EstimatedSeries()
+	}
+	return total
+}
+
 // Select returns the packs that apply to a device kind. The system pack
 // (kinds ["*"]) applies everywhere; network gear gets IF-MIB; host/server
 // kinds get HOST-RESOURCES.
@@ -198,12 +295,15 @@ func validateSNMPTemplate(t *SNMPTemplate) error {
 			return err
 		}
 	}
-	for _, tbl := range t.Tables {
+	for i, tbl := range t.Tables {
 		if strings.TrimSpace(tbl.Walk) == "" {
 			return fmt.Errorf("template %s table %s needs a walk root", t.Name, tbl.Name)
 		}
 		if err := validateOID(tbl.Walk); err != nil {
 			return fmt.Errorf("template %s table %s: %w", t.Name, tbl.Name, err)
+		}
+		if t.tableEmittingColumnCount(i) > 0 && tbl.MaxRows < 1 {
+			return fmt.Errorf("template %s table %s has emitting columns but no max_rows for the series-budget check", t.Name, tbl.Name)
 		}
 	}
 	if len(t.Columns) > 0 && len(t.Tables) == 0 {
@@ -211,6 +311,9 @@ func validateSNMPTemplate(t *SNMPTemplate) error {
 	}
 	if len(t.Identity) > 0 && len(t.Columns) == 0 {
 		return fmt.Errorf("template %s declares identity but no columns", t.Name)
+	}
+	if est, budget := t.EstimatedSeries(), t.SeriesBudgetOrDefault(); est > budget {
+		return fmt.Errorf("template %s estimates %d series/device, over its series budget %d (raise series_budget only with an explicit operator override)", t.Name, est, budget)
 	}
 	return nil
 }
