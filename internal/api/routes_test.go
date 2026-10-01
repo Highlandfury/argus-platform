@@ -47,8 +47,8 @@ func TestInventoryRoutesDeclareCapabilityAndScope(t *testing.T) {
 			}
 		}
 	}
-	if inventory != 18 {
-		t.Fatalf("inventory routes = %d, want the 18 M7-S3 routes", inventory)
+	if inventory != 19 {
+		t.Fatalf("inventory routes = %d, want the 18 M7-S3 routes + 1 M9-S1 poll-health route", inventory)
 	}
 }
 

@@ -139,7 +139,11 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (EnrollResult, 
 			leaf.Serial, leaf.Fingerprint, leaf.NotBefore, leaf.NotAfter); err != nil {
 			return err
 		}
-		sp, err := s.ca.BuildSignedPolicy(1)
+		targets, err := listPolicyTargets(ctx, tx)
+		if err != nil {
+			return err
+		}
+		sp, err := s.ca.BuildSignedPolicyWithTargets(1, targets)
 		if err != nil {
 			return err
 		}
@@ -323,7 +327,11 @@ func (s *Service) ResyncPolicy(ctx context.Context, orgID, collectorID uuid.UUID
 		if err != nil {
 			return err
 		}
-		sp, err := s.ca.BuildSignedPolicy(current + 1)
+		targets, err := listPolicyTargets(ctx, tx)
+		if err != nil {
+			return err
+		}
+		sp, err := s.ca.BuildSignedPolicyWithTargets(current+1, targets)
 		if err != nil {
 			return err
 		}

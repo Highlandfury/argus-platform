@@ -36,7 +36,7 @@ var (
 	ErrCorruptRecord = errors.New("spool: corrupt record")
 	ErrTornTail      = errors.New("spool: torn tail")
 	ErrSpoolFull     = errors.New("spool: capacity exceeded and nothing droppable")
-	ErrEmptyBatch    = errors.New("spool: refusing to append an empty batch")
+	ErrEmptyBatch    = errors.New("spool: refusing to append a batch with no samples and no health records")
 )
 
 // encodeRecord frames one payload: [u32 len][u32 crc32c][payload].

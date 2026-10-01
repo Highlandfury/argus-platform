@@ -405,3 +405,13 @@ the db is healthy; the script is idempotent).
   [self-hosted, linux, x64, argus]` in `ci.yml` with `ubuntu-latest`.
 - Uninstall: `docker rm -f argus-runner` and remove the runner entry in Repo â†’
   Settings â†’ Actions â†’ Runners.
+
+**ICMP capability prerequisite (M9-S1, added 2026-10-01):** the polling engine
+pings with a raw ICMP socket when the process holds `CAP_NET_RAW`, and falls
+back to the Linux unprivileged ping socket (`net.ipv4.ping_group_range`) when
+it does not. Integration/CI hosts therefore need one of the two: grant the
+runner container `--cap-add NET_RAW` (or run it with the default Docker
+`ping_group_range` that covers the process GID). The internal test
+(`internal/collector/poll`, Linux-only) skips with the capability reason when
+neither is available; the dev compose collector service is granted `NET_RAW`
+explicitly.

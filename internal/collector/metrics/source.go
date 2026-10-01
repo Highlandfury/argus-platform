@@ -23,6 +23,9 @@ type Sample struct {
 	Value      float64
 	Ts         time.Time
 	Dimensions map[string]string
+	// DeviceID scopes the sample to a device (M9 polling); empty for the
+	// Phase-1 collector-local metrics.
+	DeviceID string
 }
 
 // Source yields one gauge value per read. Implementations own the state needed

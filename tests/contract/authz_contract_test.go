@@ -83,8 +83,8 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 		}
 		enforced[routeKey{rt.Method, rt.Path}] = authzMeta{Capability: rt.Capability, Scope: rt.Scope}
 	}
-	if inventoryCount != 18 {
-		t.Fatalf("inventory routes in registry = %d, want the 18 M7-S3 routes", inventoryCount)
+	if inventoryCount != 19 {
+		t.Fatalf("inventory routes in registry = %d, want the 18 M7-S3 routes + 1 M9-S1 poll-health route", inventoryCount)
 	}
 	if credentialCount != 6 {
 		t.Fatalf("credential routes in registry = %d, want the 6 M7-S4 routes", credentialCount)

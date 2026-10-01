@@ -10,6 +10,8 @@ import (
 	"math"
 	"time"
 
+	"github.com/google/uuid"
+
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
 	"github.com/argus-platform/argus/internal/modules/metrics"
 )
@@ -18,11 +20,22 @@ import (
 const (
 	// MaxBatchSamples mirrors ServerHello.max_batch_samples.
 	MaxBatchSamples = 5000
+	// MaxBatchHealth bounds poll-health records per batch (M9-S1; the
+	// collector batches at 500, the server ceiling is deliberately higher).
+	MaxBatchHealth = 1000
 	// TimestampTolerance is the ±7 day acceptance window for sample ts.
 	TimestampTolerance = 7 * 24 * time.Hour
 	// maxAbsValue is the sanity bound for non-percent units. Percent metrics
 	// are additionally range-checked to [0, 100].
 	maxAbsValue = 1e15
+	// maxLatencyMS bounds poll-health latency (1 day).
+	maxLatencyMS = 24 * 60 * 60 * 1000
+	// maxConsecutiveFailures bounds poll-health failure counters.
+	maxConsecutiveFailures = 1_000_000
+	// maxHealthClassLen bounds error_class storage (matches the DB check).
+	maxHealthClassLen = 100
+	// maxPollTypeLen bounds poll_type (icmp|snmp today, extensible).
+	maxPollTypeLen = 20
 )
 
 // RejectError is a permanent, machine-readable rejection. The Reason string is
@@ -35,19 +48,33 @@ type RejectError struct {
 func (e *RejectError) Error() string { return e.Reason + ": " + e.Detail }
 
 // ValidatedSample is one wire sample that passed validation, with dimensions
-// already canonicalized for series resolution.
+// already canonicalized for series resolution. DeviceID is uuid.Nil for the
+// Phase-1 collector-scoped series and set for M9 device-scoped samples.
 type ValidatedSample struct {
 	MetricKey string
 	Unit      string
 	Value     float64
 	Ts        time.Time
+	DeviceID  uuid.UUID
 	Canonical []byte
 	DimHash   int64
 }
 
-// ValidateBatch checks and normalizes a batch against the collector's current
-// policy allowlist. It returns either all validated samples or one permanent
-// rejection (the first failing sample).
+// ValidatedHealth is one poll-health record that passed validation (M9-S1).
+type ValidatedHealth struct {
+	DeviceID            uuid.UUID
+	PollType            string
+	LatencyMS           int
+	Outcome             string
+	ErrorClass          string
+	ConsecutiveFailures int
+	CheckedAt           time.Time
+}
+
+// ValidateBatch checks and normalizes the sample section of a batch against
+// the collector's current policy allowlist. It returns either all validated
+// samples or one permanent rejection (the first failing sample). Kept for the
+// Phase-1 callers/tests; the ingest path uses ValidateBatchPayload.
 func ValidateBatch(batch *collectorv1.MetricBatch, allowlist map[string]MetricDef, now time.Time) ([]ValidatedSample, *RejectError) {
 	if batch == nil {
 		return nil, &RejectError{"validation.batch_missing", "empty batch payload"}
@@ -55,10 +82,39 @@ func ValidateBatch(batch *collectorv1.MetricBatch, allowlist map[string]MetricDe
 	if batch.GetBatchSeq() <= 0 {
 		return nil, &RejectError{"validation.batch_seq_invalid", "batch_seq must be > 0"}
 	}
-	samples := batch.GetSamples()
-	if len(samples) == 0 {
+	if len(batch.GetSamples()) == 0 {
 		return nil, &RejectError{"validation.batch_empty", "batch has no samples"}
 	}
+	return validateSamples(batch.GetSamples(), allowlist, now)
+}
+
+// ValidateBatchPayload checks a whole MetricBatch (M9-S1): samples against the
+// policy allowlist, poll-health records against the poll-health bounds. A
+// batch may carry samples, health, or both; it must carry at least one.
+func ValidateBatchPayload(batch *collectorv1.MetricBatch, allowlist map[string]MetricDef, now time.Time) ([]ValidatedSample, []ValidatedHealth, *RejectError) {
+	if batch == nil {
+		return nil, nil, &RejectError{"validation.batch_missing", "empty batch payload"}
+	}
+	if batch.GetBatchSeq() <= 0 {
+		return nil, nil, &RejectError{"validation.batch_seq_invalid", "batch_seq must be > 0"}
+	}
+	if len(batch.GetSamples()) == 0 && len(batch.GetHealth()) == 0 {
+		return nil, nil, &RejectError{"validation.batch_empty", "batch has no samples and no health records"}
+	}
+	samples, rej := validateSamples(batch.GetSamples(), allowlist, now)
+	if rej != nil {
+		return nil, nil, rej
+	}
+	health, rej := validateHealth(batch.GetHealth(), now)
+	if rej != nil {
+		return nil, nil, rej
+	}
+	return samples, health, nil
+}
+
+// validateSamples normalizes the sample list (empty allowed for health-only
+// batches at the payload level).
+func validateSamples(samples []*collectorv1.MetricSample, allowlist map[string]MetricDef, now time.Time) ([]ValidatedSample, *RejectError) {
 	if len(samples) > MaxBatchSamples {
 		return nil, &RejectError{"validation.batch_too_large",
 			fmt.Sprintf("batch has %d samples, limit is %d", len(samples), MaxBatchSamples)}
@@ -112,13 +168,84 @@ func ValidateBatch(batch *collectorv1.MetricBatch, allowlist map[string]MetricDe
 				return nil, &RejectError{"validation.dimensions_invalid", fmt.Sprintf("sample %d: %v", i, err)}
 			}
 		}
+		var deviceID uuid.UUID
+		if raw := s.GetDeviceId(); raw != "" {
+			id, err := uuid.Parse(raw)
+			if err != nil {
+				return nil, &RejectError{"validation.device_id_invalid",
+					fmt.Sprintf("sample %d: device_id %q is not a UUID", i, raw)}
+			}
+			deviceID = id
+		}
 		out = append(out, ValidatedSample{
 			MetricKey: s.GetMetricKey(),
 			Unit:      unit,
 			Value:     value,
 			Ts:        sampleTime.UTC(),
+			DeviceID:  deviceID,
 			Canonical: canonical,
 			DimHash:   dimHash,
+		})
+	}
+	return out, nil
+}
+
+// validateHealth normalizes the poll-health section (M9-S1).
+func validateHealth(records []*collectorv1.PollHealth, now time.Time) ([]ValidatedHealth, *RejectError) {
+	if len(records) > MaxBatchHealth {
+		return nil, &RejectError{"validation.health_too_many",
+			fmt.Sprintf("batch has %d health records, limit is %d", len(records), MaxBatchHealth)}
+	}
+	out := make([]ValidatedHealth, 0, len(records))
+	oldest := now.Add(-TimestampTolerance)
+	newest := now.Add(TimestampTolerance)
+	for i, h := range records {
+		id, err := uuid.Parse(h.GetDeviceId())
+		if err != nil {
+			return nil, &RejectError{"validation.health_device_invalid",
+				fmt.Sprintf("health %d: device_id %q is not a UUID", i, h.GetDeviceId())}
+		}
+		pollType := h.GetPollType()
+		if pollType == "" || len(pollType) > maxPollTypeLen {
+			return nil, &RejectError{"validation.health_poll_type_invalid",
+				fmt.Sprintf("health %d: poll_type %q is empty or too long", i, pollType)}
+		}
+		outcome := h.GetOutcome()
+		if outcome != "success" && outcome != "failure" {
+			return nil, &RejectError{"validation.health_outcome_invalid",
+				fmt.Sprintf("health %d: outcome %q must be success|failure", i, outcome)}
+		}
+		latency := int(h.GetLatencyMs())
+		if latency < 0 || latency > maxLatencyMS {
+			return nil, &RejectError{"validation.health_latency_invalid",
+				fmt.Sprintf("health %d: latency_ms %d outside [0,%d]", i, latency, maxLatencyMS)}
+		}
+		failures := int(h.GetConsecutiveFailures())
+		if failures < 0 || failures > maxConsecutiveFailures {
+			return nil, &RejectError{"validation.health_failures_invalid",
+				fmt.Sprintf("health %d: consecutive_failures %d outside [0,%d]", i, failures, maxConsecutiveFailures)}
+		}
+		if class := h.GetErrorClass(); len(class) > maxHealthClassLen {
+			return nil, &RejectError{"validation.health_error_class_invalid",
+				fmt.Sprintf("health %d: error_class exceeds %d chars", i, maxHealthClassLen)}
+		}
+		checked := h.GetCheckedAt()
+		if checked == nil {
+			return nil, &RejectError{"validation.health_ts_missing", fmt.Sprintf("health %d: checked_at is required", i)}
+		}
+		checkedAt := checked.AsTime()
+		if checkedAt.Before(oldest) || checkedAt.After(newest) {
+			return nil, &RejectError{"validation.health_ts_out_of_range",
+				fmt.Sprintf("health %d: checked_at %s outside ±%s of now", i, checkedAt.UTC().Format(time.RFC3339), TimestampTolerance)}
+		}
+		out = append(out, ValidatedHealth{
+			DeviceID:            id,
+			PollType:            pollType,
+			LatencyMS:           latency,
+			Outcome:             outcome,
+			ErrorClass:          h.GetErrorClass(),
+			ConsecutiveFailures: failures,
+			CheckedAt:           checkedAt.UTC(),
 		})
 	}
 	return out, nil

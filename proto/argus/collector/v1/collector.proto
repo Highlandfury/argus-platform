@@ -155,6 +155,39 @@ message MetricSample {
   // Observation time (collector clock). Server validates |ts - now| <= 7 days and
   // stores as-is for idempotency; ingestion time is recorded separately.
   google.protobuf.Timestamp ts = 5;
+
+  // PROTOCOL CHANGE M9-S1 (2026-10-01): optional device scope. Empty means the
+  // Phase-1 collector-scoped series (device_id IS NULL); a UUID means the sample
+  // belongs to that device (polling engine samples, device-series guard).
+  string device_id = 6;
+}
+
+// PollHealth is one poll outcome for one device (M9-S1). Carried on
+// MetricBatch so health rides the existing durable spool + batch_seq claim +
+// ack-after-commit path (no separate health transport, no loss window).
+message PollHealth {
+  // Device UUID from the signed policy's poll targets.
+  string device_id = 1;
+
+  // Poll kind: "icmp" in M9-S1; SNMP arrives with M9-S2.
+  string poll_type = 2;
+
+  // Whole-probe duration in milliseconds (0 when the failure was immediate).
+  int32 latency_ms = 3;
+
+  // Terminal outcome: "success" | "failure".
+  string outcome = 4;
+
+  // Failure classification ("" on success): e.g. "timeout", "unreachable",
+  // "loss", "unsupported".
+  string error_class = 5;
+
+  // Consecutive failures for this device/poll_type after this outcome
+  // (0 after a success). Drives M9-S4 adaptive backoff.
+  int32 consecutive_failures = 6;
+
+  // Observation time (collector clock). Server validates |ts - now| <= 7 days.
+  google.protobuf.Timestamp checked_at = 7;
 }
 
 message MetricBatch {
@@ -167,6 +200,11 @@ message MetricBatch {
 
   // When the batch was sealed on the collector (spool write time).
   google.protobuf.Timestamp created_at = 3;
+
+  // PROTOCOL CHANGE M9-S1 (2026-10-01): poll health records. A batch may be
+  // samples-only (Phase 1), health-only, or mixed; the same batch_seq claim and
+  // BatchResult ack cover both payload kinds.
+  repeated PollHealth health = 4;
 }
 
 message PolicyAck {

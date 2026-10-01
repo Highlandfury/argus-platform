@@ -17,6 +17,7 @@ import (
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
+	"github.com/argus-platform/argus/internal/modules/pollhealth"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/httpx"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
@@ -45,6 +46,7 @@ type Options struct {
 	MetricsQuery      *metrics.QueryService
 	Inventory         *inventory.Service
 	Credentials       *credentials.Service
+	PollHealth        *pollhealth.Service
 }
 
 type handlers struct {
@@ -56,6 +58,7 @@ type handlers struct {
 	metricsHTTP     *metrics.HTTP
 	inventoryHTTP   *inventory.HTTP
 	credentialsHTTP *credentials.HTTP
+	pollHealthHTTP  *pollhealth.HTTP
 }
 
 func newHandlers(o Options) *handlers {
@@ -94,6 +97,9 @@ func newHandlers(o Options) *handlers {
 	}
 	if o.Credentials != nil {
 		h.credentialsHTTP = &credentials.HTTP{Svc: o.Credentials}
+	}
+	if o.PollHealth != nil && o.Inventory != nil {
+		h.pollHealthHTTP = &pollhealth.HTTP{Svc: o.PollHealth, Devices: o.Inventory}
 	}
 	return h
 }
@@ -260,6 +266,14 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 				return
 			}
 			h.inventoryHTTP.ListDeviceIdentityHistory(w, r)
+		})
+	case "/v1/devices/{id}/poll-health":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.pollHealthHTTP == nil {
+				serviceUnavailable(w, r, "poll health service not configured")
+				return
+			}
+			h.pollHealthHTTP.ListDevicePollHealth(w, r)
 		})
 	case "/v1/devices/{id}/merge":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

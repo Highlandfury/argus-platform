@@ -214,7 +214,10 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 			switch {
 			case s.Ingest == nil:
 				// Degraded: explicit rejection; never a silent drop.
-			case allow == nil:
+			case allow == nil && len(batch.GetSamples()) > 0:
+				// Health-only batches need no metric allowlist: poll health
+				// carries its own validated fields and persists under the same
+				// batch claim (M9-S1).
 				samples := 0
 				if batch != nil {
 					samples = len(batch.GetSamples())

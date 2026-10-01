@@ -294,6 +294,10 @@ func (failingStore) EnsureSeries(_ context.Context, _ pgx.Tx, _ []metrics.Series
 	return metrics.SeriesResolution{}, errors.New("injected series failure")
 }
 
+func (failingStore) EnsureDeviceSeries(_ context.Context, _ pgx.Tx, _ metrics.DeviceSeriesSpec, _ metrics.GuardOptions) (metrics.DeviceSeriesResult, error) {
+	return metrics.DeviceSeriesResult{}, errors.New("injected device series failure")
+}
+
 func (failingStore) InsertSamples(_ context.Context, _ pgx.Tx, _ []metrics.Sample) (int64, error) {
 	return 0, errors.New("injected insert failure")
 }

@@ -38,6 +38,10 @@ type Store interface {
 	// resolved ids plus quarantined keys. Must be called inside the batch
 	// transaction.
 	EnsureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (SeriesResolution, error)
+	// EnsureDeviceSeries resolves or creates one device-scoped series with the
+	// cardinality guards applied (M9 adoption point). Must be called inside
+	// the batch transaction.
+	EnsureDeviceSeries(ctx context.Context, tx pgx.Tx, spec DeviceSeriesSpec, opts GuardOptions) (DeviceSeriesResult, error)
 	// InsertSamples inserts samples, skipping (series_id, ts) conflicts.
 	// Returns the number of rows actually inserted.
 	InsertSamples(ctx context.Context, tx pgx.Tx, samples []Sample) (int64, error)
@@ -53,6 +57,12 @@ type TimescaleStore struct{}
 // EnsureSeries implements Store.
 func (TimescaleStore) EnsureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (SeriesResolution, error) {
 	return ensureSeries(ctx, tx, specs)
+}
+
+// EnsureDeviceSeries implements Store (M9): device-scoped series with the
+// per-device/site/creation-rate guards.
+func (TimescaleStore) EnsureDeviceSeries(ctx context.Context, tx pgx.Tx, spec DeviceSeriesSpec, opts GuardOptions) (DeviceSeriesResult, error) {
+	return EnsureDeviceSeries(ctx, tx, spec, opts)
 }
 
 const insertSamplesSQL = `INSERT INTO metric_samples (org_id, series_id, ts, value)

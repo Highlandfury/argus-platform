@@ -9,8 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/google/uuid"
 )
 
 // ErrVerification is returned when the Ed25519 signature does not match.
@@ -19,13 +25,25 @@ var ErrVerification = errors.New("policy: signature verification failed")
 // ErrValidation is returned when the document is structurally invalid.
 var ErrValidation = errors.New("policy: document invalid")
 
-// Document mirrors the Phase-1 policy payload.
+// PolicyRetention is the number of signed bundles kept on disk for rollback
+// (canonical docs/15: "applies atomically, keeps last 3 bundles"). The newest
+// bundle is always the applied one.
+const PolicyRetention = 3
+
+// MaxTargets bounds the poll-target list a document may carry (mirrors the
+// server-side collectors.MaxPolicyTargets ceiling).
+const MaxTargets = 10000
+
+// Document mirrors the Phase-1 policy payload plus the M9-S1 poll targets.
 type Document struct {
 	HeartbeatIntervalSeconds int      `json:"heartbeat_interval_seconds"`
 	ReportIntervalSeconds    int      `json:"report_interval_seconds"`
 	BatchMaxSamples          int      `json:"batch_max_samples"`
 	SpoolMaxBytes            int64    `json:"spool_max_bytes"`
 	Metrics                  []Metric `json:"metrics"`
+	// Targets are the per-device poll targets (M9-S1). Absent in Phase-1
+	// documents; validated when present.
+	Targets []Target `json:"targets,omitempty"`
 }
 
 // Metric is one instructed metric source.
@@ -35,6 +53,17 @@ type Metric struct {
 	Source          string            `json:"source"`
 	IntervalSeconds int               `json:"interval_seconds"`
 	Dimensions      map[string]string `json:"dimensions,omitempty"`
+}
+
+// Target is one device the collector should poll (M9-S1). Tier values are the
+// canonical §12.4 tiers; unknown tier strings are normalized by the poll
+// engine (never a policy rejection: one operator typo must not disable
+// polling for the whole collector).
+type Target struct {
+	DeviceID string `json:"device_id"`
+	MgmtIP   string `json:"mgmt_ip"`
+	Name     string `json:"name"`
+	Tier     string `json:"tier"`
 }
 
 // VerifyAndValidate checks the signature against the pinned Ed25519 key and
@@ -87,10 +116,35 @@ func Validate(doc Document) error {
 			return fmt.Errorf("%w: metric interval out of range", ErrValidation)
 		}
 	}
+	if len(doc.Targets) > MaxTargets {
+		return fmt.Errorf("%w: targets list exceeds %d", ErrValidation, MaxTargets)
+	}
+	seen := make(map[string]bool, len(doc.Targets))
+	for _, t := range doc.Targets {
+		if _, err := uuid.Parse(t.DeviceID); err != nil {
+			return fmt.Errorf("%w: target device_id %q is not a UUID", ErrValidation, t.DeviceID)
+		}
+		if seen[t.DeviceID] {
+			return fmt.Errorf("%w: duplicate target device_id %q", ErrValidation, t.DeviceID)
+		}
+		seen[t.DeviceID] = true
+		addr, err := netip.ParseAddr(t.MgmtIP)
+		if err != nil || !addr.IsValid() {
+			return fmt.Errorf("%w: target %s mgmt_ip %q is not an IP address", ErrValidation, t.DeviceID, t.MgmtIP)
+		}
+		if len(t.Name) > 200 {
+			return fmt.Errorf("%w: target %s name exceeds 200 chars", ErrValidation, t.DeviceID)
+		}
+		if len(t.Tier) > 32 {
+			return fmt.Errorf("%w: target %s tier exceeds 32 chars", ErrValidation, t.DeviceID)
+		}
+	}
 	return nil
 }
 
-// Store writes a validated policy version atomically under dir.
+// Store writes a validated policy version atomically under dir and keeps the
+// newest PolicyRetention bundles (canonical docs/15: last 3 bundles for
+// rollback). Pruning is best-effort: a failed unlink never fails the apply.
 func Store(dir string, version int64, document []byte) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
@@ -103,7 +157,45 @@ func Store(dir string, version int64, document []byte) (string, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return "", err
 	}
+	prune(dir)
 	return path, nil
+}
+
+// policyVersion parses `policy-v<n>.json`; ok=false for any other name.
+func policyVersion(name string) (int64, bool) {
+	if !strings.HasPrefix(name, "policy-v") || !strings.HasSuffix(name, ".json") {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(name, "policy-v"), ".json"), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// prune removes all but the newest PolicyRetention bundle files.
+func prune(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type bundle struct {
+		name    string
+		version int64
+	}
+	var bundles []bundle
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if v, ok := policyVersion(e.Name()); ok {
+			bundles = append(bundles, bundle{name: e.Name(), version: v})
+		}
+	}
+	sort.Slice(bundles, func(i, j int) bool { return bundles[i].version > bundles[j].version })
+	for _, b := range bundles[min(PolicyRetention, len(bundles)):] {
+		_ = os.Remove(filepath.Join(dir, b.name))
+	}
 }
 
 // LoadAndValidate reads a stored policy document (signature was verified when

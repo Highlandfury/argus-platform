@@ -28,6 +28,7 @@ import (
 	"github.com/argus-platform/argus/internal/modules/ingest"
 	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
+	"github.com/argus-platform/argus/internal/modules/pollhealth"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
@@ -224,6 +225,12 @@ func cmdServe(args []string) int {
 		inventorySvc = inventory.New(appPool, inventory.SlogAudit{Logger: logger})
 	}
 
+	// Poll health API (M9-S1): device-scoped read of persisted poll outcomes.
+	var pollHealthSvc *pollhealth.Service
+	if appPool != nil {
+		pollHealthSvc = pollhealth.New(appPool)
+	}
+
 	// Credentials API (M7-S4): write-only secrets sealed by the SecretsVault
 	// (P2-D2 dev binding; generation is dev-only, prod fails closed on a
 	// missing key file). When the vault cannot load, the credential routes
@@ -258,6 +265,7 @@ func cmdServe(args []string) int {
 		MetricsQuery:      metricsQuery,
 		Inventory:         inventorySvc,
 		Credentials:       credentialsSvc,
+		PollHealth:        pollHealthSvc,
 	}
 
 	httpSrv := &http.Server{

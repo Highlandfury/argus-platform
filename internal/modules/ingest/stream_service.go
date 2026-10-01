@@ -22,11 +22,15 @@ type MetricDef struct {
 // BatchResult.Status. IngestedAt is set only when the batch is durably known
 // (OK after COMMIT; DUPLICATE after the ledger check).
 type BatchOutcome struct {
-	Status     collectorv1.BatchResult_Status
-	Reason     string
-	Accepted   uint32
-	Rejected   uint32
-	IngestedAt time.Time
+	Status   collectorv1.BatchResult_Status
+	Reason   string
+	Accepted uint32
+	Rejected uint32
+	// HealthAccepted counts poll-health rows persisted in the same committed
+	// transaction (M9-S1). Not part of BatchResult: the batch-level ack covers
+	// the whole payload.
+	HealthAccepted int
+	IngestedAt     time.Time
 }
 
 // Ingester is the pipeline surface consumed by the collector stream server.

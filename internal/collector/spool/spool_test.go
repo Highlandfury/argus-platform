@@ -323,3 +323,64 @@ func TestCorruptStateFileQuarantined(t *testing.T) {
 	}
 	_ = s.Close()
 }
+
+// TestHealthOnlyBatchRoundTrip pins the M9-S1 spool contract: a batch carrying
+// only poll-health records is durable, sendable and recoverable exactly like a
+// sample batch (health rides the same WAL, claim and ack path).
+func TestHealthOnlyBatchRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	s := mustOpen(t, dir, 1<<20)
+	checkedAt := time.Now().UTC().Truncate(time.Second)
+	health := Health{
+		DeviceID:            "0198d5a3-0000-7000-8000-000000000001",
+		PollType:            "icmp",
+		LatencyMS:           11,
+		Outcome:             "failure",
+		ErrorClass:          "timeout",
+		ConsecutiveFailures: 2,
+		CheckedAt:           checkedAt,
+	}
+	seq, err := s.Append(&Batch{At: time.Now().UTC(), Health: []Health{health}})
+	if err != nil || seq != 1 {
+		t.Fatalf("append health-only: seq=%d err=%v", seq, err)
+	}
+	if _, err := s.Append(&Batch{At: time.Now()}); !errors.Is(err, ErrEmptyBatch) {
+		t.Fatalf("empty batch must still be refused: %v", err)
+	}
+
+	r, err := s.Reader()
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	b, err := r.Next()
+	if err != nil || b == nil || len(b.Samples) != 0 || len(b.Health) != 1 {
+		t.Fatalf("read health-only: %+v err=%v", b, err)
+	}
+	got := b.Health[0]
+	if got.DeviceID != health.DeviceID || got.PollType != "icmp" || got.LatencyMS != 11 ||
+		got.Outcome != "failure" || got.ErrorClass != "timeout" || got.ConsecutiveFailures != 2 ||
+		!got.CheckedAt.Equal(checkedAt) {
+		t.Fatalf("health round trip = %+v", got)
+	}
+	// Restart before ack: recovery must rebuild the health record from the
+	// segment (nothing may be lost across a collector restart).
+	r.Close() // Windows: release the segment handle before reopening
+	_ = s.Close()
+	reopened := mustOpen(t, dir, 1<<20)
+	defer func() { _ = reopened.Close() }()
+	r2, err := reopened.Reader()
+	if err != nil {
+		t.Fatalf("reader after restart: %v", err)
+	}
+	b2, err := r2.Next()
+	if err != nil || b2 == nil || len(b2.Health) != 1 || b2.Health[0].DeviceID != health.DeviceID {
+		t.Fatalf("health after restart: %+v err=%v", b2, err)
+	}
+	r2.Close()
+	if err := reopened.Ack(seq); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if reopened.Stats().Records != 0 {
+		t.Fatalf("acked health record still pending: %+v", reopened.Stats())
+	}
+}

@@ -20,15 +20,33 @@ type Sample struct {
 	Unit       string            `json:"unit"`
 	Value      float64           `json:"value"`
 	Ts         time.Time         `json:"ts"`
+	DeviceID   string            `json:"device_id,omitempty"` // M9 device-scoped sample
 	Dimensions map[string]string `json:"dimensions,omitempty"`
 }
 
+// Health is one poll-health record spooled with a batch (M9-S1). It rides the
+// same durable record, batch_seq claim and BatchResult ack as samples.
+type Health struct {
+	DeviceID            string    `json:"device_id"`
+	PollType            string    `json:"poll_type"`
+	LatencyMS           int       `json:"latency_ms"`
+	Outcome             string    `json:"outcome"`
+	ErrorClass          string    `json:"error_class"`
+	ConsecutiveFailures int       `json:"consecutive_failures"`
+	CheckedAt           time.Time `json:"checked_at"`
+}
+
 // Batch is the unit of durable storage; payload is the exact wire message.
+// A batch carries samples, health records, or both (M9-S1).
 type Batch struct {
 	Seq     int64     `json:"seq"`
 	At      time.Time `json:"created_at"`
-	Samples []Sample  `json:"samples"`
+	Samples []Sample  `json:"samples,omitempty"`
+	Health  []Health  `json:"health,omitempty"`
 }
+
+// Empty reports whether the batch has no payload of either kind.
+func (b *Batch) Empty() bool { return len(b.Samples) == 0 && len(b.Health) == 0 }
 
 // ToProto converts a stored batch into its wire form.
 func (b *Batch) ToProto() *collectorv1.MetricBatch {
@@ -41,12 +59,27 @@ func (b *Batch) ToProto() *collectorv1.MetricBatch {
 			Value:      s.Value,
 			Dimensions: s.Dimensions,
 			Ts:         timestamppb.New(s.Ts),
+			DeviceId:   s.DeviceID,
+		}
+	}
+	health := make([]*collectorv1.PollHealth, len(b.Health))
+	for i := range b.Health {
+		h := b.Health[i]
+		health[i] = &collectorv1.PollHealth{
+			DeviceId:            h.DeviceID,
+			PollType:            h.PollType,
+			LatencyMs:           int32(h.LatencyMS), //nolint:gosec // bounded by probe duration
+			Outcome:             h.Outcome,
+			ErrorClass:          h.ErrorClass,
+			ConsecutiveFailures: int32(h.ConsecutiveFailures), //nolint:gosec // bounded by poll cadence
+			CheckedAt:           timestamppb.New(h.CheckedAt),
 		}
 	}
 	return &collectorv1.MetricBatch{
 		BatchSeq:  b.Seq,
 		Samples:   samples,
 		CreatedAt: timestamppb.New(b.At),
+		Health:    health,
 	}
 }
 
@@ -62,7 +95,19 @@ func batchFromPayload(payload []byte) (*Batch, error) {
 			Unit:       s.GetUnit(),
 			Value:      s.GetValue(),
 			Ts:         s.GetTs().AsTime(),
+			DeviceID:   s.GetDeviceId(),
 			Dimensions: s.GetDimensions(),
+		})
+	}
+	for _, h := range pb.GetHealth() {
+		b.Health = append(b.Health, Health{
+			DeviceID:            h.GetDeviceId(),
+			PollType:            h.GetPollType(),
+			LatencyMS:           int(h.GetLatencyMs()),
+			Outcome:             h.GetOutcome(),
+			ErrorClass:          h.GetErrorClass(),
+			ConsecutiveFailures: int(h.GetConsecutiveFailures()),
+			CheckedAt:           h.GetCheckedAt().AsTime(),
 		})
 	}
 	return b, nil
@@ -159,7 +204,7 @@ func (s *Spool) warnf(msg string, args ...any) {
 // record is written to the active segment; fsync follows the group policy and
 // is guaranteed before the record becomes send-eligible.
 func (s *Spool) Append(b *Batch) (int64, error) {
-	if b == nil || len(b.Samples) == 0 {
+	if b == nil || b.Empty() {
 		return 0, ErrEmptyBatch
 	}
 	s.mu.Lock()

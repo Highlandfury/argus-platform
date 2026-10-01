@@ -29,7 +29,8 @@
 | google.golang.org/protobuf | v1.36.12 (codegen and runtime aligned as of M3a) | GitHub release | Generated code is committed under `gen/`; CI checks drift via regenerate+diff. |
 | github.com/stretchr/testify | (indirect via client_golang) | tidy | Direct use begins when needed; add the exact tag then. |
 | golang.org/x/crypto | v0.57.0 | repo tags — added M1e (direct, Argon2id) | x/time pinned in M2.
-| golang.org/x/time | v0.16.0 | repo tags — added M2b (login rate limiting) |
+| golang.org/x/time | v0.16.0 | repo tags - added M2b (login rate limiting) |
+| golang.org/x/net | v0.58.0 | repo tags - promoted from indirect to direct in M9-S1 (ICMP echo raw/unprivileged sockets; x/net/icmp + x/net/ipv4). Pin was already resolved by tidy; no version change. |
 | golang.org/x/sync | v0.23.0 | repo tags — **added when errgroup first used** |
 | github.com/google/go-cmp | v0.7.0 (indirect) | tidy |
 

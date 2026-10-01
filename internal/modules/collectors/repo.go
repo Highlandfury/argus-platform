@@ -159,6 +159,34 @@ func maxPolicyVersion(ctx context.Context, tx pgx.Tx, collectorID uuid.UUID) (in
 	return v, err
 }
 
+// listPolicyTargets returns the org's poll targets for the signed policy
+// bundle (M9-S1): live devices (not soft-deleted, not retired) that have a
+// management IP. Must run inside a tenant transaction. host() strips any /32
+// suffix an operator may have stored so the collector always receives a bare
+// address.
+func listPolicyTargets(ctx context.Context, tx pgx.Tx) ([]PolicyTarget, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT id, host(mgmt_ip), name, poll_profile
+		FROM devices
+		WHERE deleted_at IS NULL AND status <> 'retired' AND mgmt_ip IS NOT NULL
+		ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]PolicyTarget, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		var t PolicyTarget
+		if err := rows.Scan(&id, &t.MgmtIP, &t.Name, &t.Tier); err != nil {
+			return nil, err
+		}
+		t.DeviceID = id.String()
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func findTokenByHash(ctx context.Context, tx pgx.Tx, hash []byte) (TokenRow, error) {
 	var t TokenRow
 	err := tx.QueryRow(ctx, `

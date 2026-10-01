@@ -25,6 +25,7 @@ import (
 	"github.com/argus-platform/argus/internal/collector/identity"
 	"github.com/argus-platform/argus/internal/collector/metrics"
 	"github.com/argus-platform/argus/internal/collector/policy"
+	"github.com/argus-platform/argus/internal/collector/poll"
 	"github.com/argus-platform/argus/internal/collector/spool"
 	"github.com/argus-platform/argus/internal/collector/stream"
 	ctel "github.com/argus-platform/argus/internal/collector/telemetry"
@@ -187,8 +188,44 @@ func cmdRun(args []string) int {
 	policyDir := filepath.Join(cfg.DataDir, "policy")
 
 	rp := newRuntimePolicy()
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun() // idempotent; the explicit shutdown call below still runs first
+	sampleCh := make(chan metrics.Sample, 256)
+	healthCh := make(chan poll.Health, 256)
+
+	// Poll engine (M9-S1): ICMP prober + tier scheduler. Samples flow through
+	// the existing producer channel/batcher/spool; poll health is batched into
+	// the same spool so both ride the batch ack/claim path (no new transport).
+	healthBatcher := poll.NewHealthBatcher(rp.max, rp.report, func(records []poll.Health) error {
+		_, err := sp.Append(&spool.Batch{At: time.Now().UTC(), Health: toSpoolHealth(records)})
+		return err
+	}, logger)
+	pollEngine := poll.NewEngine(poll.Config{
+		Prober: poll.NewICMPProber(poll.ICMPConfig{}),
+		Log:    logger,
+		OnSample: func(s poll.Sample) {
+			select {
+			case sampleCh <- metrics.Sample{
+				MetricKey:  s.MetricKey,
+				Unit:       s.Unit,
+				Value:      s.Value,
+				Ts:         s.Ts,
+				Dimensions: s.Dimensions,
+				DeviceID:   s.DeviceID,
+			}:
+			case <-runCtx.Done():
+			}
+		},
+		OnHealth: func(h poll.Health) {
+			select {
+			case healthCh <- h:
+			case <-runCtx.Done():
+			}
+		},
+	})
 	if doc, err := policy.LoadAndValidate(policyDir, id.PolicyVersion); err == nil {
 		rp.set(doc)
+		pollEngine.ApplyTargets(pollTargets(doc, logger))
 	} else {
 		logger.Warn("policy cache not usable yet; using defaults until the first apply", "error", err)
 	}
@@ -240,19 +277,21 @@ func cmdRun(args []string) int {
 			}
 			if doc, err := policy.LoadAndValidate(policyDir, version); err == nil {
 				rp.set(doc)
+				// Targets are applied atomically with the policy: one engine
+				// swap, no partial target state.
+				pollEngine.ApplyTargets(pollTargets(doc, logger))
 				logger.Info("producer policy updated",
 					"version", version,
 					"report_interval_s", doc.ReportIntervalSeconds,
-					"batch_max_samples", doc.BatchMaxSamples)
+					"batch_max_samples", doc.BatchMaxSamples,
+					"poll_targets", len(doc.Targets))
 			}
 		},
 	}, machine)
 
 	// Producer → batcher → spool pipeline (bounded channel provides
 	// backpressure: a full spool parks the producer instead of growing memory).
-	runCtx, cancelRun := context.WithCancel(ctx)
 	var wg sync.WaitGroup
-	sampleCh := make(chan metrics.Sample, 256)
 	batcher := metrics.NewBatcher(
 		rp.max,
 		rp.report,
@@ -306,6 +345,35 @@ func cmdRun(args []string) int {
 		"interval_s", rp.metric().Seconds(),
 		"report_interval_s", rp.report().Seconds())
 
+	// Poll engine + health batcher run alongside the producer; both stop via
+	// runCtx and everything buffered is flushed below.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pollEngine.Run(runCtx)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case h := <-healthCh:
+				if err := healthBatcher.Add(h); err != nil {
+					logger.Warn("health batcher add", "error", err)
+				}
+			case <-ticker.C:
+				if err := healthBatcher.Tick(); err != nil {
+					logger.Warn("health batcher flush", "error", err)
+				}
+			}
+		}
+	}()
+	logger.Info("poll engine started", "tier_default", poll.StandardInterval.String())
+
 	runErr := client.Run(ctx)
 
 	// Shutdown ordering (SPEC §3.5): producer stops → buffered samples flush →
@@ -322,8 +390,20 @@ func cmdRun(args []string) int {
 		}
 		break
 	}
+	for {
+		select {
+		case h := <-healthCh:
+			_ = healthBatcher.Add(h)
+			continue
+		default:
+		}
+		break
+	}
 	if err := batcher.Flush(); err != nil {
 		logger.Error("final flush failed; samples could not be spooled", "error", err)
+	}
+	if err := healthBatcher.Flush(); err != nil {
+		logger.Error("final health flush failed; poll health could not be spooled", "error", err)
 	}
 	if err := sp.ForceSync(); err != nil {
 		logger.Error("final spool sync failed", "error", err)
@@ -361,8 +441,42 @@ func toSpoolSamples(in []metrics.Sample) []spool.Sample {
 			Unit:       s.Unit,
 			Value:      s.Value,
 			Ts:         s.Ts,
+			DeviceID:   s.DeviceID,
 			Dimensions: s.Dimensions,
 		}
+	}
+	return out
+}
+
+func toSpoolHealth(in []poll.Health) []spool.Health {
+	out := make([]spool.Health, len(in))
+	for i, h := range in {
+		out[i] = spool.Health{
+			DeviceID:            h.DeviceID,
+			PollType:            h.PollType,
+			LatencyMS:           h.LatencyMS,
+			Outcome:             h.Outcome,
+			ErrorClass:          h.ErrorClass,
+			ConsecutiveFailures: h.ConsecutiveFailures,
+			CheckedAt:           h.CheckedAt,
+		}
+	}
+	return out
+}
+
+// pollTargets converts signed-policy targets into engine targets. The policy
+// validator already guarantees the shape; a malformed entry (impossible unless
+// the validator regressed) is dropped with a loud log rather than disabling
+// every other target.
+func pollTargets(doc policy.Document, logger *slog.Logger) []poll.Target {
+	out := make([]poll.Target, 0, len(doc.Targets))
+	for _, t := range doc.Targets {
+		target, err := poll.TargetFromPolicy(t.DeviceID, t.MgmtIP, t.Name, t.Tier)
+		if err != nil {
+			logger.Error("policy target dropped", "device_id", t.DeviceID, "error", err)
+			continue
+		}
+		out = append(out, target)
 	}
 	return out
 }

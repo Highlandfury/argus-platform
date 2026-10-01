@@ -158,6 +158,13 @@ services:
     volumes:
       - collector-data:/var/lib/argus
       - ca-data:/var/lib/argus/ca-ro:ro
+    # M9-S1 ICMP polling: the collector needs either CAP_NET_RAW (raw ICMP
+    # socket) or an unprivileged ping socket (net.ipv4.ping_group_range).
+    # Canonical docs/06/§15 name CAP_NET_RAW as the least-privilege grant; the
+    # collector falls back to the unprivileged ping socket when the capability
+    # is absent.
+    cap_add:
+      - NET_RAW
     depends_on:
       server:
         condition: service_healthy
