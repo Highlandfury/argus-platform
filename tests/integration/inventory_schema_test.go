@@ -460,10 +460,11 @@ func TestInventorySchemaConstraints(t *testing.T) {
 	})
 }
 
-// TestInventorySchemaDownUpRoundTrip steps migrations 000011..000008 down on a
-// throwaway database: the seven tables (and the open-identity unique index)
-// disappear, the Phase-1 schema stays, and re-applying up restores the
-// inventory schema.
+// TestInventorySchemaDownUpRoundTrip steps migrations down to version 7 on a
+// throwaway database: the seven M7 tables (and the open-identity unique index)
+// disappear, the Phase-1 schema stays, and re-applying up restores everything
+// (including the M8 metrics migrations). The step count follows
+// migrations.Latest so later milestones extend the round trip automatically.
 func TestInventorySchemaDownUpRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	dbName := "argus_m7test"
@@ -496,8 +497,8 @@ func TestInventorySchemaDownUpRoundTrip(t *testing.T) {
 		t.Fatal("device_identity_history_open_uniq missing after up")
 	}
 
-	if err := database.MigrateDown(dsn, 4); err != nil {
-		t.Fatalf("migrate down 000011..000008: %v", err)
+	if err := database.MigrateDown(dsn, int(migrations.Latest)-7); err != nil {
+		t.Fatalf("migrate down to version 7: %v", err)
 	}
 	for _, tbl := range inventoryTables {
 		if tableExists(t, dsn, "public."+tbl) {

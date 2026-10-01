@@ -69,6 +69,8 @@ func run(args []string) int {
 		return 0
 	case "migrate":
 		return cmdMigrate(args[1:])
+	case "metrics-maintenance":
+		return cmdMetricsMaintenance(args[1:])
 	case "seed-dev":
 		return cmdSeedDev(args[1:])
 	default:
@@ -97,6 +99,7 @@ func cmdServe(args []string) int {
 	tel := telemetry.New("server", buildinfo.Version, buildinfo.Commit)
 	argus := telemetry.NewArgus(tel)
 	metrics.RegisterSeriesMetrics(tel)
+	metrics.RegisterGuardMetrics(tel)
 
 	// Pools + readiness (SPEC §17): readyz reflects DB reachability, auth-role
 	// reachability, and schema state.
@@ -386,6 +389,57 @@ func cmdMigrate(args []string) int {
 	return 0
 }
 
+// cmdMetricsMaintenance is the M8 verification/maintenance entry point
+// (P2-AC-09): it applies the configured raw retention window and retires
+// inactive series under the owner role, then verifies the storage policies
+// against timescaledb_information and exits non-zero on any mismatch — the
+// nightly `metrics-maintenance` CI job runs the same checks against a real
+// TimescaleDB.
+func cmdMetricsMaintenance(args []string) int {
+	fs := flag.NewFlagSet("metrics-maintenance", flag.ContinueOnError)
+	verifyOnly := fs.Bool("verify-only", false, "verify policies without applying retention or retirement")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	cfg, err := config.LoadServer()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "config:", err)
+		return 1
+	}
+	if cfg.MigrateDSN == "" {
+		fmt.Fprintln(os.Stderr, "ARGUS_SERVER_MIGRATE_DSN is required (owner-role DSN with BYPASSRLS)")
+		return 1
+	}
+	ctx := context.Background()
+	pool, err := database.NewPool(ctx, cfg.MigrateDSN, "metrics-maintenance", database.DefaultPoolConfig())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "database:", err)
+		return 1
+	}
+	defer pool.Close()
+
+	rawRetention := time.Duration(cfg.MetricsRawRetentionDays) * 24 * time.Hour
+	if !*verifyOnly {
+		if err := metrics.ApplyRawRetention(ctx, pool, rawRetention); err != nil {
+			fmt.Fprintln(os.Stderr, "metrics-maintenance apply:", err)
+			return 1
+		}
+		retired, err := metrics.RetireInactiveSeries(ctx, pool, metrics.SeriesRetirementAge)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "metrics-maintenance retire:", err)
+			return 1
+		}
+		fmt.Printf("metrics-maintenance: raw retention %d d, retired series %d\n",
+			cfg.MetricsRawRetentionDays, retired)
+	}
+	if err := metrics.VerifyPolicies(ctx, pool, metrics.VerifyOptions{RawRetention: rawRetention}); err != nil {
+		fmt.Fprintln(os.Stderr, "metrics-maintenance verification failed:", err)
+		return 1
+	}
+	fmt.Println("metrics-maintenance: policies verified")
+	return 0
+}
+
 func cmdHealthcheck(args []string) int {
 	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
 	url := fs.String("url", "http://127.0.0.1:8080/v1/healthz", "health endpoint URL")
@@ -411,10 +465,11 @@ func usage() {
 	fmt.Fprint(os.Stderr, `argus-server — Argus control plane
 
 Usage:
-  argus-server serve        Start API + ops listeners
-  argus-server healthcheck  Probe the local health endpoint (exit 0 when healthy)
-  argus-server migrate      Apply database migrations (M1)
-  argus-server seed-dev     Seed a development org/site/user (M1)
-  argus-server version      Print build metadata
+  argus-server serve               Start API + ops listeners
+  argus-server healthcheck         Probe the local health endpoint (exit 0 when healthy)
+  argus-server migrate             Apply database migrations (M1)
+  argus-server metrics-maintenance Apply retention/retirement + verify metrics policies (M8)
+  argus-server seed-dev            Seed a development org/site/user (M1)
+  argus-server version             Print build metadata
 `)
 }

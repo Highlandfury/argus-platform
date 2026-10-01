@@ -50,26 +50,31 @@ type Server struct {
 	// SecretsKeyID is the wrapping key identifier recorded in the
 	// kms_key_id column of every sealed credential envelope.
 	SecretsKeyID string
+	// MetricsRawRetentionDays is the on-prem raw metric_samples retention
+	// window (P2-AC-09: 30-90 days, default 30). Applied by
+	// `argus-server metrics-maintenance` under the owner role.
+	MetricsRawRetentionDays int
 }
 
 // LoadServer reads server configuration from the environment.
 func LoadServer() (Server, error) {
 	cfg := Server{
-		Env:              env("ARGUS_ENV", EnvDev),
-		LogLevel:         env("ARGUS_LOG_LEVEL", "info"),
-		HTTPAddr:         env("ARGUS_SERVER_HTTP_ADDR", ":8080"),
-		OpsAddr:          env("ARGUS_SERVER_OPS_ADDR", ":9090"),
-		GRPCAddr:         env("ARGUS_SERVER_GRPC_ADDR", ":8443"),
-		EnrollAddr:       env("ARGUS_SERVER_ENROLL_ADDR", ":8444"),
-		GRPCSANs:         splitCSV(env("ARGUS_SERVER_GRPC_SANS", "localhost,server,127.0.0.1")),
-		EnrollRatePerMin: int(envInt64("ARGUS_SERVER_ENROLL_RATE_PER_MIN", 10)),
-		DBDSN:            env("ARGUS_SERVER_DB_DSN", ""),
-		AuthDBDSN:        env("ARGUS_SERVER_AUTH_DB_DSN", ""),
-		MigrateDSN:       env("ARGUS_SERVER_MIGRATE_DSN", ""),
-		CADir:            env("ARGUS_SERVER_CA_DIR", "./.dev/ca"),
-		DevSeed:          envBool("ARGUS_DEV_SEED", false),
-		SecretsKeyFile:   env("ARGUS_SECRETS_KEY_FILE", "./.dev/secrets/master.key"),
-		SecretsKeyID:     env("ARGUS_SECRETS_KEY_ID", "argus-local"),
+		Env:                     env("ARGUS_ENV", EnvDev),
+		LogLevel:                env("ARGUS_LOG_LEVEL", "info"),
+		HTTPAddr:                env("ARGUS_SERVER_HTTP_ADDR", ":8080"),
+		OpsAddr:                 env("ARGUS_SERVER_OPS_ADDR", ":9090"),
+		GRPCAddr:                env("ARGUS_SERVER_GRPC_ADDR", ":8443"),
+		EnrollAddr:              env("ARGUS_SERVER_ENROLL_ADDR", ":8444"),
+		GRPCSANs:                splitCSV(env("ARGUS_SERVER_GRPC_SANS", "localhost,server,127.0.0.1")),
+		EnrollRatePerMin:        int(envInt64("ARGUS_SERVER_ENROLL_RATE_PER_MIN", 10)),
+		DBDSN:                   env("ARGUS_SERVER_DB_DSN", ""),
+		AuthDBDSN:               env("ARGUS_SERVER_AUTH_DB_DSN", ""),
+		MigrateDSN:              env("ARGUS_SERVER_MIGRATE_DSN", ""),
+		CADir:                   env("ARGUS_SERVER_CA_DIR", "./.dev/ca"),
+		DevSeed:                 envBool("ARGUS_DEV_SEED", false),
+		SecretsKeyFile:          env("ARGUS_SECRETS_KEY_FILE", "./.dev/secrets/master.key"),
+		SecretsKeyID:            env("ARGUS_SECRETS_KEY_ID", "argus-local"),
+		MetricsRawRetentionDays: int(envInt64("ARGUS_METRICS_RAW_RETENTION_DAYS", 30)),
 	}
 
 	if cfg.Env != EnvDev && cfg.Env != EnvProd {
@@ -96,6 +101,11 @@ func LoadServer() (Server, error) {
 	}
 	if strings.TrimSpace(cfg.SecretsKeyID) == "" {
 		return cfg, errors.New("ARGUS_SECRETS_KEY_ID: must not be empty")
+	}
+	// P2-AC-09: the on-prem raw retention window is bounded; the out-of-range
+	// value is rejected instead of silently clamped.
+	if cfg.MetricsRawRetentionDays < 30 || cfg.MetricsRawRetentionDays > 90 {
+		return cfg, fmt.Errorf("ARGUS_METRICS_RAW_RETENTION_DAYS: must be within [30,90], got %d", cfg.MetricsRawRetentionDays)
 	}
 	if cfg.Env == EnvProd {
 		if cfg.DBDSN == "" {

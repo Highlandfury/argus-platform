@@ -15,10 +15,11 @@
 // Dev-only default credential: when K6_PASSWORD is unset, the documented
 // development password is used. Production-like runs MUST set K6_PASSWORD.
 //
-// Deviation note: the canonical workload says "24 h @ 10 s step", but the
-// normative query contract caps results at 2000 points (24 h @ 10 s = 8641
-// points -> 422 query.points_exceeded, recorded in ACCEPTANCE_RUN M4c).
-// L-03 therefore issues 24 h @ 1 m â€” the finest permitted 24 h resolution.
+// Deviation note (M8 reconciliation): the Phase-1 query contract capped
+// results at 2000 points, so "24 h @ 10 s step" (8641 points -> 422
+// query.points_exceeded) was not runnable and L-03 issues 24 h @ 1 m. M8
+// reconciled the cap to the canonical 10k points, so 24 h @ 10 s now fits;
+// the load slice (next) re-baselines this script against the new contract.
 import http from "k6/http";
 import { check } from "k6";
 

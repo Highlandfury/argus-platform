@@ -12,10 +12,6 @@ import (
 	"github.com/argus-platform/argus/internal/platform/httpx"
 )
 
-// queryTimeout bounds every metric query server-side (cancellation via context
-// propagates to PostgreSQL; a canceled client or slow query is terminated).
-const queryTimeout = 5 * time.Second
-
 // HTTP exposes the metric query API.
 type HTTP struct {
 	Svc *QueryService
@@ -59,7 +55,7 @@ func (h *HTTP) QueryCollectorMetric(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), QueryTimeout)
 	defer cancel()
 	result, err := h.Svc.QueryRange(ctx, RangeQuery{
 		OrgID:       p.OrgID,
@@ -75,7 +71,7 @@ func (h *HTTP) QueryCollectorMetric(w http.ResponseWriter, r *http.Request) {
 			httpx.WriteProblem(w, r, http.StatusNotFound, "collector.not_found", "collector not found")
 		case errors.Is(err, ErrPointsExceeded):
 			httpx.WriteProblem(w, r, http.StatusUnprocessableEntity, "query.points_exceeded",
-				"query would exceed the 2000-point limit; use a coarser step or a smaller range")
+				"query exceeds the supported point budget; use a coarser step or a smaller range")
 		case errors.Is(err, ErrRangeInvalid):
 			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", cleanDetail(err))
 		case errors.Is(err, context.DeadlineExceeded):
@@ -90,6 +86,24 @@ func (h *HTTP) QueryCollectorMetric(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	meta := map[string]any{
+		"expected_points": result.Expected,
+		"returned_points": result.Returned,
+		"gaps":            result.Gaps,
+		"truncated":       result.PointsTruncated,
+		"sample_count":    result.SampleCount,
+		// Canonical query metadata (docs/12 §22.8; P2-AC-08/13).
+		"resolution":       ResolutionName(Step(result.Resolution)),
+		"partial":          result.Partial,
+		"series_total":     result.SeriesTotal,
+		"series_returned":  result.SeriesReturned,
+		"points_truncated": result.PointsTruncated,
+		"raw_fallback":     result.RawFallback,
+		"rollup_missing":   result.RollupMissing,
+	}
+	if result.ResolutionWarning != "" {
+		meta["resolution_warning"] = result.ResolutionWarning
+	}
 	payload := map[string]any{
 		"metric":     result.Metric,
 		"unit":       result.Unit,
@@ -98,13 +112,7 @@ func (h *HTTP) QueryCollectorMetric(w http.ResponseWriter, r *http.Request) {
 		"to":         result.To.Format(time.RFC3339),
 		"points":     pointsPayload(result.Points),
 		"status":     result.Status,
-		"meta": map[string]any{
-			"expected_points": result.Expected,
-			"returned_points": result.Returned,
-			"gaps":            result.Gaps,
-			"truncated":       false,
-			"sample_count":    result.SampleCount,
-		},
+		"meta":       meta,
 	}
 	if result.Latest != nil {
 		payload["latest"] = map[string]any{

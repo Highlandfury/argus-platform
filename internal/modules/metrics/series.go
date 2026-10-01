@@ -98,59 +98,68 @@ func seriesMapKey(metricKey string, dimHash int64) string {
 }
 
 // ensureSeries resolves or creates series rows in one transaction, enforcing
-// the per-collector quota before any insert. Returns a map keyed by
-// SeriesSpec.Key().
-func ensureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (map[string]int64, error) {
+// the per-collector quota before any insert and surfacing quarantined series
+// so ingest can drop samples for those series only. Returns a resolution keyed
+// by SeriesSpec.Key().
+func ensureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (SeriesResolution, error) {
 	distinct := make(map[string]SeriesSpec, len(specs))
 	for _, sp := range specs {
 		distinct[sp.Key()] = sp
 	}
+	res := NewSeriesResolution()
 	if len(distinct) == 0 {
-		return map[string]int64{}, nil
+		return res, nil
 	}
 	orgID, collectorID := specs[0].OrgID, specs[0].CollectorID
 	for _, sp := range specs {
 		if sp.OrgID != orgID || sp.CollectorID != collectorID {
-			return nil, ErrMixedSeriesScope
+			return res, ErrMixedSeriesScope
 		}
 	}
 
 	// Existing series for this collector (≤ quota rows; small working set).
-	resolved := make(map[string]int64, len(distinct))
 	rows, err := tx.Query(ctx,
-		`SELECT metric_key, dim_hash, id FROM metric_series
+		`SELECT metric_key, dim_hash, id, quarantined_at IS NOT NULL FROM metric_series
 		 WHERE org_id = $1 AND collector_id = $2 AND device_id IS NULL`, orgID, collectorID)
 	if err != nil {
-		return nil, fmt.Errorf("metrics: list series: %w", err)
+		return res, fmt.Errorf("metrics: list series: %w", err)
 	}
 	for rows.Next() {
 		var (
-			metricKey string
-			dimHash   int64
-			id        int64
+			metricKey   string
+			dimHash     int64
+			id          int64
+			quarantined bool
 		)
-		if err := rows.Scan(&metricKey, &dimHash, &id); err != nil {
+		if err := rows.Scan(&metricKey, &dimHash, &id, &quarantined); err != nil {
 			rows.Close()
-			return nil, fmt.Errorf("metrics: scan series: %w", err)
+			return res, fmt.Errorf("metrics: scan series: %w", err)
 		}
 		key := seriesMapKey(metricKey, dimHash)
 		if _, wanted := distinct[key]; wanted {
-			resolved[key] = id
+			if quarantined {
+				res.Quarantined[key] = true
+			} else {
+				res.IDs[key] = id
+			}
 		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("metrics: iterate series: %w", err)
+		return res, fmt.Errorf("metrics: iterate series: %w", err)
 	}
 
 	missing := make([]SeriesSpec, 0)
 	for key, sp := range distinct {
-		if _, ok := resolved[key]; !ok {
+		if _, ok := res.IDs[key]; !ok {
+			if res.Quarantined[key] {
+				continue // known quarantined series: never re-created
+			}
 			missing = append(missing, sp)
 		}
 	}
 	if len(missing) == 0 {
-		return resolved, nil
+		return res, nil
 	}
 
 	// Quota: existing rows + new series must fit the Phase-1 budget.
@@ -158,10 +167,10 @@ func ensureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (map[strin
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*) FROM metric_series WHERE org_id = $1 AND collector_id = $2`, orgID, collectorID).
 		Scan(&existingTotal); err != nil {
-		return nil, fmt.Errorf("metrics: series count: %w", err)
+		return res, fmt.Errorf("metrics: series count: %w", err)
 	}
 	if existingTotal+int64(len(missing)) > MaxSeriesPerCollector {
-		return nil, fmt.Errorf("%w: %d existing + %d new > %d", ErrSeriesQuota,
+		return res, fmt.Errorf("%w: %d existing + %d new > %d", ErrSeriesQuota,
 			existingTotal, len(missing), MaxSeriesPerCollector)
 	}
 
@@ -181,7 +190,7 @@ func ensureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (map[strin
 		 RETURNING metric_key, dim_hash, id`,
 		orgID, collectorID, keys, dims, hashes, units)
 	if err != nil {
-		return nil, fmt.Errorf("metrics: upsert series: %w", err)
+		return res, fmt.Errorf("metrics: upsert series: %w", err)
 	}
 	created := 0
 	for inserted.Next() {
@@ -192,21 +201,21 @@ func ensureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (map[strin
 		)
 		if err := inserted.Scan(&metricKey, &dimHash, &id); err != nil {
 			inserted.Close()
-			return nil, fmt.Errorf("metrics: scan inserted series: %w", err)
+			return res, fmt.Errorf("metrics: scan inserted series: %w", err)
 		}
-		resolved[seriesMapKey(metricKey, dimHash)] = id
+		res.IDs[seriesMapKey(metricKey, dimHash)] = id
 		created++
 	}
 	inserted.Close()
 	if err := inserted.Err(); err != nil {
-		return nil, fmt.Errorf("metrics: iterate inserted series: %w", err)
+		return res, fmt.Errorf("metrics: iterate inserted series: %w", err)
 	}
 	seriesCreated.Add(float64(created))
 
 	for key := range distinct {
-		if _, ok := resolved[key]; !ok {
-			return nil, fmt.Errorf("metrics: series %s unresolved after upsert", key)
+		if _, ok := res.IDs[key]; !ok {
+			return res, fmt.Errorf("metrics: series %s unresolved after upsert", key)
 		}
 	}
-	return resolved, nil
+	return res, nil
 }

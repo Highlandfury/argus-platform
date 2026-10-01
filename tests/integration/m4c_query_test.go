@@ -66,12 +66,13 @@ type m4cFixture struct {
 	srv         *httptest.Server
 	client      *http.Client
 	slug        string
+	orgID       string
 	collectorID string
 }
 
 func newM4CFixture(t *testing.T, slug string) *m4cFixture {
 	t.Helper()
-	env, id, store, _ := m4Env(t, slug)
+	env, id, store, orgID := m4Env(t, slug)
 	srv, client := newTestAPIWithMetrics(t)
 	res := doRequest(t, client, http.MethodPost, srv.URL+"/v1/auth/login", loginBody(slug, "it-password"), nil)
 	if res.Status != http.StatusOK {
@@ -85,6 +86,7 @@ func newM4CFixture(t *testing.T, slug string) *m4cFixture {
 		srv:         srv,
 		client:      client,
 		slug:        slug,
+		orgID:       orgID,
 		collectorID: id.CollectorID,
 	}
 }
@@ -248,7 +250,7 @@ func TestM4CQueryEmptyAndMalformed(t *testing.T) {
 	}
 	status, _ = f.query(t, map[string]string{
 		"metric": "collector_cpu_percent", "from": m4cRFC3339(now.Add(-time.Hour)),
-		"to": m4cRFC3339(now), "step": "1h",
+		"to": m4cRFC3339(now), "step": "2h",
 	})
 	if status != http.StatusBadRequest {
 		t.Fatalf("bad step: %d", status)
@@ -266,12 +268,12 @@ func TestM4CQueryBoundsAndPointLimit(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("from==to: %d", status)
 	}
-	// Range wider than 24h.
+	// Range wider than the 3-year max range (canonical M8 reconciliation).
 	status, _ = f.query(t, map[string]string{
-		"metric": "collector_cpu_percent", "from": m4cRFC3339(now.Add(-25 * time.Hour)), "to": m4cRFC3339(now),
+		"metric": "collector_cpu_percent", "from": m4cRFC3339(now.Add(-4 * 365 * 24 * time.Hour)), "to": m4cRFC3339(now),
 	})
 	if status != http.StatusBadRequest {
-		t.Fatalf("25h range: %d", status)
+		t.Fatalf("4y range: %d", status)
 	}
 	// Future `to`.
 	status, _ = f.query(t, map[string]string{
@@ -280,13 +282,13 @@ func TestM4CQueryBoundsAndPointLimit(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("future to: %d", status)
 	}
-	// 24h @ 10s exceeds the 2000-point cap ??? 422.
-	status, body := f.query(t, map[string]string{
+	// 24h @ 10s fits the canonical 10k-point cap now (was 422 at 2k).
+	status, _ = f.query(t, map[string]string{
 		"metric": "collector_cpu_percent", "from": m4cRFC3339(now.Add(-24 * time.Hour)),
 		"to": m4cRFC3339(now), "step": "10s",
 	})
-	if status != http.StatusUnprocessableEntity || body["code"] != "query.points_exceeded" {
-		t.Fatalf("24h@10s: %d %v", status, body)
+	if status != http.StatusOK {
+		t.Fatalf("24h@10s: %d (want 200 under the 10k cap)", status)
 	}
 	// 24h @ 1m fits.
 	status, _ = f.query(t, map[string]string{
@@ -295,6 +297,15 @@ func TestM4CQueryBoundsAndPointLimit(t *testing.T) {
 	})
 	if status != http.StatusOK {
 		t.Fatalf("24h@1m: %d", status)
+	}
+	// Pathological bucket counts are still refused loudly: 3 years at 1m is
+	// ~1.58M buckets, over the 1M hard budget.
+	status, body := f.query(t, map[string]string{
+		"metric": "collector_cpu_percent", "from": m4cRFC3339(now.Add(-3 * 365 * 24 * time.Hour)),
+		"to": m4cRFC3339(now), "step": "1m",
+	})
+	if status != http.StatusUnprocessableEntity || body["code"] != "query.points_exceeded" {
+		t.Fatalf("3y@1m: %d %v (want 422 query.points_exceeded)", status, body)
 	}
 }
 

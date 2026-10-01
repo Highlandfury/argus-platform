@@ -31,6 +31,7 @@ func unsetServerEnv(t *testing.T) {
 		"ARGUS_SERVER_GRPC_ADDR", "ARGUS_SERVER_ENROLL_ADDR",
 		"ARGUS_SERVER_DB_DSN", "ARGUS_SERVER_AUTH_DB_DSN", "ARGUS_SERVER_MIGRATE_DSN",
 		"ARGUS_SERVER_CA_DIR", "ARGUS_DEV_SEED",
+		"ARGUS_METRICS_RAW_RETENTION_DAYS",
 	)
 }
 
@@ -82,6 +83,30 @@ func TestLoadServerProdRequiresDSN(t *testing.T) {
 	t.Setenv("ARGUS_SERVER_DB_DSN", "postgres://u:p@db:5432/argus?sslmode=require")
 	if _, err := LoadServer(); err != nil {
 		t.Fatalf("prod with DSN should load: %v", err)
+	}
+}
+
+func TestLoadServerRawRetentionBounds(t *testing.T) {
+	unsetServerEnv(t)
+	cfg, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if cfg.MetricsRawRetentionDays != 30 {
+		t.Fatalf("raw retention default = %d, want 30", cfg.MetricsRawRetentionDays)
+	}
+	t.Setenv("ARGUS_METRICS_RAW_RETENTION_DAYS", "90")
+	cfg, err = LoadServer()
+	if err != nil || cfg.MetricsRawRetentionDays != 90 {
+		t.Fatalf("raw retention 90: %d, %v", cfg.MetricsRawRetentionDays, err)
+	}
+	t.Setenv("ARGUS_METRICS_RAW_RETENTION_DAYS", "29")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("expected error for raw retention below 30 d")
+	}
+	t.Setenv("ARGUS_METRICS_RAW_RETENTION_DAYS", "91")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("expected error for raw retention above 90 d")
 	}
 }
 

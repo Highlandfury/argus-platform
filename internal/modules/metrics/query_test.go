@@ -11,12 +11,15 @@ func TestParseStep(t *testing.T) {
 		want    Step
 		wantErr bool
 	}{
-		{"", Step10s, false}, // contract default
+		{"", StepAuto, false}, // canonical picker default (docs/12 §22.8)
+		{"auto", StepAuto, false},
 		{"raw", StepRaw, false},
 		{"10s", Step10s, false},
 		{"1m", Step1m, false},
 		{"5m", Step5m, false},
-		{"1h", "", true},
+		{"1h", Step1h, false},
+		{"1d", Step1d, false},
+		{"2h", "", true},
 		{"'; DROP TABLE metric_samples; --", "", true},
 		{"raw ", "", true},
 	}
@@ -35,11 +38,13 @@ func TestParseStep(t *testing.T) {
 }
 
 func TestStepIntervals(t *testing.T) {
-	if StepRaw.Interval() != 0 || Step10s.Interval() != 10*time.Second ||
-		Step1m.Interval() != time.Minute || Step5m.Interval() != 5*time.Minute {
+	if StepAuto.Interval() != 0 || StepRaw.Interval() != 0 || Step10s.Interval() != 10*time.Second ||
+		Step1m.Interval() != time.Minute || Step5m.Interval() != 5*time.Minute ||
+		Step1h.Interval() != time.Hour || Step1d.Interval() != 24*time.Hour {
 		t.Fatal("interval mapping mismatch")
 	}
-	if Step10s.sqlInterval() != "10 seconds" || Step1m.sqlInterval() != "1 minute" || Step5m.sqlInterval() != "5 minutes" {
+	if Step10s.sqlInterval() != "10 seconds" || Step1m.sqlInterval() != "1 minute" ||
+		Step5m.sqlInterval() != "5 minutes" || Step1h.sqlInterval() != "1 hour" || Step1d.sqlInterval() != "1 day" {
 		t.Fatal("sql interval mapping mismatch")
 	}
 }
@@ -72,14 +77,27 @@ func TestKnownMetricCatalog(t *testing.T) {
 	}
 }
 
-func TestPointCapRejection(t *testing.T) {
-	// 24h at 10s exceeds the 2000-point cap by design (422 upstream).
-	base := time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)
-	if points := expectedBuckets(base, base.Add(24*time.Hour), Step10s.Interval()); points <= MaxPoints {
-		t.Fatalf("expected >%d points for 24h@10s, got %d", MaxPoints, points)
+// TestPointBudgetReconciliation pins the M8 canonical caps: 10k response
+// points, a 1M-bucket hard rejection bound, and the 3-year max range.
+func TestPointBudgetReconciliation(t *testing.T) {
+	if MaxPoints != 10000 || MaxSeries != 100 {
+		t.Fatalf("canonical caps changed: MaxPoints=%d MaxSeries=%d", MaxPoints, MaxSeries)
 	}
-	// 24h at 1m fits (permitted).
+	base := time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)
+
+	// 24h @ 10s and 24h @ 1m fit the 10k response cap.
+	if points := expectedBuckets(base, base.Add(24*time.Hour), Step10s.Interval()); points > MaxPoints {
+		t.Fatalf("24h@10s = %d points, want <= %d", points, MaxPoints)
+	}
 	if points := expectedBuckets(base, base.Add(24*time.Hour), Step1m.Interval()); points > MaxPoints {
-		t.Fatalf("24h@1m must fit the cap, got %d", points)
+		t.Fatalf("24h@1m = %d points, want <= %d", points, MaxPoints)
+	}
+	// The full 3-year range at the auto picker fits (1d buckets).
+	if points := expectedBuckets(base.Add(-MaxRange), base, PickStep(base.Add(-MaxRange), base).Interval()); points > MaxPoints {
+		t.Fatalf("3y@auto = %d points, want <= %d", points, MaxPoints)
+	}
+	// 3y @ 1m exceeds the hard bucket budget (loud 422, not a silent scan).
+	if points := expectedBuckets(base.Add(-MaxRange), base, Step1m.Interval()); points <= maxHardBuckets {
+		t.Fatalf("3y@1m = %d buckets, want > hard budget %d", points, maxHardBuckets)
 	}
 }

@@ -290,12 +290,16 @@ func TestM4SeriesQuotaExceeded(t *testing.T) {
 // full transaction rollback (no ledger row).
 type failingStore struct{}
 
-func (failingStore) EnsureSeries(_ context.Context, _ pgx.Tx, _ []metrics.SeriesSpec) (map[string]int64, error) {
-	return nil, errors.New("injected series failure")
+func (failingStore) EnsureSeries(_ context.Context, _ pgx.Tx, _ []metrics.SeriesSpec) (metrics.SeriesResolution, error) {
+	return metrics.SeriesResolution{}, errors.New("injected series failure")
 }
 
 func (failingStore) InsertSamples(_ context.Context, _ pgx.Tx, _ []metrics.Sample) (int64, error) {
 	return 0, errors.New("injected insert failure")
+}
+
+func (failingStore) TouchSeries(_ context.Context, _ pgx.Tx, _ uuid.UUID, _ []int64, _ time.Time) error {
+	return errors.New("injected touch failure")
 }
 
 func TestM4NoAckBeforeCommitOnDBFailure(t *testing.T) {

@@ -52,11 +52,12 @@ Get-Content tests\load\k6\api.js -Raw | docker run --rm -i --network argus-dev_d
 ```
 
 Canonical thresholds enforced by the script: `p(95) < 300 ms`,
-`p(99) < 1 s`, error rate `< 0.1%`. Recorded deviation: the canonical text says
-"24 h @ 10 s step", but the normative query contract caps results at 2000
-points (24 h @ 10 s â†’ 422 `query.points_exceeded`), so L-03 issues
-**24 h @ 1 m** â€” the finest permitted 24 h resolution (same interpretation as
-AC-08, recorded in `ACCEPTANCE_RUN.md`).
+`p(99) < 1 s`, error rate `< 0.1%`. Phase-1 deviation: the canonical text says
+"24 h @ 10 s step", but the Phase-1 query contract capped results at 2000
+points (24 h @ 10 s -> 422 `query.points_exceeded`), so L-03 issued
+**24 h @ 1 m**. M8 reconciled the cap to the canonical 10k points (24 h @ 10 s
+= 8641 points now fits); the load slice re-baselines L-03 against the new
+contract.
 
 ## Interpret results
 

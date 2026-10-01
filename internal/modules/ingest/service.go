@@ -103,7 +103,7 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 			})
 		}
 		seriesStart := time.Now()
-		seriesIDs, err := s.store.EnsureSeries(ctx, tx, specs)
+		resolution, err := s.store.EnsureSeries(ctx, tx, specs)
 		s.observeDB("series", seriesStart)
 		if err != nil {
 			if errors.Is(err, metrics.ErrSeriesQuota) {
@@ -113,19 +113,35 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 		}
 
 		samples := make([]metrics.Sample, 0, len(validated))
+		touched := make([]int64, 0, len(resolution.IDs))
+		var quarantinedDropped uint32
+		var batchLastTs time.Time
 		for _, v := range validated {
 			key := v.MetricKey + "|" + strconv.FormatInt(v.DimHash, 16)
-			seriesID, ok := seriesIDs[key]
+			if resolution.Quarantined[key] {
+				// Quarantine stops ingest for this series only; the rest of
+				// the batch (and the device) keeps flowing (docs/08 §13.3).
+				quarantinedDropped++
+				continue
+			}
+			seriesID, ok := resolution.IDs[key]
 			if !ok {
 				return fmt.Errorf("ingest: series unresolved for %s", key)
 			}
 			samples = append(samples, metrics.Sample{OrgID: orgID, SeriesID: seriesID, Ts: v.Ts, Value: v.Value})
+			touched = append(touched, seriesID)
+			if v.Ts.After(batchLastTs) {
+				batchLastTs = v.Ts
+			}
 		}
 
 		dbStart := time.Now()
 		inserted, err := s.store.InsertSamples(ctx, tx, samples)
 		s.observeDB("samples", dbStart)
 		if err != nil {
+			return err
+		}
+		if err := s.store.TouchSeries(ctx, tx, orgID, touched, batchLastTs); err != nil {
 			return err
 		}
 
@@ -137,6 +153,7 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 		outcome = BatchOutcome{
 			Status:     collectorv1.BatchResult_STATUS_OK,
 			Accepted:   uint32(inserted), //nolint:gosec // bounded by MaxBatchSamples
+			Rejected:   quarantinedDropped,
 			IngestedAt: receivedAt,
 		}
 		return nil
@@ -146,6 +163,14 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 	case err == nil:
 		s.m.batches.WithLabelValues("ok").Inc()
 		s.m.samples.WithLabelValues("accepted").Add(float64(outcome.Accepted))
+		if outcome.Rejected > 0 {
+			s.m.samples.WithLabelValues("quarantined").Add(float64(outcome.Rejected))
+			if s.log != nil {
+				s.log.Warn("samples dropped for quarantined series",
+					"collector_id", collectorID, "batch_seq", batch.GetBatchSeq(),
+					"dropped", outcome.Rejected)
+			}
+		}
 		s.m.batchDuration.Observe(time.Since(start).Seconds())
 		return outcome
 	case errors.Is(err, errDuplicateBatch):
