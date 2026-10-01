@@ -1,15 +1,18 @@
 # M10-EVIDENCE — Visibility & operational surfaces (Phase 2)
 
-**Status: M10-S0 COMPLETE; M10-S1 COMPLETE (§7 onward).** M10-S0 closes the two
+**Status: M10-S0 COMPLETE; M10-S1 COMPLETE (§7); M10-S2 COMPLETE (§8).**
+M10-S0 closes the two
 M9-S4 deferrals recorded in `M9_EVIDENCE.md` §14.7 (see the signed M9 gate note
 at the top of that file): the operator-facing device criticality source that
 finally wires the M9-S4 5-minute failure-backoff ceiling, and
 idempotency-keyed on-demand check endpoints (P2-AC-14 "scheduled and on-demand
 runs"). M10-S1 (§7) adds the canonical `POST/GET /v1/metrics/query` contract
 and the poll-health device status rollups (P2-AC-21, P2-AC-22 device half).
-The M10 visibility pages, charts, site dashboard, interface association
-(M10-S2) and Step-12 diagnostics remain future slices; nothing in this file
-duplicates the M9 record.
+M10-S2 (§8) links SNMP-polled interface data into the `interfaces` inventory
+rows (auto-create, live attributes, audited ifIndex rebinding) and exposes the
+interface status rollup, closing the M9 AC-16 deferred clause.
+The M10 visibility pages, charts, site dashboard and Step-12 diagnostics
+remain future slices; nothing in this file duplicates the M9 record.
 
 ---
 
@@ -516,4 +519,258 @@ New integration tests (`tests/integration/m10s1_metrics_test.go`,
   schemas), `tests/contract/authz_contract_test.go` (inventory count 20).
 - Tests: `tests/integration/m10s1_metrics_test.go`,
   `tests/integration/m10s1_status_test.go` (new).
+- Docs: this file.
+
+---
+
+# 8. M10-S2 — SNMP interface association, audited ifIndex rebinding, interface status
+
+**Status: M10-S2 COMPLETE.** This slice links SNMP-polled IF-MIB data into the
+`interfaces` inventory rows: auto-creation of discovered interfaces, live
+attribute updates (oper/admin status, speed, MTU, MAC, ifType, ifIndex),
+first/last-seen maintenance, **audited ifIndex rebinding with the interface
+identity preserved**, and the interface status rollup in the API payloads.
+It closes the M9 AC-16 deferred clause ("automatic audited ifIndex rebinding +
+interfaces-row association", see §8.7). VLAN / Q-BRIDGE membership, web pages
+and charts (M10-S3), maintenance (M11) and discovery remain out of scope.
+
+Canonical references: docs/07 §12.1/§12.3 (IF-MIB core table, "ifIndex is
+stored but never the identity; rebinding on ifIndex change is automatic and
+audited"; ifCounterDiscontinuityTime/counter rules unchanged), docs/11 §21
+(`interfaces` columns + `UQ (device_id, if_index)`), docs/08 §13.2-§13.5
+(counter normalization, series identity/dimension budget), docs/12 §22.1
+(batch ack/idempotency conventions), docs/04 §6.5 (capability catalog),
+M7_EVIDENCE (interfaces schema rationale + audit sink pattern), M9_EVIDENCE
+§12.2-§12.4, §12.7.2, §14.7 and the §15 AC table (the deferred clause).
+
+## 8.1 Where the linker runs (design decision)
+
+The pipeline needed to carry per-row attributes that are not numeric series
+(ifIndex itself, MAC, enum statuses) from the poller to the server without
+putting ifIndex anywhere near series identity. Two inspected options:
+
+1. **Derive observations server-side only from samples** — rejected: samples
+   carry only `if_name`/`if_alias` dimensions and numeric values; ifIndex and
+   MAC cannot be reconstructed, and adding ifIndex as a sample dimension would
+   violate the "never identity" invariant (an ifIndex change would fork/split
+   series).
+2. **Additive protocol message (chosen)** — `MetricBatch.interfaces = 5`
+   (`repeated InterfaceObservation`, regenerated `collector.pb.go`) carries one
+   observation per polled row. It rides the existing durable spool record,
+   `batch_seq` claim and `BatchResult` ack exactly like samples and poll
+   health: one batch is committed, rejected or retried as a whole. Old
+   collectors simply omit the field; old servers ignore it (proto3).
+
+Server-side the association runs **inside the same ingest tenant transaction**
+as the batch claim (`inventory.LinkInterfacesTx` called from
+`ingest.Service.IngestBatch` after series resolution): the device row is
+locked `FOR UPDATE` (per-device serialization; different devices do not
+block), interfaces are matched/updated/inserted, and the transaction still
+commits or rolls back as one unit. This deliberately reuses the ack path — a
+DB failure retries the whole batch, a duplicate batch is rejected at the claim
+before any association, and RLS/tenant scope apply to every statement. Audit
+events are recorded **after COMMIT only** (the sink is not transactional), so
+a rolled-back or replayed batch can never leave audit evidence. Validation
+bounds the payload at 1,000 observations per batch (`MaxBatchInterfaces`),
+with fail-closed checks for device UUID, name/alias lengths, ifIndex ≥ 1,
+canonical IF-MIB status strings, speed/MTU ranges, MAC parseability and
+`observed_at` inside the ±7-day window.
+
+The collector renders observations in the SNMP prober from the walked rows
+(numeric gauges/integers plus the `if_*` template roles); the on-demand check
+path (M10-S0 §3.4) deliberately emits no observations, so off-cadence checks
+still cannot perturb inventory first/last-seen.
+
+## 8.2 Identity, upsert and audited rebinding rules
+
+Canonical identity is `(device_id, if_name, if_alias, mac)` with ifIndex
+stored, never identity (docs/07 §12.3, M7 interfaces rationale). The linker
+resolves each observation against the device's rows (all locked):
+
+| Case | Rule |
+|---|---|
+| Exactly one row with the same `if_name` | match it (MAC/alias are attributes) |
+| Several rows share `if_name` | prefer exact MAC; else null-safe alias; else the row whose current `if_index` equals the reported one; otherwise **ambiguous → nothing is written** (never guess) |
+| No matching row | insert (`interface.auto_create` audited): role `unknown`, `monitored=true`, `first_seen_at = last_seen_at = observed_at` |
+| Known row, same ifIndex | update attributes: alias (only when reported — an empty alias never clears operator text), ifType, admin/oper status, speed, MTU, MAC; `last_seen_at = max(existing, observed_at)` (out-of-order batches can never make a fresh interface look stale) |
+| Known row, different ifIndex | update the row in place (**id/identity preserved**), audit `interface.rebind` with `old_index`/`new_index` |
+| Reported ifIndex already held by another row on the device | skip the index change and count `IndexConflicts` (the `UQ(device_id, if_index)` row binding wins; a manual concurrent create can also hit this via 23505) |
+| Known interface absent from the poll | **left untouched** (explicit deferral: no disappearance inference in this slice) |
+
+Audit actions (inventory `AuditSink` family, actor type `collector`, actor id
+= authenticated collector; recorded after commit):
+
+| Action | When | Data |
+|---|---|---|
+| `interface.auto_create` | an SNMP poll discovered a new interface | `if_index`, `if_name`, `if_alias`, `source=snmp` |
+| `interface.rebind` | a known interface reported a different ifIndex | `if_name`, `if_alias`, `old_index`, `new_index` |
+
+No per-poll `interface.update` events are emitted (25 interfaces × 60 s would
+be audit noise); attribute changes are visible on the row and in metric
+history.
+
+## 8.3 IF-MIB template additions and series budget
+
+`core/if-mib` (version 1, unchanged budget mechanism) gains:
+
+| Column | OID | Kind | Role / series |
+|---|---|---|---|
+| ifType | 1.3.6.1.2.1.2.2.1.3 | observation-only | `if_type` |
+| ifMtu | 1.3.6.1.2.1.2.2.1.4 | gauge | `if_mtu` + series `net.if.mtu` (`B`) |
+| ifSpeed | 1.3.6.1.2.1.2.2.1.5 | observation-only | `if_speed` (bit/s fallback) |
+| ifPhysAddress | 1.3.6.1.2.1.2.2.1.6 | string | `if_mac` (raw octets → canonical MAC) |
+| ifAdminStatus | 1.3.6.1.2.1.2.2.1.7 | observation-only | `if_admin_status` |
+| ifOperStatus | 1.3.6.1.2.1.2.2.1.8 | state | existing `net.if.oper_status` + `if_oper_status` |
+| ifHighSpeed | 1.3.6.1.2.1.31.1.1.1.15 | gauge, scale 1e6 | `if_high_speed` + series `net.if.speed_bps` (`bit/s`; preferred over the 32-bit ifSpeed fallback) |
+
+Budget impact: the pack's worst-case estimate moves from 7×25 = 175 to
+9×25 = 225 series/device; the switch kind total is 1 + 225 = 226, still under
+the canonical 250 cap. The compile-time gate pins were updated
+(`snmp_template_budget_test.go`) and the policy allowlist gained the two new
+keys (`collectors/policy.go`).
+
+## 8.4 API deltas (interface status)
+
+Every interface payload (`GET /v1/devices/{id}/interfaces`,
+`POST /v1/devices/{id}/interfaces`, `GET /v1/interfaces/{id}`,
+`PATCH /v1/interfaces/{id}`) now carries:
+
+- `status`: `up` | `down` | `unknown` (same vocabulary as the device rollup),
+  derived from the newest SNMP observation and the freshness window;
+- `freshness_seconds`: 1200 (20 min), the same documented choice as the
+  M10-S1 device rollup (worst-case 15-min backoff ceiling + jitter/latency).
+
+| Rollup | Rule |
+|---|---|
+| up | `last_seen_at` fresh (≤ 20 min) and `oper_status = up` |
+| down | fresh and any other known IF-MIB state (down, testing, dormant, not_present, lower_layer_down) |
+| unknown | no SNMP observation (`last_seen_at` null), no `oper_status`, or stale — a stopped observation cannot assert state |
+
+`oper_status`/`admin_status`/`speed_bps`/`mtu`/`mac`/`last_seen_at` were
+already in the payload and are now kept live by the association. Capability
+and scope are unchanged from the existing endpoints (`interface.read` +
+`device` scope for GETs; `interface.write` + admin for writes) and
+enumeration resistance is untouched: missing, foreign, soft-deleted,
+out-of-scope and malformed ids all return the same `404 interface.not_found`.
+No new endpoint, no migration, no web change.
+
+## 8.5 Tests and observed results
+
+Environment: Windows 11 dev host, Docker Desktop 29.8.1 (WSL2), pinned
+TimescaleDB 2.30.1-pg18 + snmpsim fixtures (testcontainers), Go 1.27.1 local
+toolchain, golangci-lint v2.14.0, dev compose stack at schema v17.
+
+| Command | Result |
+|---|---|
+| `go build ./...` (windows/amd64 + linux/amd64) | pass |
+| `gofmt -l internal cmd tests` | empty |
+| `go test ./internal/... -count=1` | pass (all packages) |
+| `go test ./tests/integration/ -run '^TestM10\|^TestM9' -count=1 -v` | **pass, 42/42** (234.4 s) |
+| `go test ./tests/integration/ -count=1 -timeout 30m` | **pass, full suite** |
+| `go test ./tests/contract/... -count=1` | pass |
+| `golangci-lint v2.14.0` (docker, `--timeout 10m`) | **0 issues** |
+
+New unit tests:
+
+- `internal/collector/poll/observations_test.go`: one observation per walked
+  row with all attributes (ifType/ifMtu/ifSpeed fallback/ifHighSpeed/MAC octet
+  rendering/admin/oper), ifIndex never a series dimension, raw-octet and
+  EUI-64 MAC canonicalization, RFC 2863 enum mapping, observation-batcher
+  flush/requeue.
+- `internal/collector/poll/snmp_template_budget_test.go`: pinned estimates
+  updated to 9×25 (if-mib) and 1+9×25 (switch).
+- `internal/modules/ingest/interface_validate_test.go`: accept/canonicalize,
+  every rejection class, over-limit, observation-only batch payload.
+- `internal/modules/inventory/iflink_test.go`: identity preference order
+  (MAC → alias → ifIndex → ambiguous nil), rebind vs occupied-index conflict,
+  operator-field preservation, forward-only last_seen, status rollup
+  classification (up/down/unknown/stale).
+
+New integration tests (`tests/integration/m10s2_interfaces_test.go`), all
+through the real snmpsim fixture and the real spool → gRPC → ingest path:
+
+| Test | Proves |
+|---|---|
+| `TestM10S2InterfaceLinkerEndToEnd` | first poll auto-creates 3 interfaces with correct if_name/if_alias/index/oper/admin/speed(1 Gbit/s)/MTU(1500)/MAC/type; `net.if.speed_bps`+`net.if.mtu` series land; creation audited (actor=collector, source=snmp); second poll only advances `last_seen_at`, no duplicate rows, no extra audit; an unknown-device observation batch is rejected (`validation.device_not_found`) |
+| `TestM10S2IfIndexRebindingAudited` | `srebind` fixture (Gi1/0/1 renumbered 1→4): same row id and MAC preserved, ifIndex 4, speed/MTU refreshed, exactly one `interface.rebind` event with old/new index, total rows unchanged |
+| `TestM10S2InterfaceStatusPayloadAndAuthz` | payload `status` unknown→up→down→unknown with freshness; list payload identical; viewer reads allowed; site-scope and cross-tenant ids 404 `interface.not_found`; malformed/unknown ids 404 parity |
+
+## 8.6 Decisions and limitations (M10-S2)
+
+1. **VLAN / Q-BRIDGE membership is deferred** (explicit): the canonical
+   `interface_vlan_membership` / `vlans` tables do not exist in this repo yet
+   and the Q-BRIDGE walks are slow-tier work; the interface page shows the
+   port attributes only in this slice.
+2. **Missing interfaces are left untouched** (no disappearance inference):
+   a port removed from the poll keeps its last state and ages to `unknown`
+   after the freshness window. Deletion/`retired` lifecycle is future work.
+   A soft-deleted device still associates until its target leaves the
+   collector policy (the sample path accepts it too), so retirement never
+   dead-letters an in-flight batch; a device that does not exist at all
+   rejects the batch (`validation.device_not_found`), matching device-scoped
+   samples.
+3. **Identity is resolved in Go, not by a DB unique index**: canonical
+   `UQ(device_id, if_index)` is kept; adding a second unique identity index
+   would risk migration failure on existing duplicates and changes manual-API
+   conflict semantics. Ingest serializes per device (`FOR UPDATE`), so
+   concurrent association cannot double-insert; a concurrent *manual* create
+   can still race the reported index and is counted/skipped (documented edge).
+4. **Ambiguity is never guessed**: several same-name rows with no MAC/alias/
+   index tie-break are skipped (counted, metric instrumented), never merged.
+5. **An empty `ifAlias` never clears** an existing alias and absent numeric
+   attributes keep their last values: SNMP is authoritative only for what it
+   reports; operator edits (role, description, monitored) are never touched
+   by the association.
+6. **`ifSpeed` (32-bit) is a fallback only**: it caps at ~4.29 Gbit/s, so the
+   emitted series uses `ifHighSpeed` (Mbit/s → bit/s); the observation uses
+   ifHighSpeed when present, else ifSpeed.
+7. **Interface status has no streak/failure ladder**: unlike device poll
+   health, one SNMP observation carries the full state, so classification is
+   `oper_status` + freshness only (documented canonical silence). `since`
+   transitions, flap detection and alerting are M11.
+8. **Protocol change is additive**: `MetricBatch.interfaces = 5`; old
+   collectors/spool records omit it, old servers ignore it. No migration; dev
+   stack schema stays v17.
+9. **On-demand checks emit no observations** (M10-S0 §3.4 semantics
+   unchanged): inventory freshness tracks the scheduled cadence, not manual
+   checks.
+10. **MAC is a matching preference, not a fork trigger**: when the agent
+    reports a different ifPhysAddress for a known port (transceiver swap) the
+    row keeps its id and the MAC attribute is updated; only the canonical
+    ifName/ifAlias text distinguishes ports. Description (ifDescr when ifName
+    is the primary) is not written by the linker in this slice; operator
+    `description`/`role`/`monitored` stay operator-owned.
+
+## 8.7 M9 AC-16 caveat closure (cross-reference)
+
+M9_EVIDENCE §15 records P2-AC-16 as "Met except audited ifIndex rebinding"
+with the interfaces-row association deferred to M10 (§12.7.2, §14.7). This
+slice implements exactly that clause: identity is ifName+ifAlias+MAC (ifIndex
+never identity, pinned by existing and new tests), a changed ifIndex updates
+the same row and emits `interface.rebind` with old/new index, and new
+interfaces are auto-created with audit evidence. **The signed M9 evidence
+table is intentionally not modified**; this section is the closure record.
+
+## 8.8 Files changed (M10-S2)
+
+- Proto/gen: `proto/argus/collector/v1/collector.proto` (InterfaceObservation,
+  `MetricBatch.interfaces = 5`), `gen/go/argus/collector/v1/collector.pb.go`.
+- Collector: `internal/collector/poll/{snmp_template,snmp_prober,prober,
+  scheduler}.go`, `templates/core/ifmib.yaml`, `observations.go` (new);
+  `internal/collector/spool/spool.go`; `cmd/argus-collector/run.go`.
+- Server ingest: `internal/modules/ingest/{validate,service,metrics}.go`.
+- Inventory: `internal/modules/inventory/link.go` (new),
+  `{status,http,store,models}.go`.
+- Policy: `internal/modules/collectors/policy.go` (two new allowlist keys).
+- API/contract: `openapi/argus.v1.yaml` (Interface status fields + if_index
+  description), `tests/contract/...` unchanged (routes unchanged).
+- Fixtures/tests: `tests/fixtures/snmpsim/data/switch.snmprec` (attribute
+  columns), `tests/fixtures/snmpsim/data/srebind.snmprec` (new rebinding
+  scenario); `internal/collector/poll/{observations_test.go,
+  snmp_template_budget_test.go,snmp_prober_test.go}`,
+  `internal/modules/ingest/interface_validate_test.go`,
+  `internal/modules/inventory/iflink_test.go`,
+  `tests/integration/m10s2_interfaces_test.go` (new),
+  `tests/integration/{m3_collector_test.go,inventory_api_test.go}` (audit
+  wiring/helper).
 - Docs: this file.

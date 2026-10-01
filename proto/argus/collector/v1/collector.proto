@@ -220,6 +220,55 @@ message MetricBatch {
   // samples-only (Phase 1), health-only, or mixed; the same batch_seq claim and
   // BatchResult ack cover both payload kinds.
   repeated PollHealth health = 4;
+
+  // PROTOCOL CHANGE M10-S2 (2026-10-01): SNMP interface observations that
+  // associate polled IF-MIB rows with inventory `interfaces` rows. Additive:
+  // absent for old collectors and non-SNMP batches. They ride the same batch
+  // claim/ack path as samples and health (a batch is committed or retried as a
+  // whole). ifIndex is carried here but is never part of series identity or of
+  // the interface identity (RFC 2863; docs/07 §12.3).
+  repeated InterfaceObservation interfaces = 5;
+}
+
+// InterfaceObservation is one SNMP-polled interface attribute set (M10-S2).
+// The server upserts the inventory `interfaces` row keyed by the canonical
+// device_id + if_name + if_alias + MAC identity; if_index is stored, audited
+// when it changes, and never used as the identity.
+message InterfaceObservation {
+  // Device UUID from the signed policy's poll targets.
+  string device_id = 1;
+
+  // SNMP ifIndex of the polled row (>= 1). Stored; never identity.
+  int32 if_index = 2;
+
+  // ifName (ifDescr fallback): the primary identity dimension.
+  string if_name = 3;
+
+  // ifAlias; empty when the agent reports none.
+  string if_alias = 4;
+
+  // ifType (IANAifType); 0 = unknown/not reported.
+  int32 if_type = 5;
+
+  // ifAdminStatus normalized to up|down|testing; empty = unknown.
+  string admin_status = 6;
+
+  // ifOperStatus normalized to up|down|testing|unknown|dormant|not_present|
+  // lower_layer_down; empty = unknown.
+  string oper_status = 7;
+
+  // Link speed in bits per second (ifHighSpeed preferred, ifSpeed fallback);
+  // 0 = unknown.
+  int64 speed_bps = 8;
+
+  // ifMtu in bytes; 0 = unknown/not reported.
+  int32 mtu = 9;
+
+  // ifPhysAddress as a canonical colon-separated MAC; empty = unknown.
+  string mac = 10;
+
+  // Observation time (collector clock). Server validates |ts - now| <= 7 days.
+  google.protobuf.Timestamp observed_at = 11;
 }
 
 message PolicyAck {

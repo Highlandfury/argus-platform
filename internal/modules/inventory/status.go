@@ -70,3 +70,35 @@ func statusTime(t *time.Time) any {
 type DeviceStatusProvider interface {
 	DeviceStatuses(ctx context.Context, orgID uuid.UUID, deviceIDs []uuid.UUID) (map[uuid.UUID]DeviceStatus, error)
 }
+
+// InterfaceFreshnessSeconds is the M10-S2 interface rollup freshness window.
+// It mirrors the device rollup choice (M10-S1 §7.3): the adaptive scheduler
+// probes at least once per 15-minute backoff ceiling (+ jitter, batching and
+// transport latency), so 20 minutes proves the interface row is still being
+// observed. Canonical documents are silent; the value is exposed in every
+// interface payload so clients can explain the rollup.
+const InterfaceFreshnessSeconds = 20 * 60
+
+// InterfaceStatusAt derives the live interface status from the newest SNMP
+// observation, mirroring the device status vocabulary (up/down/unknown):
+//
+//	up       newest observation reports oper_status=up and is fresh
+//	down     newest observation reports any other known IF-MIB state and is
+//	         fresh (down, testing, dormant, not_present, lower_layer_down)
+//	unknown  no SNMP observation yet (last_seen_at nil), no oper_status, or
+//	         the last observation is older than the freshness window
+//
+// A stale row is unknown even if the last state was down: an observation that
+// stopped cannot assert current state (same rule as the device rollup).
+func InterfaceStatusAt(i Interface, now time.Time) string {
+	if i.LastSeenAt == nil || i.OperStatus == nil {
+		return StatusUnknown
+	}
+	if now.Sub(*i.LastSeenAt) > InterfaceFreshnessSeconds*time.Second {
+		return StatusUnknown
+	}
+	if *i.OperStatus == "up" {
+		return StatusUp
+	}
+	return StatusDown
+}

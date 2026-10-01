@@ -104,6 +104,10 @@ func policyDocument(targets []PolicyTarget) PolicyDocument {
 			{Key: "net.if.out_errors", Unit: "count/s", Source: "snmp", IntervalSeconds: 60},
 			{Key: "net.if.in_discards", Unit: "count/s", Source: "snmp", IntervalSeconds: 60},
 			{Key: "net.if.out_discards", Unit: "count/s", Source: "snmp", IntervalSeconds: 60},
+			// M10-S2 interface-attribute gauges (the inventory linker also
+			// consumes them via InterfaceObservation messages).
+			{Key: "net.if.speed_bps", Unit: "bit/s", Source: "snmp", IntervalSeconds: 60},
+			{Key: "net.if.mtu", Unit: "B", Source: "snmp", IntervalSeconds: 60},
 			// M9-S2b adaptive-backoff telemetry is NOT part of this slice.
 		},
 		Targets: targets,

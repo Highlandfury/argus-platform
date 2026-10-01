@@ -12,6 +12,7 @@ type metricsSet struct {
 	batches       *prometheus.CounterVec
 	samples       *prometheus.CounterVec
 	health        *prometheus.CounterVec
+	interfaces    *prometheus.CounterVec
 	batchDuration prometheus.Histogram
 }
 
@@ -29,6 +30,10 @@ func newMetricsSet(tel *telemetry.Registry) *metricsSet {
 			Namespace: "argus", Subsystem: "ingest", Name: "poll_health_total",
 			Help: "Poll-health records persisted by status (M9-S1).",
 		}, []string{"status"}),
+		interfaces: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "argus", Subsystem: "ingest", Name: "interface_links_total",
+			Help: "Interface association outcomes (M10-S2: created/rebound/skipped).",
+		}, []string{"action"}),
 		batchDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: "argus", Subsystem: "ingest", Name: "batch_duration_seconds",
 			Help:    "End-to-end batch pipeline duration (validate+commit).",
@@ -36,7 +41,7 @@ func newMetricsSet(tel *telemetry.Registry) *metricsSet {
 		}),
 	}
 	if tel != nil {
-		tel.MustRegister(m.batches, m.samples, m.health, m.batchDuration)
+		tel.MustRegister(m.batches, m.samples, m.health, m.interfaces, m.batchDuration)
 	}
 	return m
 }

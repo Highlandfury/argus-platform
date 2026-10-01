@@ -205,7 +205,7 @@ func identityPayload(h IdentityRecord) map[string]any {
 	}
 }
 
-func interfacePayload(i Interface) map[string]any {
+func interfacePayload(i Interface, now time.Time) map[string]any {
 	return map[string]any{
 		"id":            i.ID.String(),
 		"device_id":     i.DeviceID.String(),
@@ -223,6 +223,10 @@ func interfacePayload(i Interface) map[string]any {
 		"monitored":     i.Monitored,
 		"first_seen_at": i.FirstSeenAt.UTC().Format(time.RFC3339),
 		"last_seen_at":  rfc3339Ptr(i.LastSeenAt),
+		// M10-S2 live status rollup (same vocabulary as the device rollup):
+		// up/down/unknown derived from the newest SNMP observation + freshness.
+		"status":            InterfaceStatusAt(i, now),
+		"freshness_seconds": InterfaceFreshnessSeconds,
 	}
 }
 
@@ -1029,8 +1033,9 @@ func (h *HTTP) ListDeviceInterfaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := make([]map[string]any, 0, len(page.Interfaces))
+	now := time.Now().UTC()
 	for _, i := range page.Interfaces {
-		data = append(data, interfacePayload(i))
+		data = append(data, interfacePayload(i, now))
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"data":        data,
@@ -1108,7 +1113,7 @@ func (h *HTTP) CreateDeviceInterface(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	httpx.WriteJSON(w, http.StatusCreated, interfacePayload(created))
+	httpx.WriteJSON(w, http.StatusCreated, interfacePayload(created, time.Now().UTC()))
 }
 
 // GetInterface handles GET /v1/interfaces/{id}.
@@ -1138,7 +1143,7 @@ func (h *HTTP) GetInterface(w http.ResponseWriter, r *http.Request) {
 	if !h.interfaceInScope(w, r, p, sc, i) {
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, interfacePayload(i))
+	httpx.WriteJSON(w, http.StatusOK, interfacePayload(i, time.Now().UTC()))
 }
 
 // interfacePatchFields is the PATCH /v1/interfaces/{id} allowlist (editable
@@ -1282,7 +1287,7 @@ func (h *HTTP) UpdateInterface(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "interface update failed")
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, interfacePayload(updated))
+	httpx.WriteJSON(w, http.StatusOK, interfacePayload(updated, time.Now().UTC()))
 }
 
 // DeleteInterface handles DELETE /v1/interfaces/{id} (admin only; hard delete,

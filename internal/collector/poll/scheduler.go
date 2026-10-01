@@ -58,6 +58,10 @@ type Config struct {
 	Log         *slog.Logger
 	OnSample    func(Sample)
 	OnHealth    func(Health)
+	// OnInterfaces receives the interface observations of one SNMP probe
+	// (M10-S2); nil disables observation emission (the M10-S0 on-demand check
+	// path deliberately does not emit them).
+	OnInterfaces func([]InterfaceObservation)
 	// IdleWait bounds how long Run sleeps when no target is due (default 1 s);
 	// ApplyTargets can arrive while sleeping.
 	IdleWait time.Duration
@@ -304,6 +308,9 @@ func (e *Engine) probe(ctx context.Context, st *targetState) {
 		if e.cfg.OnSample != nil {
 			e.cfg.OnSample(s)
 		}
+	}
+	if len(res.InterfaceObservations) > 0 && e.cfg.OnInterfaces != nil {
+		e.cfg.OnInterfaces(res.InterfaceObservations)
 	}
 
 	e.mu.Lock()

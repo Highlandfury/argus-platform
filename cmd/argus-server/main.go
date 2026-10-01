@@ -239,7 +239,7 @@ func cmdServe(args []string) int {
 			grpc.KeepaliveParams(keepalive.ServerParameters{Time: 30 * time.Second, Timeout: 10 * time.Second}),
 			grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{MinTime: 10 * time.Second, PermitWithoutStream: false}),
 		)
-		streamServer := collectors.NewStreamServer(collectorsSvc, sessions, ingest.New(appPool, nil, argus, logger), logger)
+		streamServer := collectors.NewStreamServer(collectorsSvc, sessions, ingest.New(appPool, nil, argus, logger, ingest.WithAudit(inventory.SlogAudit{Logger: logger})), logger)
 		streamServer.Checks = checksSvc
 		streamServer.CheckResults = checksSvc
 		collectorv1.RegisterCollectorServiceServer(streamGRPC, streamServer)

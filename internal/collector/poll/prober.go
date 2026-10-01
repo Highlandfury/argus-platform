@@ -56,6 +56,11 @@ type Result struct {
 	SnmpSamples       []Sample
 	SnmpMetricsSeen   int
 	SnmpMetricsExpect int
+	// InterfaceObservations carries the per-row IF-MIB attributes (M10-S2)
+	// rendered by the prober for the server-side interfaces association. Rows
+	// observed before a failed later walk are real data and are kept, like
+	// samples.
+	InterfaceObservations []InterfaceObservation
 	// CPULoadHigh reports that the device answered while one of its
 	// hrProcessorLoad values crossed the M9-S4 guard threshold (docs/07
 	// §12.7): healthy poll, but the scheduler steps the cadence down.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -414,8 +416,144 @@ func (p *SNMPProber) applyPackRows(target Target, pack SNMPTemplate, rows map[st
 				}
 			}
 		}
+
+		if obs, ok := interfaceObservation(target, pack, row, idx, baseDims, ts); ok {
+			res.InterfaceObservations = append(res.InterfaceObservations, obs)
+		}
 	}
 	return len(seen)
+}
+
+// interfaceObservation renders one IF-MIB row into an InterfaceObservation
+// (M10-S2). It requires an ifName (the primary identity dimension) and a
+// parseable ifIndex; rows without either are skipped exactly like
+// identity-less series rows. ifIndex comes from the table row index and is
+// never inserted into series dimensions (RFC 2863; docs/07 §12.3).
+func interfaceObservation(target Target, pack SNMPTemplate, row map[string]SNMPVarBind, idx string, dims map[string]string, ts time.Time) (InterfaceObservation, bool) {
+	name := strings.TrimSpace(dims["if_name"])
+	index, err := strconv.Atoi(idx)
+	if err != nil || index < 1 || name == "" {
+		return InterfaceObservation{}, false
+	}
+	obs := InterfaceObservation{
+		DeviceID:   target.DeviceID,
+		IfIndex:    index,
+		IfName:     name,
+		ObservedAt: ts,
+	}
+	if alias := dims["if_alias"]; alias != "" {
+		obs.IfAlias = &alias
+	}
+	for _, col := range pack.Columns {
+		if !InterfaceRoles[col.Role] {
+			continue
+		}
+		b, ok := row[col.OID+"."+idx]
+		if !ok {
+			continue
+		}
+		switch col.Role {
+		case SNMPRoleIfType:
+			if v, ok := b.Numeric(); ok && v >= 0 {
+				n := int(v)
+				obs.IfType = &n
+			}
+		case SNMPRoleIfMtu:
+			if v, ok := b.Numeric(); ok && v > 0 {
+				n := int(v * col.EffectiveScale())
+				obs.MTU = &n
+			}
+		case SNMPRoleIfSpeed:
+			if v, ok := b.Numeric(); ok && v > 0 {
+				bps := int64(v * col.EffectiveScale())
+				obs.SpeedBPS = &bps
+			}
+		case SNMPRoleIfHighSpeed:
+			if v, ok := b.Numeric(); ok && v > 0 {
+				bps := int64(v * col.EffectiveScale())
+				obs.SpeedBPS = &bps // preferred over the 32-bit ifSpeed fallback
+			}
+		case SNMPRoleIfMAC:
+			if mac := canonicalMAC(b.Str); mac != "" {
+				obs.MAC = &mac
+			}
+		case SNMPRoleIfAdminStatus:
+			if v, ok := b.Numeric(); ok {
+				if status := adminStatusName(int(v)); status != "" {
+					obs.AdminStatus = &status
+				}
+			}
+		case SNMPRoleIfOperStatus:
+			if v, ok := b.Numeric(); ok {
+				if status := operStatusName(int(v)); status != "" {
+					obs.OperStatus = &status
+				}
+			}
+		}
+	}
+	return obs, true
+}
+
+// adminStatusName maps ifAdminStatus (RFC 2863: up(1) down(2) testing(3)) onto
+// the canonical text stored in interfaces.admin_status. Unknown values are
+// omitted rather than guessed.
+func adminStatusName(v int) string {
+	switch v {
+	case 1:
+		return "up"
+	case 2:
+		return "down"
+	case 3:
+		return "testing"
+	default:
+		return ""
+	}
+}
+
+// operStatusName maps ifOperStatus (RFC 2863: up(1) down(2) testing(3)
+// unknown(4) dormant(5) notPresent(6) lowerLayerDown(7)) onto the canonical
+// text stored in interfaces.oper_status.
+func operStatusName(v int) string {
+	switch v {
+	case 1:
+		return "up"
+	case 2:
+		return "down"
+	case 3:
+		return "testing"
+	case 4:
+		return "unknown"
+	case 5:
+		return "dormant"
+	case 6:
+		return "not_present"
+	case 7:
+		return "lower_layer_down"
+	default:
+		return ""
+	}
+}
+
+// canonicalMAC renders an ifPhysAddress OctetString as a canonical
+// colon-separated MAC. Agents return raw bytes (6 or 8 octets); a value that
+// already parses as a MAC text form is normalized. Anything else is treated as
+// unknown (no invented MAC).
+func canonicalMAC(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if mac, err := net.ParseMAC(strings.TrimSpace(raw)); err == nil {
+		return mac.String()
+	}
+	b := []byte(raw)
+	if len(b) != 6 && len(b) != 8 {
+		return ""
+	}
+	parts := make([]string, len(b))
+	for i, x := range b {
+		parts[i] = fmt.Sprintf("%02x", x)
+	}
+	return strings.Join(parts, ":")
 }
 
 // driftedPack implements the canonical "expected vs seen metrics ratio" for

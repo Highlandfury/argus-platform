@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"time"
 
 	"github.com/google/uuid"
 
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
+	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
 )
 
@@ -23,6 +25,10 @@ const (
 	// MaxBatchHealth bounds poll-health records per batch (M9-S1; the
 	// collector batches at 500, the server ceiling is deliberately higher).
 	MaxBatchHealth = 1000
+	// MaxBatchInterfaces bounds interface observations per batch (M10-S2). A
+	// batch carries at most ~25 observations per device, so the ceiling covers
+	// many devices while staying inside the gRPC message budget.
+	MaxBatchInterfaces = 1000
 	// TimestampTolerance is the ±7 day acceptance window for sample ts.
 	TimestampTolerance = 7 * 24 * time.Hour
 	// maxAbsValue is the sanity bound for non-percent units. Percent metrics
@@ -36,6 +42,25 @@ const (
 	maxHealthClassLen = 100
 	// maxPollTypeLen bounds poll_type (icmp|snmp today, extensible).
 	maxPollTypeLen = 20
+	// maxIfNameLen / maxIfAliasLen bound interface observation text.
+	maxIfNameLen  = 200
+	maxIfAliasLen = 200
+	// maxIfSpeedBPS bounds a reported link speed (1 Pbit/s; the DB column is
+	// bigint and RFC 2863 ifSpeed is 32-bit, ifHighSpeed is Mbps).
+	maxIfSpeedBPS = int64(1) << 50
+	// maxIfMTU bounds a reported MTU.
+	maxIfMTU = 1 << 20
+)
+
+// allowedInterfaceAdminStatuses / allowedInterfaceOperStatuses are the
+// canonical text values the collector renders from the IF-MIB enums; anything
+// else is rejected so a bad agent value can never contaminate the inventory.
+var (
+	allowedInterfaceAdminStatuses = map[string]bool{"up": true, "down": true, "testing": true}
+	allowedInterfaceOperStatuses  = map[string]bool{
+		"up": true, "down": true, "testing": true, "unknown": true,
+		"dormant": true, "not_present": true, "lower_layer_down": true,
+	}
 )
 
 // RejectError is a permanent, machine-readable rejection. The Reason string is
@@ -101,8 +126,8 @@ func ValidateBatchPayload(batch *collectorv1.MetricBatch, allowlist map[string]M
 	if batch.GetBatchSeq() <= 0 {
 		return nil, nil, &RejectError{"validation.batch_seq_invalid", "batch_seq must be > 0"}
 	}
-	if len(batch.GetSamples()) == 0 && len(batch.GetHealth()) == 0 {
-		return nil, nil, &RejectError{"validation.batch_empty", "batch has no samples and no health records"}
+	if len(batch.GetSamples()) == 0 && len(batch.GetHealth()) == 0 && len(batch.GetInterfaces()) == 0 {
+		return nil, nil, &RejectError{"validation.batch_empty", "batch has no samples, health records or interface observations"}
 	}
 	samples, rej := validateSamples(batch.GetSamples(), allowlist, now)
 	if rej != nil {
@@ -261,6 +286,107 @@ func validateHealth(records []*collectorv1.PollHealth, now time.Time) ([]Validat
 			CheckedAt:           checkedAt.UTC(),
 			Origin:              origin,
 		})
+	}
+	return out, nil
+}
+
+// ValidateInterfaceObservations normalizes the SNMP interface-observation
+// section (M10-S2) into the inventory linker's shape. The collector already
+// renders canonical text; the server re-validates fail-closed so a buggy or
+// hostile collector cannot write arbitrary values into inventory rows.
+func ValidateInterfaceObservations(records []*collectorv1.InterfaceObservation, now time.Time) ([]inventory.InterfaceObservation, *RejectError) {
+	if len(records) > MaxBatchInterfaces {
+		return nil, &RejectError{"validation.interfaces_too_many",
+			fmt.Sprintf("batch has %d interface observations, limit is %d", len(records), MaxBatchInterfaces)}
+	}
+	out := make([]inventory.InterfaceObservation, 0, len(records))
+	oldest := now.Add(-TimestampTolerance)
+	newest := now.Add(TimestampTolerance)
+	for i, o := range records {
+		id, err := uuid.Parse(o.GetDeviceId())
+		if err != nil {
+			return nil, &RejectError{"validation.interface_device_invalid",
+				fmt.Sprintf("interface %d: device_id %q is not a UUID", i, o.GetDeviceId())}
+		}
+		name := o.GetIfName()
+		if name == "" || len(name) > maxIfNameLen {
+			return nil, &RejectError{"validation.interface_name_invalid",
+				fmt.Sprintf("interface %d: if_name is empty or longer than %d chars", i, maxIfNameLen)}
+		}
+		if alias := o.GetIfAlias(); len(alias) > maxIfAliasLen {
+			return nil, &RejectError{"validation.interface_alias_invalid",
+				fmt.Sprintf("interface %d: if_alias exceeds %d chars", i, maxIfAliasLen)}
+		}
+		if idx := o.GetIfIndex(); idx < 1 {
+			return nil, &RejectError{"validation.interface_index_invalid",
+				fmt.Sprintf("interface %d: if_index %d must be >= 1", i, idx)}
+		}
+		if admin := o.GetAdminStatus(); admin != "" && !allowedInterfaceAdminStatuses[admin] {
+			return nil, &RejectError{"validation.interface_admin_status_invalid",
+				fmt.Sprintf("interface %d: admin_status %q is not a canonical IF-MIB state", i, admin)}
+		}
+		if oper := o.GetOperStatus(); oper != "" && !allowedInterfaceOperStatuses[oper] {
+			return nil, &RejectError{"validation.interface_oper_status_invalid",
+				fmt.Sprintf("interface %d: oper_status %q is not a canonical IF-MIB state", i, oper)}
+		}
+		if speed := o.GetSpeedBps(); speed < 0 || speed > maxIfSpeedBPS {
+			return nil, &RejectError{"validation.interface_speed_invalid",
+				fmt.Sprintf("interface %d: speed_bps %d outside [0,%d]", i, speed, maxIfSpeedBPS)}
+		}
+		if mtu := o.GetMtu(); mtu < 0 || mtu > maxIfMTU {
+			return nil, &RejectError{"validation.interface_mtu_invalid",
+				fmt.Sprintf("interface %d: mtu %d outside [0,%d]", i, mtu, maxIfMTU)}
+		}
+		observed := o.GetObservedAt()
+		if observed == nil {
+			return nil, &RejectError{"validation.interface_ts_missing",
+				fmt.Sprintf("interface %d: observed_at is required", i)}
+		}
+		observedAt := observed.AsTime()
+		if observedAt.Before(oldest) || observedAt.After(newest) {
+			return nil, &RejectError{"validation.interface_ts_out_of_range",
+				fmt.Sprintf("interface %d: observed_at %s outside ±%s of now", i, observedAt.UTC().Format(time.RFC3339), TimestampTolerance)}
+		}
+		vo := inventory.InterfaceObservation{
+			DeviceID:   id,
+			IfIndex:    int(o.GetIfIndex()),
+			IfName:     name,
+			ObservedAt: observedAt.UTC(),
+		}
+		if alias := o.GetIfAlias(); alias != "" {
+			v := alias
+			vo.IfAlias = &v
+		}
+		if t := o.GetIfType(); t > 0 {
+			v := int(t)
+			vo.IfType = &v
+		}
+		if admin := o.GetAdminStatus(); admin != "" {
+			v := admin
+			vo.AdminStatus = &v
+		}
+		if oper := o.GetOperStatus(); oper != "" {
+			v := oper
+			vo.OperStatus = &v
+		}
+		if speed := o.GetSpeedBps(); speed > 0 {
+			v := speed
+			vo.SpeedBPS = &v
+		}
+		if mtu := o.GetMtu(); mtu > 0 {
+			v := int(mtu)
+			vo.MTU = &v
+		}
+		if mac := o.GetMac(); mac != "" {
+			parsed, err := net.ParseMAC(mac)
+			if err != nil {
+				return nil, &RejectError{"validation.interface_mac_invalid",
+					fmt.Sprintf("interface %d: mac %q is not a MAC address", i, mac)}
+			}
+			v := parsed.String()
+			vo.MAC = &v
+		}
+		out = append(out, vo)
 	}
 	return out, nil
 }

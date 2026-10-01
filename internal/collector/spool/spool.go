@@ -39,17 +39,40 @@ type Health struct {
 	Origin string `json:"origin,omitempty"`
 }
 
+// InterfaceObservation is one SNMP-polled interface attribute set (M10-S2).
+// It rides the same durable record, batch_seq claim and BatchResult ack as
+// samples and health: an observation lost with the spool is retransmitted with
+// the batch. if_index is stored server-side but is never part of interface or
+// series identity (RFC 2863; docs/07 §12.3).
+type InterfaceObservation struct {
+	DeviceID    string    `json:"device_id"`
+	IfIndex     int       `json:"if_index"`
+	IfName      string    `json:"if_name"`
+	IfAlias     *string   `json:"if_alias,omitempty"`
+	IfType      *int      `json:"if_type,omitempty"`
+	AdminStatus *string   `json:"admin_status,omitempty"`
+	OperStatus  *string   `json:"oper_status,omitempty"`
+	SpeedBPS    *int64    `json:"speed_bps,omitempty"`
+	MTU         *int      `json:"mtu,omitempty"`
+	MAC         *string   `json:"mac,omitempty"`
+	ObservedAt  time.Time `json:"observed_at"`
+}
+
 // Batch is the unit of durable storage; payload is the exact wire message.
-// A batch carries samples, health records, or both (M9-S1).
+// A batch carries samples, health records, interface observations, or any
+// combination (M9-S1, M10-S2).
 type Batch struct {
-	Seq     int64     `json:"seq"`
-	At      time.Time `json:"created_at"`
-	Samples []Sample  `json:"samples,omitempty"`
-	Health  []Health  `json:"health,omitempty"`
+	Seq        int64                  `json:"seq"`
+	At         time.Time              `json:"created_at"`
+	Samples    []Sample               `json:"samples,omitempty"`
+	Health     []Health               `json:"health,omitempty"`
+	Interfaces []InterfaceObservation `json:"interfaces,omitempty"`
 }
 
 // Empty reports whether the batch has no payload of either kind.
-func (b *Batch) Empty() bool { return len(b.Samples) == 0 && len(b.Health) == 0 }
+func (b *Batch) Empty() bool {
+	return len(b.Samples) == 0 && len(b.Health) == 0 && len(b.Interfaces) == 0
+}
 
 // ToProto converts a stored batch into its wire form.
 func (b *Batch) ToProto() *collectorv1.MetricBatch {
@@ -79,11 +102,44 @@ func (b *Batch) ToProto() *collectorv1.MetricBatch {
 			Origin:              h.Origin,
 		}
 	}
+	interfaces := make([]*collectorv1.InterfaceObservation, len(b.Interfaces))
+	for i := range b.Interfaces {
+		o := b.Interfaces[i]
+		obs := &collectorv1.InterfaceObservation{
+			DeviceId:   o.DeviceID,
+			IfIndex:    int32(o.IfIndex), //nolint:gosec // validated ifIndex (>=1, < 2^31)
+			IfName:     o.IfName,
+			ObservedAt: timestamppb.New(o.ObservedAt),
+		}
+		if o.IfAlias != nil {
+			obs.IfAlias = *o.IfAlias
+		}
+		if o.IfType != nil {
+			obs.IfType = int32(*o.IfType) //nolint:gosec // ifType is a small IANA enum
+		}
+		if o.AdminStatus != nil {
+			obs.AdminStatus = *o.AdminStatus
+		}
+		if o.OperStatus != nil {
+			obs.OperStatus = *o.OperStatus
+		}
+		if o.SpeedBPS != nil {
+			obs.SpeedBps = *o.SpeedBPS
+		}
+		if o.MTU != nil {
+			obs.Mtu = int32(*o.MTU) //nolint:gosec // bounded by the observation builder
+		}
+		if o.MAC != nil {
+			obs.Mac = *o.MAC
+		}
+		interfaces[i] = obs
+	}
 	return &collectorv1.MetricBatch{
-		BatchSeq:  b.Seq,
-		Samples:   samples,
-		CreatedAt: timestamppb.New(b.At),
-		Health:    health,
+		BatchSeq:   b.Seq,
+		Samples:    samples,
+		CreatedAt:  timestamppb.New(b.At),
+		Health:     health,
+		Interfaces: interfaces,
 	}
 }
 
@@ -114,6 +170,39 @@ func batchFromPayload(payload []byte) (*Batch, error) {
 			CheckedAt:           h.GetCheckedAt().AsTime(),
 			Origin:              h.GetOrigin(),
 		})
+	}
+	for _, o := range pb.GetInterfaces() {
+		obs := InterfaceObservation{
+			DeviceID:   o.GetDeviceId(),
+			IfIndex:    int(o.GetIfIndex()),
+			IfName:     o.GetIfName(),
+			ObservedAt: o.GetObservedAt().AsTime(),
+		}
+		if s := o.GetIfAlias(); s != "" {
+			obs.IfAlias = &s
+		}
+		if n := o.GetIfType(); n != 0 {
+			v := int(n)
+			obs.IfType = &v
+		}
+		if s := o.GetAdminStatus(); s != "" {
+			obs.AdminStatus = &s
+		}
+		if s := o.GetOperStatus(); s != "" {
+			obs.OperStatus = &s
+		}
+		if n := o.GetSpeedBps(); n != 0 {
+			v := n
+			obs.SpeedBPS = &v
+		}
+		if n := o.GetMtu(); n != 0 {
+			v := int(n)
+			obs.MTU = &v
+		}
+		if s := o.GetMac(); s != "" {
+			obs.MAC = &s
+		}
+		b.Interfaces = append(b.Interfaces, obs)
 	}
 	return b, nil
 }

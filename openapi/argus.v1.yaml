@@ -1317,11 +1317,11 @@ components:
         freshness_seconds: { type: integer, description: "Freshness window before a missing scheduled row means unknown (documented choice: 1200 s, covering the 15 min backoff ceiling + jitter + batching)" }
     Interface:
       type: object
-      required: [id, device_id, if_index, if_name, role, monitored, first_seen_at]
+      required: [id, device_id, if_index, if_name, role, monitored, first_seen_at, status, freshness_seconds]
       properties:
         id: { type: string, format: uuid }
         device_id: { type: string, format: uuid }
-        if_index: { type: integer, description: 'SNMP ifIndex; identity is UQ(device_id, if_index) and immutable' }
+        if_index: { type: integer, description: 'SNMP ifIndex; stored, never the identity (canonical identity is device_id + if_name + if_alias + mac) and rebound audited through the M10-S2 ingest association' }
         if_name: { type: string }
         if_alias: { type: [string, 'null'] }
         if_type: { type: [integer, 'null'] }
@@ -1335,6 +1335,8 @@ components:
         monitored: { type: boolean }
         first_seen_at: { type: string, format: date-time }
         last_seen_at: { type: [string, 'null'], format: date-time }
+        status: { type: string, enum: [up, down, unknown], description: 'Live rollup from the newest SNMP observation + freshness (M10-S2): up = fresh oper_status up; down = any other fresh known state; unknown = never observed or stale' }
+        freshness_seconds: { type: integer, description: 'Interface rollup freshness window in seconds (M10-S2)' }
     InterfaceCreate:
       type: object
       required: [if_index, if_name]

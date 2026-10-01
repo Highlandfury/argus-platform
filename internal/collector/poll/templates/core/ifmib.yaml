@@ -8,13 +8,21 @@
 # create a new series and the counter discontinuity/reboot rules keep the rate
 # correct.
 #
+# M10-S2 adds the interface-attribute columns the inventory linker consumes:
+# ifType/ifAdminStatus/ifOperStatus/ifSpeed/ifHighSpeed/ifMtu/ifPhysAddress
+# (docs/07 §12.3 "templates key table rows by ifName + ifAlias + MAC"; the
+# inventory row keeps ifIndex stored but never identity). Roles starting with
+# `if_` mark observation attributes the SNMP prober renders into
+# InterfaceObservation messages; ifHighSpeed/ifMtu also emit gauge series
+# (net.if.speed_bps normalized to bit/s, net.if.mtu in B).
+#
 # Counter units are rates (docs/08 §13.2/§13.4: counters are converted to
 # rates at normalize time — for this platform the collector is the normalizer,
 # see docs/11 §20.4). max_rate is the false-spike guard ceiling
 # (12500000000 B/s = 100 Gbps; 10000000 = 10M errors or discards/s).
 name: core/if-mib
 version: 1
-description: IF-MIB ifTable + ifXTable with HC 64-bit counters and errors/discards
+description: IF-MIB ifTable + ifXTable with HC 64-bit counters, errors/discards and interface attributes
 required: true
 select:
   kinds: [switch, router, firewall, ap, gateway, load_balancer]
@@ -40,10 +48,28 @@ tables:
     required: true
     max_rows: 25
 columns:
+  - oid: "1.3.6.1.2.1.2.2.1.3"
+    role: if_type
+    type: gauge
+  - oid: "1.3.6.1.2.1.2.2.1.4"
+    key: net.if.mtu
+    unit: B
+    type: gauge
+    role: if_mtu
+  - oid: "1.3.6.1.2.1.2.2.1.5"
+    role: if_speed
+    type: gauge
+  - oid: "1.3.6.1.2.1.2.2.1.6"
+    role: if_mac
+    type: string
+  - oid: "1.3.6.1.2.1.2.2.1.7"
+    role: if_admin_status
+    type: gauge
   - oid: "1.3.6.1.2.1.2.2.1.8"
     key: net.if.oper_status
     unit: state
     type: state
+    role: if_oper_status
   - oid: "1.3.6.1.2.1.2.2.1.13"
     key: net.if.in_discards
     unit: count/s
@@ -80,6 +106,12 @@ columns:
     type: counter
     width: 64
     max_rate: 12500000000
+  - oid: "1.3.6.1.2.1.31.1.1.1.15"
+    key: net.if.speed_bps
+    unit: bit/s
+    type: gauge
+    scale: 1000000
+    role: if_high_speed
   - oid: "1.3.6.1.2.1.31.1.1.1.19"
     type: gauge
     role: discontinuity

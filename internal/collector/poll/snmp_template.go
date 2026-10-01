@@ -26,7 +26,31 @@ const (
 const (
 	SNMPRoleSysUptime     = "sys_uptime"
 	SNMPRoleDiscontinuity = "discontinuity"
+
+	// M10-S2 interface-observation roles. A row's ifIndex is the walked table
+	// index (never a declarable column); these map the remaining IF-MIB
+	// attributes into one InterfaceObservation. Roles without a key are
+	// observation-only (no series); roles on emitting columns provide both.
+	SNMPRoleIfType        = "if_type"
+	SNMPRoleIfMtu         = "if_mtu"
+	SNMPRoleIfSpeed       = "if_speed"        // ifSpeed, bit/s (32-bit fallback)
+	SNMPRoleIfHighSpeed   = "if_high_speed"   // ifHighSpeed, Mbit/s (scaled to bit/s)
+	SNMPRoleIfMAC         = "if_mac"          // ifPhysAddress (OctetString -> canonical MAC)
+	SNMPRoleIfAdminStatus = "if_admin_status" // ifAdminStatus enum
+	SNMPRoleIfOperStatus  = "if_oper_status"  // ifOperStatus enum
 )
+
+// InterfaceRoles lists the observation roles; the prober renders every role in
+// this set into InterfaceObservation messages.
+var InterfaceRoles = map[string]bool{
+	SNMPRoleIfType:        true,
+	SNMPRoleIfMtu:         true,
+	SNMPRoleIfSpeed:       true,
+	SNMPRoleIfHighSpeed:   true,
+	SNMPRoleIfMAC:         true,
+	SNMPRoleIfAdminStatus: true,
+	SNMPRoleIfOperStatus:  true,
+}
 
 //go:embed templates/core/*.yaml
 var coreTemplatesFS embed.FS
@@ -345,7 +369,9 @@ func validateSNMPColumn(tplName string, c SNMPColumn) error {
 		return fmt.Errorf("template %s column %s: scale must be >= 0", tplName, c.Key)
 	}
 	switch c.Role {
-	case "", SNMPRoleSysUptime, SNMPRoleDiscontinuity:
+	case "", SNMPRoleSysUptime, SNMPRoleDiscontinuity,
+		SNMPRoleIfType, SNMPRoleIfMtu, SNMPRoleIfSpeed, SNMPRoleIfHighSpeed,
+		SNMPRoleIfMAC, SNMPRoleIfAdminStatus, SNMPRoleIfOperStatus:
 	default:
 		return fmt.Errorf("template %s column %s: unknown role %q", tplName, c.Key, c.Role)
 	}

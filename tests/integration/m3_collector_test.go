@@ -40,6 +40,7 @@ import (
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	identitymod "github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/ingest"
+	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/database"
 	"github.com/argus-platform/argus/internal/platform/ratelimit"
@@ -53,6 +54,7 @@ type m3Env struct {
 	svc        *collectors.Service
 	registry   *collectors.SessionRegistry
 	checks     *checks.Service
+	audit      inventory.AuditSink
 	caFile     string
 	enrollAddr string
 	streamAddr string
@@ -104,7 +106,7 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 
 	streamTCP, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
-	streamSrv := newStreamGRPC(ca, svc, registry, checksSvc, log)
+	streamSrv := newStreamGRPC(ca, svc, registry, checksSvc, log, cfg.audit)
 	go func() { _ = streamSrv.Serve(streamTCP) }()
 
 	t.Cleanup(func() {
@@ -120,6 +122,7 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 		svc:        svc,
 		registry:   registry,
 		checks:     checksSvc,
+		audit:      cfg.audit,
 		caFile:     caFile,
 		enrollAddr: enrollTCP.Addr().String(),
 		streamAddr: streamTCP.Addr().String(),
@@ -128,7 +131,7 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 	}
 }
 
-func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collectors.SessionRegistry, checksSvc *checks.Service, log *slog.Logger) *grpc.Server {
+func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collectors.SessionRegistry, checksSvc *checks.Service, log *slog.Logger, audit inventory.AuditSink) *grpc.Server {
 	srv := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{
 			Certificates: []tls.Certificate{*ca.ServerTLS()},
@@ -138,7 +141,7 @@ func newStreamGRPC(ca *collectors.CA, svc *collectors.Service, registry *collect
 		})),
 		grpc.MaxRecvMsgSize(16<<20),
 	)
-	streamServer := collectors.NewStreamServer(svc, registry, ingest.New(appPool, nil, nil, log), log)
+	streamServer := collectors.NewStreamServer(svc, registry, ingest.New(appPool, nil, nil, log, ingest.WithAudit(audit)), log)
 	streamServer.Checks = checksSvc
 	streamServer.CheckResults = checksSvc
 	collectorv1.RegisterCollectorServiceServer(srv, streamServer)
@@ -162,7 +165,7 @@ func (e *m3Env) restartStream(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	must(t, err)
-	e.streamSrv = newStreamGRPC(e.ca, e.svc, e.registry, e.checks, e.log)
+	e.streamSrv = newStreamGRPC(e.ca, e.svc, e.registry, e.checks, e.log, e.audit)
 	go func() { _ = e.streamSrv.Serve(ln) }()
 }
 
@@ -170,12 +173,19 @@ type m3EnvConfig struct {
 	limiter      bool
 	logBuffer    *bytes.Buffer
 	credResolver collectors.CredentialResolver
+	audit        inventory.AuditSink
 }
 
 type m3Option func(*m3EnvConfig)
 
 func withEnrollLimiter() m3Option {
 	return func(c *m3EnvConfig) { c.limiter = true }
+}
+
+// withInventoryAudit wires an observable inventory audit sink into the
+// in-process ingest pipeline (M10-S2 interface association events).
+func withInventoryAudit(sink inventory.AuditSink) m3Option {
+	return func(c *m3EnvConfig) { c.audit = sink }
 }
 
 // withCredentialResolver wires the M9-S3 credentials resolver into the

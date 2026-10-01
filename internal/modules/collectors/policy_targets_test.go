@@ -49,6 +49,7 @@ func TestPolicyTargetsRoundTrip(t *testing.T) {
 		"net.if.in_octets", "net.if.out_octets",
 		"net.if.in_errors", "net.if.out_errors",
 		"net.if.in_discards", "net.if.out_discards",
+		"net.if.speed_bps", "net.if.mtu",
 	} {
 		if !keys[want] {
 			t.Fatalf("policy metrics missing %s: %+v", want, doc.Metrics)

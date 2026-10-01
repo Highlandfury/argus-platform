@@ -192,13 +192,19 @@ func cmdRun(args []string) int {
 	defer cancelRun() // idempotent; the explicit shutdown call below still runs first
 	sampleCh := make(chan metrics.Sample, 256)
 	healthCh := make(chan poll.Health, 256)
+	ifaceCh := make(chan []poll.InterfaceObservation, 64)
 
 	// Poll engine (M9-S1/S2): ICMP + SNMP probers behind one multi-prober and
 	// the deterministic tier scheduler. Samples flow through the existing
 	// producer channel/batcher/spool; poll health is batched into the same
-	// spool so both ride the batch ack/claim path (no new transport).
+	// spool so both ride the batch ack/claim path (no new transport). M10-S2
+	// interface observations are batched the same way.
 	healthBatcher := poll.NewHealthBatcher(rp.max, rp.report, func(records []poll.Health) error {
 		_, err := sp.Append(&spool.Batch{At: time.Now().UTC(), Health: toSpoolHealth(records)})
+		return err
+	}, logger)
+	interfaceBatcher := poll.NewInterfaceBatcher(rp.max, rp.report, func(records []poll.InterfaceObservation) error {
+		_, err := sp.Append(&spool.Batch{At: time.Now().UTC(), Interfaces: toSpoolInterfaces(records)})
 		return err
 	}, logger)
 	bundleCreds := poll.NewBundleCredentialSource(logger)
@@ -236,6 +242,12 @@ func cmdRun(args []string) int {
 		OnHealth: func(h poll.Health) {
 			select {
 			case healthCh <- h:
+			case <-runCtx.Done():
+			}
+		},
+		OnInterfaces: func(obs []poll.InterfaceObservation) {
+			select {
+			case ifaceCh <- obs:
 			case <-runCtx.Done():
 			}
 		},
@@ -401,6 +413,26 @@ func cmdRun(args []string) int {
 			}
 		}
 	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case obs := <-ifaceCh:
+				if err := interfaceBatcher.Add(obs); err != nil {
+					logger.Warn("interface batcher add", "error", err)
+				}
+			case <-ticker.C:
+				if err := interfaceBatcher.Tick(); err != nil {
+					logger.Warn("interface batcher flush", "error", err)
+				}
+			}
+		}
+	}()
 	logger.Info("poll engine started", "tier_default", poll.StandardInterval.String())
 
 	runErr := client.Run(ctx)
@@ -428,11 +460,23 @@ func cmdRun(args []string) int {
 		}
 		break
 	}
+	for {
+		select {
+		case obs := <-ifaceCh:
+			_ = interfaceBatcher.Add(obs)
+			continue
+		default:
+		}
+		break
+	}
 	if err := batcher.Flush(); err != nil {
 		logger.Error("final flush failed; samples could not be spooled", "error", err)
 	}
 	if err := healthBatcher.Flush(); err != nil {
 		logger.Error("final health flush failed; poll health could not be spooled", "error", err)
+	}
+	if err := interfaceBatcher.Flush(); err != nil {
+		logger.Error("final interface-observation flush failed; observations could not be spooled", "error", err)
 	}
 	if err := sp.ForceSync(); err != nil {
 		logger.Error("final spool sync failed", "error", err)
@@ -489,6 +533,26 @@ func toSpoolHealth(in []poll.Health) []spool.Health {
 			ConsecutiveFailures: h.ConsecutiveFailures,
 			CheckedAt:           h.CheckedAt,
 			Origin:              h.Origin,
+		}
+	}
+	return out
+}
+
+func toSpoolInterfaces(in []poll.InterfaceObservation) []spool.InterfaceObservation {
+	out := make([]spool.InterfaceObservation, len(in))
+	for i, o := range in {
+		out[i] = spool.InterfaceObservation{
+			DeviceID:    o.DeviceID,
+			IfIndex:     o.IfIndex,
+			IfName:      o.IfName,
+			IfAlias:     o.IfAlias,
+			IfType:      o.IfType,
+			AdminStatus: o.AdminStatus,
+			OperStatus:  o.OperStatus,
+			SpeedBPS:    o.SpeedBPS,
+			MTU:         o.MTU,
+			MAC:         o.MAC,
+			ObservedAt:  o.ObservedAt,
 		}
 	}
 	return out

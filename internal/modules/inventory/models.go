@@ -43,8 +43,10 @@ type Device struct {
 	UpdatedAt   time.Time
 }
 
-// Interface is one interfaces row. if_index is the SNMP identity key scoped to
-// the device (UQ(device_id, if_index), RFC 2863) and is never updated.
+// Interface is one interfaces row. Canonical identity is device_id + if_name
+// + if_alias + MAC; if_index is stored (UQ(device_id, if_index) binds one SNMP
+// row per device) but is never the identity and can be rebound by an audited
+// SNMP observation (M10-S2; RFC 2863, docs/07 §12.3).
 type Interface struct {
 	ID          uuid.UUID
 	OrgID       uuid.UUID
@@ -165,7 +167,8 @@ type DevicePatch struct {
 	HasMetadata    bool
 }
 
-// InterfacePatch is a partial interface update (editable metadata only).
+// InterfacePatch is a partial interface update (editable metadata only;
+// if_index is SNMP-rebound through the audited ingest association, not PATCH).
 type InterfacePatch struct {
 	IfName      *string
 	IfAlias     NullableString

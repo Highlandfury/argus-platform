@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
+	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
 	"github.com/argus-platform/argus/internal/platform/database"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
@@ -35,11 +36,22 @@ type Service struct {
 	argus *telemetry.Argus
 	log   *slog.Logger
 	m     *metricsSet
+	audit inventory.AuditSink
+}
+
+// Option configures optional ingest dependencies.
+type Option func(*Service)
+
+// WithAudit wires the audit sink used for SNMP interface association events
+// (M10-S2). Events are recorded after the batch transaction commits, so a
+// rolled-back or retried batch never leaves audit evidence.
+func WithAudit(sink inventory.AuditSink) Option {
+	return func(s *Service) { s.audit = sink }
 }
 
 // New wires the pipeline. store may be nil (TimescaleStore is used unless a
 // test substitutes one); argus may be nil in unit contexts.
-func New(app *pgxpool.Pool, store metrics.Store, argus *telemetry.Argus, log *slog.Logger) *Service {
+func New(app *pgxpool.Pool, store metrics.Store, argus *telemetry.Argus, log *slog.Logger, opts ...Option) *Service {
 	if store == nil {
 		store = metrics.TimescaleStore{}
 	}
@@ -47,13 +59,39 @@ func New(app *pgxpool.Pool, store metrics.Store, argus *telemetry.Argus, log *sl
 	if argus != nil {
 		reg = argus.Reg
 	}
-	return &Service{app: app, store: store, argus: argus, log: log, m: newMetricsSet(reg)}
+	s := &Service{app: app, store: store, argus: argus, log: log, m: newMetricsSet(reg)}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // observeDB records one database operation on the shared §15 histogram.
 func (s *Service) observeDB(op string, start time.Time) {
 	if s.argus != nil {
 		s.argus.DBQueryDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	}
+}
+
+// recordInterfaceEvents emits the M10-S2 association audit events through the
+// configured sink. The actor is the authenticated collector: the association
+// is system-driven, not operator-driven. Called after COMMIT only.
+func (s *Service) recordInterfaceEvents(orgID, collectorID uuid.UUID, events []inventory.InterfaceLinkEvent) {
+	if s.audit == nil || len(events) == 0 {
+		return
+	}
+	at := time.Now().UTC()
+	for _, ev := range events {
+		s.audit.Record(inventory.AuditEvent{
+			Action:       ev.Action,
+			ActorType:    "collector",
+			ActorID:      collectorID,
+			OrgID:        orgID,
+			ResourceType: "interface",
+			ResourceID:   ev.ResourceID,
+			Data:         ev.Data,
+			At:           at,
+		})
 	}
 }
 
@@ -70,8 +108,9 @@ func (s *Service) guardOptions() metrics.GuardOptions {
 // back: nothing is acknowledged.
 func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID, allowlist map[string]MetricDef, batch *collectorv1.MetricBatch) BatchOutcome {
 	start := time.Now()
+	now := time.Now()
 
-	validated, health, rej := ValidateBatchPayload(batch, allowlist, time.Now())
+	validated, health, rej := ValidateBatchPayload(batch, allowlist, now)
 	if rej != nil {
 		s.m.batches.WithLabelValues("rejected").Inc()
 		rejected := uint32(0)
@@ -85,8 +124,18 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 		}
 		return BatchOutcome{Status: collectorv1.BatchResult_STATUS_REJECTED, Reason: rej.Reason, Rejected: rejected}
 	}
+	observed, rej := ValidateInterfaceObservations(batch.GetInterfaces(), now)
+	if rej != nil {
+		s.m.batches.WithLabelValues("rejected").Inc()
+		if s.log != nil {
+			s.log.Warn("batch rejected",
+				"reason", rej.Reason, "collector_id", collectorID, "batch_seq", batch.GetBatchSeq())
+		}
+		return BatchOutcome{Status: collectorv1.BatchResult_STATUS_REJECTED, Reason: rej.Reason, Rejected: uint32(len(validated))} //nolint:gosec // bounded by MaxBatchSamples
+	}
 
 	outcome := BatchOutcome{}
+	var linkResult inventory.InterfaceLinkResult
 	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
 		claimStart := time.Now()
 		firstTs, lastTs := payloadBounds(validated, health)
@@ -127,6 +176,22 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 			}
 		}
 
+		// M10-S2 interface association: shares this batch transaction, so a
+		// failed association retries the whole batch and a duplicate batch
+		// never re-applies. Runs after series resolution so the per-device
+		// device lock is held once.
+		if len(observed) > 0 {
+			linkStart := time.Now()
+			linkResult, err = inventory.LinkInterfacesTx(ctx, tx, orgID, observed)
+			s.observeDB("interfaces", linkStart)
+			if err != nil {
+				if errors.Is(err, inventory.ErrInterfaceDeviceNotFound) {
+					return errDeviceMissing
+				}
+				return err
+			}
+		}
+
 		// Zero-window chunk-RLS sweep before COMMIT (migration 000006).
 		if _, err := tx.Exec(ctx, `SELECT public.argus_ensure_chunk_rls()`); err != nil {
 			return fmt.Errorf("%w: %w", errChunkRLS, err)
@@ -149,6 +214,18 @@ func (s *Service) IngestBatch(ctx context.Context, orgID, collectorID uuid.UUID,
 		if outcome.HealthAccepted > 0 {
 			s.m.health.WithLabelValues("accepted").Add(float64(outcome.HealthAccepted))
 		}
+		if linkResult.Created > 0 {
+			s.m.interfaces.WithLabelValues("created").Add(float64(linkResult.Created))
+		}
+		if linkResult.Rebound > 0 {
+			s.m.interfaces.WithLabelValues("rebound").Add(float64(linkResult.Rebound))
+		}
+		if linkResult.IndexConflicts > 0 || linkResult.Ambiguous > 0 {
+			s.m.interfaces.WithLabelValues("skipped").Add(float64(linkResult.IndexConflicts + linkResult.Ambiguous))
+		}
+		// Audit evidence is recorded only after COMMIT (the sink is not
+		// transactional); a rolled-back batch leaves no event.
+		s.recordInterfaceEvents(orgID, collectorID, linkResult.Events)
 		if outcome.Rejected > 0 {
 			s.m.samples.WithLabelValues("quarantined").Add(float64(outcome.Rejected))
 			if s.log != nil {

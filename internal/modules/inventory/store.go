@@ -422,7 +422,8 @@ func insertInterface(ctx context.Context, tx pgx.Tx, i Interface) (Interface, er
 }
 
 // updateInterfaceTx applies a partial update of editable metadata. if_index is
-// the SNMP identity key and is never updatable.
+// deliberately not operator-editable; SNMP rebinding updates it through the
+// audited M10-S2 association path instead.
 func updateInterfaceTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, p InterfacePatch) (Interface, error) {
 	row := tx.QueryRow(ctx, `
 		UPDATE interfaces i SET

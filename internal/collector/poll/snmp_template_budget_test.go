@@ -38,7 +38,7 @@ func TestM9S4TemplateSeriesBudgetGate(t *testing.T) {
 	}
 	want := map[string]int{
 		"core/system":         1,
-		"core/if-mib":         7 * 25, // 7 emitting columns × canonical 25 interfaces
+		"core/if-mib":         9 * 25, // 9 emitting columns × canonical 25 interfaces
 		"core/host-resources": 64,     // one series per documented CPU ceiling
 	}
 	for name, w := range want {
@@ -46,8 +46,8 @@ func TestM9S4TemplateSeriesBudgetGate(t *testing.T) {
 			t.Fatalf("%s estimate = %d, want %d", name, est[name], w)
 		}
 	}
-	if got := set.EstimateForKind("switch"); got != 1+7*25 {
-		t.Fatalf("switch estimate = %d, want %d", got, 1+7*25)
+	if got := set.EstimateForKind("switch"); got != 1+9*25 {
+		t.Fatalf("switch estimate = %d, want %d", got, 1+9*25)
 	}
 }
 
