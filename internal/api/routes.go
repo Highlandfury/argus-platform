@@ -31,6 +31,12 @@ var routeTable = []Route{
 	{Method: "POST", Path: "/v1/collectors/{id}/revoke", Protected: true, CSRF: true},
 	{Method: "POST", Path: "/v1/collectors/{id}/policy:resync", Protected: true, CSRF: true},
 	{Method: "GET", Path: "/v1/collectors/{id}/metrics", Protected: true},
+	// M10-S1 multi-series query: canonical metrics reads use device.read
+	// (docs/12 §22.8; docs/04 §6.5 defines no metrics-specific capability).
+	// The query is a scope-filtered collection read, so its declared scope is
+	// site (like the device list).
+	{Method: "POST", Path: "/v1/metrics/query", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeSite},
+	{Method: "GET", Path: "/v1/metrics/query", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeSite},
 	{Method: "GET", Path: "/v1/devices", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeSite},
 	{Method: "POST", Path: "/v1/devices", Protected: true, CSRF: true, Capability: authz.CapDeviceWrite, Scope: authz.ScopeSite},
 	{Method: "GET", Path: "/v1/devices/{id}", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
@@ -38,6 +44,7 @@ var routeTable = []Route{
 	{Method: "DELETE", Path: "/v1/devices/{id}", Protected: true, CSRF: true, Capability: authz.CapDeviceWrite, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/identity-history", Protected: true, Capability: authz.CapDeviceIdentityRead, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/poll-health", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
+	{Method: "GET", Path: "/v1/devices/{id}/status", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/devices/{id}/checks", Protected: true, CSRF: true, Capability: authz.CapDiagnosticRun, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/checks/{id}", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/devices/{id}/merge", Protected: true, CSRF: true, Capability: authz.CapDeviceMerge, Scope: authz.ScopeDevice},

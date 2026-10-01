@@ -93,10 +93,21 @@ func newHandlers(o Options) *handlers {
 		}
 	}
 	if o.MetricsQuery != nil {
-		h.metricsHTTP = &metrics.HTTP{Svc: o.MetricsQuery}
+		h.metricsHTTP = &metrics.HTTP{
+			Svc:   o.MetricsQuery,
+			Cache: metrics.NewMatrixCache(metrics.MatrixCacheTTL, metrics.MatrixCacheMaxEntries),
+		}
+		if o.Inventory != nil {
+			// Scope binding resolution for the M10-S1 multi-series API; nil
+			// fails closed in the handler.
+			h.metricsHTTP.Scope = o.Inventory
+		}
 	}
 	if o.Inventory != nil {
 		h.inventoryHTTP = &inventory.HTTP{Svc: o.Inventory}
+		if o.PollHealth != nil {
+			h.inventoryHTTP.Status = o.PollHealth
+		}
 	}
 	if o.Credentials != nil {
 		h.credentialsHTTP = &credentials.HTTP{Svc: o.Credentials}
@@ -238,6 +249,18 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 			}
 			h.metricsHTTP.QueryCollectorMetric(w, r)
 		})
+	case "/v1/metrics/query":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.metricsHTTP == nil {
+				serviceUnavailable(w, r, "metrics query service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.metricsHTTP.QueryMetrics(w, r)
+				return
+			}
+			h.metricsHTTP.QueryMetricsGet(w, r)
+		})
 	case "/v1/devices":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if h.inventoryHTTP == nil {
@@ -280,6 +303,14 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 				return
 			}
 			h.pollHealthHTTP.ListDevicePollHealth(w, r)
+		})
+	case "/v1/devices/{id}/status":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.pollHealthHTTP == nil {
+				serviceUnavailable(w, r, "poll health service not configured")
+				return
+			}
+			h.pollHealthHTTP.GetDeviceStatus(w, r)
 		})
 	case "/v1/devices/{id}/checks":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

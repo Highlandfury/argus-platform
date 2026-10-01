@@ -215,7 +215,7 @@ paths:
         - { name: metric, in: query, required: true, schema: { type: string, enum: [collector_cpu_percent] } }
         - { name: from, in: query, required: true, schema: { type: string, format: date-time } }
         - { name: to, in: query, required: true, schema: { type: string, format: date-time } }
-        - { name: step, in: query, schema: { type: string, enum: [auto, raw, 10s, 1m, 5m, 1h, 1d], default: auto }, description: "auto applies the canonical resolution picker (docs/08 §13.5); explicit steps are honored with a warning when finer than the picker's recommendation" }
+        - { name: step, in: query, schema: { type: string, enum: [auto, raw, 10s, 30s, 1m, 5m, 1h, 1d], default: auto }, description: "auto applies the canonical resolution picker (docs/08 §13.5); explicit steps are honored with a warning when finer than the picker's recommendation" }
       responses:
         '200':
           description: OK
@@ -236,6 +236,82 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
 
+  /v1/metrics/query:
+    post:
+      tags: [metrics]
+      summary: Multi-series metrics query (matrix results, null gaps, canonical caps)
+      x-argus-capability: device.read
+      x-argus-scope: site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MetricsQueryRequest' }
+      responses:
+        '200':
+          description: OK; matrix per series with explicit null gaps (never interpolated)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MetricsQueryResponse' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404':
+          description: One or more explicit series ids are unknown, foreign or outside the caller's scope (uniform series.not_found; no existence oracle)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Unsupported aggregation (query.agg_unsupported) or scan budget exceeded (query.points_exceeded)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '504':
+          description: Query timeout
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [metrics]
+      summary: URL-encoded convenience form (cached 30 s; ETag/If-None-Match -> 304)
+      x-argus-capability: device.read
+      x-argus-scope: site
+      parameters:
+        - { name: series, in: query, schema: { type: string }, description: "Opaque series id (s_…); repeat the parameter or use a comma-separated list" }
+        - { name: device_id, in: query, schema: { type: string, format: uuid }, description: Selector device (requires metric) }
+        - { name: metric, in: query, schema: { type: string }, description: Selector metric key (requires device_id) }
+        - { name: dimensions, in: query, schema: { type: string }, description: "Selector dimension subset in compact k=v,k2=v2 form" }
+        - { name: from, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date-time } }
+        - { name: step, in: query, schema: { type: string, enum: [auto, raw, 10s, 30s, 1m, 5m, 1h, 1d], default: auto } }
+        - { name: agg, in: query, schema: { type: string, enum: [avg, max, p95, rate, sum], default: avg } }
+        - { name: fill, in: query, schema: { type: string, enum: [null, zero, previous], default: null } }
+        - { name: If-None-Match, in: header, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MetricsQueryResponse' }
+        '304':
+          description: Not modified (ETag matches)
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404':
+          description: One or more explicit series ids are unknown, foreign or outside the caller's scope (uniform series.not_found)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Unsupported aggregation (query.agg_unsupported) or scan budget exceeded (query.points_exceeded)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '504':
+          description: Query timeout
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
   /v1/devices:
     get:
       tags: [inventory]
@@ -246,6 +322,10 @@ paths:
         - { name: 'filter[site_id]', in: query, schema: { type: string, format: uuid } }
         - { name: 'filter[status]', in: query, schema: { type: string, enum: [new, up, down, degraded, maintenance, retired] } }
         - { name: 'filter[kind]', in: query, schema: { type: string } }
+        - name: include
+          in: query
+          schema: { type: string, enum: [status] }
+          description: "`status` adds a `poll_status` rollup object per device (M10-S1, derived from scheduled poll health). The existing `status` field remains the inventory lifecycle state."
         - { name: include_deleted, in: query, schema: { type: boolean, default: false } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: cursor, in: query, schema: { type: string } }
@@ -389,6 +469,23 @@ paths:
                   next_cursor: { type: [string, 'null'] }
                   has_more: { type: boolean }
         '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/devices/{id}/status:
+    get:
+      tags: [inventory]
+      summary: Derived device status rollup from scheduled poll health (up/down/unknown)
+      x-argus-capability: device.read
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK (unknown with null fields when no scheduled health exists)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceStatus' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -1101,6 +1198,9 @@ components:
         deleted_at: { type: [string, 'null'], format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        poll_status:
+          allOf: [{ $ref: '#/components/schemas/DeviceStatus' }]
+          description: Present only when the list is requested with include=status (M10-S1).
     DeviceCreate:
       type: object
       required: [site_id, name, kind]
@@ -1200,6 +1300,21 @@ components:
         error_class: { type: string, description: 'timeout | loss | unreachable | unsupported | ... (empty on success without loss)' }
         consecutive_failures: { type: integer, minimum: 0 }
         origin: { type: string, enum: [scheduled, on_demand], description: 'Probe trigger: scheduled cadence or on-demand check (M10-S0)' }
+    DeviceStatus:
+      type: object
+      required: [device_id, status, down_threshold, freshness_seconds]
+      description: "Poll-health-derived rollup (M10-S1). Only scheduled polls count; down requires the documented consecutive-failure threshold; unknown when no scheduled row is fresh within the freshness window."
+      properties:
+        device_id: { type: string, format: uuid }
+        status: { type: string, enum: [up, down, unknown], description: "up = newest scheduled poll succeeded or its failure streak is below the threshold; down = consecutive failures >= down_threshold; unknown = no scheduled health within freshness_seconds" }
+        since: { type: [string, 'null'], format: date-time, description: "Start of the current status run (lower bound when the run exceeds the bounded history walk); for unknown, when the newest row became stale" }
+        last_outcome: { type: [string, 'null'], description: "success | failure; null when no scheduled health exists" }
+        last_error_class: { type: [string, 'null'] }
+        last_latency_ms: { type: [integer, 'null'], minimum: 0 }
+        consecutive_failures: { type: [integer, 'null'], minimum: 0 }
+        last_checked_at: { type: [string, 'null'], format: date-time }
+        down_threshold: { type: integer, description: "Consecutive scheduled failures required for down (documented choice: 3)" }
+        freshness_seconds: { type: integer, description: "Freshness window before a missing scheduled row means unknown (documented choice: 1200 s, covering the 15 min backoff ceiling + jitter + batching)" }
     Interface:
       type: object
       required: [id, device_id, if_index, if_name, role, monitored, first_seen_at]
@@ -1389,6 +1504,89 @@ components:
             resolution_warning:
               type: string
               description: "Present when an explicit step is finer than the picker's recommendation for the range."
+    MetricsSelector:
+      type: object
+      required: [device_id, metric_key]
+      properties:
+        device_id: { type: string, format: uuid }
+        metric_key: { type: string, maxLength: 200 }
+        dimensions:
+          type: object
+          additionalProperties: { type: string }
+          description: "Dimension subset; a series matches when its stored dimensions are a superset (docs/08 §13.5 selector semantics)"
+    MetricsQueryRequest:
+      type: object
+      required: [series, from, to]
+      properties:
+        series:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            oneOf:
+              - { type: string, description: "Opaque series id (s_…) from a previous response" }
+              - { $ref: '#/components/schemas/MetricsSelector' }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        step: { type: string, enum: [auto, raw, 10s, 30s, 1m, 5m, 1h, 1d], default: auto }
+        agg: { type: string, enum: [avg, max, p95, rate, sum], default: avg, description: "p95 is served from raw samples (not materialized in CAGGs; only as complete as raw retention)" }
+        fill: { type: string, enum: [null, zero, previous], default: null, description: "Gap policy for bucketed steps; raw steps return exact samples" }
+    MetricsQueryResponse:
+      type: object
+      required: [from, to, step, agg, fill, series, meta]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        step: { type: string }
+        agg: { type: string }
+        fill: { type: string }
+        series:
+          type: array
+          items: { $ref: '#/components/schemas/MetricMatrixSeries' }
+        meta: { $ref: '#/components/schemas/MetricMatrixMeta' }
+    MetricMatrixSeries:
+      type: object
+      required: [id, metric_key, unit, dimensions, labels, points, truncated]
+      properties:
+        id: { type: string, description: "Opaque series id (s_…)" }
+        device_id: { type: [string, 'null'], format: uuid }
+        collector_id: { type: [string, 'null'], format: uuid }
+        metric_key: { type: string }
+        unit: { type: string }
+        dimensions: { type: object, additionalProperties: { type: string } }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+          description: "Chart labels: dimensions plus metric/unit and the device name when available"
+        points:
+          type: array
+          description: "[unix_seconds, value]; null is an explicit gap and is never interpolated"
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: [number, 'null'] }
+        truncated: { type: boolean, description: "True when the response point budget dropped this series' oldest buckets" }
+    MetricMatrixMeta:
+      type: object
+      properties:
+        resolution: { type: string, enum: [raw, rollup_1m, rollup_5m, rollup_1h, rollup_1d] }
+        partial: { type: boolean, description: "True when the series or point caps truncated the response" }
+        points_truncated: { type: boolean }
+        series_total:
+          type: integer
+          description: "Matched series (exact when partial=false; a lower bound when a selector matched more than 100 series)"
+        series_returned: { type: integer }
+        raw_fallback: { type: boolean, description: "True when raw samples served part (or all, for p95) of the window" }
+        rollup_missing: { type: boolean }
+        resolution_warning: { type: string }
+        expected_points: { type: integer }
+        returned_points: { type: integer }
+        quality:
+          type: object
+          properties:
+            gaps: { type: integer, description: "Expected buckets with no observed sample, before fill" }
+            dropped_samples: { type: integer, description: "Always 0: samples are never dropped by the query path" }
 
 security:
   - sessionCookie: []

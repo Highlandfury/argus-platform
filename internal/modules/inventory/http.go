@@ -22,6 +22,11 @@ import (
 // resolved (P2-D5).
 type HTTP struct {
 	Svc *Service
+	// Status decorates device list payloads with the poll-health rollup when
+	// `?include=status` is requested (M10-S1 bulk convention). It is nil in
+	// configurations without the poll-health service; the include then fails
+	// closed with 503.
+	Status DeviceStatusProvider
 }
 
 // maxBodyBytes bounds inventory request bodies (devices are small documents).
@@ -247,6 +252,10 @@ func (h *HTTP) ListDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := r.URL.Query()
+	includeStatus, ok := parseDeviceListInclude(w, r, query.Get("include"))
+	if !ok {
+		return
+	}
 	filter := DeviceFilter{IncludeDeleted: query.Get("include_deleted") == "true"}
 	if raw := query.Get("filter[site_id]"); raw != "" {
 		id, err := uuid.Parse(raw)
@@ -283,15 +292,61 @@ func (h *HTTP) ListDevices(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "devices lookup failed")
 		return
 	}
+	var statuses map[uuid.UUID]DeviceStatus
+	if includeStatus {
+		if h.Status == nil {
+			httpx.WriteProblem(w, r, http.StatusServiceUnavailable, "service.unavailable", "device status service not configured")
+			return
+		}
+		ids := make([]uuid.UUID, 0, len(page.Devices))
+		for _, d := range page.Devices {
+			ids = append(ids, d.ID)
+		}
+		statuses, err = h.Status.DeviceStatuses(r.Context(), p.OrgID, ids)
+		if err != nil {
+			httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device status lookup failed")
+			return
+		}
+	}
 	data := make([]map[string]any, 0, len(page.Devices))
 	for _, d := range page.Devices {
-		data = append(data, devicePayload(d))
+		payload := devicePayload(d)
+		if includeStatus {
+			// Nested under `poll_status` (not `status`): the device object's
+			// `status` field is the M7 inventory lifecycle state and stays
+			// backward compatible. The object is identical to
+			// GET /v1/devices/{id}/status.
+			payload["poll_status"] = statuses[d.ID].Payload()
+		}
+		data = append(data, payload)
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"data":        data,
 		"next_cursor": cursorOrNil(page.NextCursor),
 		"has_more":    page.HasMore,
 	})
+}
+
+// parseDeviceListInclude parses the list `include` allowlist. Only `status`
+// (the poll-health rollup decoration) is implemented; anything else is a
+// validation error, mirroring the canonical unknown-filter rule.
+func parseDeviceListInclude(w http.ResponseWriter, r *http.Request, raw string) (includeStatus bool, ok bool) {
+	if strings.TrimSpace(raw) == "" {
+		return false, true
+	}
+	for _, part := range strings.Split(raw, ",") {
+		switch strings.TrimSpace(part) {
+		case "":
+			continue
+		case "status":
+			includeStatus = true
+		default:
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid include",
+				httpx.FieldError{Field: "include", Code: "invalid", Message: "allowed: status"})
+			return false, false
+		}
+	}
+	return includeStatus, true
 }
 
 type identityEntry struct {

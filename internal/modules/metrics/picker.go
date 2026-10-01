@@ -38,10 +38,13 @@ const (
 	StepAuto Step = "auto"
 	StepRaw  Step = "raw"
 	Step10s  Step = "10s"
-	Step1m   Step = "1m"
-	Step5m   Step = "5m"
-	Step1h   Step = "1h"
-	Step1d   Step = "1d"
+	// Step30s is the canonical explicit step from the docs/12 §22.8 contract.
+	// It is computed from raw samples like 10s (the picker never selects it).
+	Step30s Step = "30s"
+	Step1m  Step = "1m"
+	Step5m  Step = "5m"
+	Step1h  Step = "1h"
+	Step1d  Step = "1d"
 )
 
 // Interval returns the bucket width (0 for raw/auto).
@@ -49,6 +52,8 @@ func (s Step) Interval() time.Duration {
 	switch s {
 	case Step10s:
 		return 10 * time.Second
+	case Step30s:
+		return 30 * time.Second
 	case Step1m:
 		return time.Minute
 	case Step5m:
@@ -67,6 +72,8 @@ func (s Step) sqlInterval() string {
 	switch s {
 	case Step10s:
 		return "10 seconds"
+	case Step30s:
+		return "30 seconds"
 	case Step1m:
 		return "1 minute"
 	case Step5m:
@@ -86,10 +93,10 @@ func ParseStep(raw string) (Step, error) {
 	switch Step(raw) {
 	case "", StepAuto:
 		return StepAuto, nil
-	case StepRaw, Step10s, Step1m, Step5m, Step1h, Step1d:
+	case StepRaw, Step10s, Step30s, Step1m, Step5m, Step1h, Step1d:
 		return Step(raw), nil
 	default:
-		return "", fmt.Errorf("unknown step %q (allowed: auto, raw, 10s, 1m, 5m, 1h, 1d)", raw)
+		return "", fmt.Errorf("unknown step %q (allowed: auto, raw, 10s, 30s, 1m, 5m, 1h, 1d)", raw)
 	}
 }
 

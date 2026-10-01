@@ -15,6 +15,12 @@ import (
 // HTTP exposes the metric query API.
 type HTTP struct {
 	Svc *QueryService
+	// Scope resolves the caller's server-side bindings for the M10-S1
+	// multi-series query API; nil fails closed.
+	Scope ScopeResolver
+	// Cache backs the GET convenience form's ETag/If-None-Match handling
+	// (15–60 s TTL, docs/08 §13.5).
+	Cache *MatrixCache
 }
 
 // QueryCollectorMetric handles GET /v1/collectors/{id}/metrics.

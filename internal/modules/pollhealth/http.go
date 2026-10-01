@@ -96,6 +96,46 @@ func (h *HTTP) ListDevicePollHealth(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, payload)
 }
 
+// GetDeviceStatus handles GET /v1/devices/{id}/status (session + device.read
+// capability enforced by the router; scope enforced here). Foreign, missing
+// and out-of-scope devices are an identical 404 (M7 enumeration resistance).
+func (h *HTTP) GetDeviceStatus(w http.ResponseWriter, r *http.Request) {
+	p, ok := httpx.PrincipalFrom(r.Context())
+	if !ok {
+		httpx.WriteProblem(w, r, http.StatusUnauthorized, "auth.unauthenticated", "authentication required")
+		return
+	}
+	deviceID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	dev, err := h.Devices.GetDevice(r.Context(), p.OrgID, deviceID, false)
+	if err != nil {
+		if errors.Is(err, inventory.ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	sc, err := h.Devices.ScopeFor(r.Context(), p.OrgID, p.UserID)
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "authorization scope lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(dev.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	statuses, err := h.Svc.DeviceStatuses(r.Context(), p.OrgID, []uuid.UUID{deviceID})
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device status lookup failed")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, statuses[deviceID].Payload())
+}
+
 func recordPayload(rec Record) map[string]any {
 	return map[string]any{
 		"id":                   rec.ID.String(),

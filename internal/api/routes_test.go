@@ -54,8 +54,37 @@ func TestInventoryRoutesDeclareCapabilityAndScope(t *testing.T) {
 			}
 		}
 	}
-	if inventory != 19 {
-		t.Fatalf("inventory routes = %d, want the 18 M7-S3 routes + 1 M9-S1 poll-health route", inventory)
+	if inventory != 20 {
+		t.Fatalf("inventory routes = %d, want the 18 M7-S3 routes + 1 M9-S1 poll-health route + 1 M10-S1 device-status route", inventory)
+	}
+}
+
+// TestMetricsQueryRoutesDeclareCapabilityAndScope pins the M10-S1 metrics
+// query surface: both POST and GET are session-protected reads on the
+// canonical device.read capability (docs/04 §6.5 defines no metrics
+// capability) with site scope metadata (scope-filtered collection reads).
+func TestMetricsQueryRoutesDeclareCapabilityAndScope(t *testing.T) {
+	count := 0
+	for _, rt := range Routes() {
+		if rt.Path != "/v1/metrics/query" {
+			continue
+		}
+		count++
+		if !rt.Protected {
+			t.Errorf("%s %s: metrics query must require a session", rt.Method, rt.Path)
+		}
+		if rt.Capability != authz.CapDeviceRead {
+			t.Errorf("%s %s: capability %q, want %q", rt.Method, rt.Path, rt.Capability, authz.CapDeviceRead)
+		}
+		if rt.Scope != authz.ScopeSite {
+			t.Errorf("%s %s: scope %q, want site", rt.Method, rt.Path, rt.Scope)
+		}
+		if rt.CSRF {
+			t.Errorf("%s %s: reads must not require CSRF", rt.Method, rt.Path)
+		}
+	}
+	if count != 2 {
+		t.Fatalf("metrics query routes = %d, want the M10-S1 POST + GET pair", count)
 	}
 }
 
