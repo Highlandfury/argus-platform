@@ -40,7 +40,8 @@ function statusClass(status: string): string {
 // management IP, updated/last-seen) from the real /v1/devices API. Client-side
 // fetching mirrors the metrics chart pattern, which keeps loading/empty/error
 // states observable and testable; the shell handles unauthenticated access.
-export default function DevicesList() {
+// refreshKey re-runs the fetch after a successful manual add.
+export default function DevicesList({ refreshKey = 0 }: { refreshKey?: number }) {
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [sites, setSites] = useState<Site[]>([]);
   const [error, setError] = useState("");
@@ -77,7 +78,7 @@ export default function DevicesList() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshKey]);
 
   const siteName = new Map(sites.map((s) => [s.id, s.name]));
 
@@ -98,8 +99,8 @@ export default function DevicesList() {
   if (devices.length === 0) {
     return (
       <p className="muted" data-testid="devices-empty">
-        No devices yet. Devices appear here after a manual add or discovery
-        (discovery arrives in a later milestone).
+        No devices yet. Admins can add one with the Add device form; discovered
+        devices will appear here once discovery ships.
       </p>
     );
   }

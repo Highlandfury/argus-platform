@@ -53,6 +53,8 @@ import "testing"
 //	     probes + enumeration parity
 //	S-25 credential scope restriction (org-wide       -> TestCredentialsScopeRestriction
 //	     credential surface)
+//	S-26 sites read authz + tenant isolation         -> TestSitesListAuthzIsolation
+//	     (device-form site picker)
 //
 // S-14 (injection): parameterized SQL + dimension canonicalization are
 // unit-tested (internal/modules/metrics) and every query is bound-parameter
@@ -100,4 +102,5 @@ func TestSecuritySuite(t *testing.T) {
 	t.Run("S23_credentials_csrf_mutations", TestCredentialsCSRFEnforcement)
 	t.Run("S24_credentials_cross_tenant_surface", TestCredentialsCrossTenantS24)
 	t.Run("S25_credentials_scope_restriction", TestCredentialsScopeRestriction)
+	t.Run("S26_sites_read_authz_isolation", TestSitesListAuthzIsolation)
 }

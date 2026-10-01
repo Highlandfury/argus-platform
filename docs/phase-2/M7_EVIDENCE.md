@@ -456,3 +456,24 @@ slog output, and `row_to_json` dumps for sentinel plaintext (none found).
 | golangci-lint v2.14.0 (docker) `run --timeout 10m ./...` | 0 issues |
 | `npm run build` (web) | pass (new /devices + /credentials routes) |
 | `npx playwright test` | 10 passed |
+
+---
+
+## 9. M7-S4a (2026-10-01) - device create affordance
+
+**Gap found in review:** the /devices UI was a read-only list (M7-S4 skeleton);
+manual device add was API-only, and the empty state pointed at a form that did
+not exist. This additive slice closes it.
+
+- Web: `AddDeviceForm.tsx` + `DeviceInventory.tsx` wrapper; `DevicesList.tsx`
+  gains `refreshKey` and corrected empty-state copy; `devices/page.tsx` resolves
+  the session role + sites (mirrors the credentials page). Form: name, site
+  (from `GET /v1/sites` - the endpoint already existed and is now pinned by
+  tests), kind, mgmt_ip, serial, sys_object_id; session+CSRF POST to
+  `/v1/devices`; per-field problem+json mapping; loading/forbidden/error states.
+- Tests: `tests/integration/sites_api_test.go` (S-26: authz, tenant isolation,
+  pagination) + Playwright `devices.spec.ts` additions (UI add smoke,
+  validation rendering, forbidden rendering, empty/error states).
+- Verified: `go build ./...` pass; sites/S-26 pass; `tests/contract` pass;
+  gofmt empty; golangci-lint 0 issues; `npm run build` pass; Playwright 13/13.
+- Out of scope (M10): edit/delete UI, interface UI, device detail pages.
