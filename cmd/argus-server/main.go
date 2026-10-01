@@ -165,6 +165,31 @@ func cmdServe(args []string) int {
 		fmt.Fprintln(os.Stderr, "collector ca:", err)
 		return 1
 	}
+
+	// Secrets vault (M7-S2/P2-D2) and the M9-S3 dispatch resolver. Built before
+	// the collector service so policy materialization and the credentials API
+	// share one vault instance. Failure disables both credential routes
+	// (degraded mode, explicit 503) and leaves policy bundles without a
+	// session block.
+	var (
+		credentialsSvc     *credentials.Service
+		credentialResolver *credentials.Resolver
+	)
+	if appPool != nil {
+		kek, err := secrets.LoadOrCreateLocalKMS(secrets.LocalConfig{
+			Path:          cfg.SecretsKeyFile,
+			KeyID:         cfg.SecretsKeyID,
+			AllowGenerate: cfg.Env == config.EnvDev,
+			Logger:        logger,
+		})
+		if err != nil {
+			logger.Error("credentials API disabled: secrets vault unavailable", "error", err)
+		} else {
+			vault := secrets.New(kek)
+			credentialsSvc = credentials.New(appPool, vault, credentials.SlogAudit{Logger: logger})
+			credentialResolver = credentials.NewResolver(appPool, vault)
+		}
+	}
 	var (
 		collectorsSvc  *collectors.Service
 		sessions       *collectors.SessionRegistry
@@ -175,7 +200,11 @@ func cmdServe(args []string) int {
 		streamListener net.Listener
 	)
 	if appPool != nil && authPool != nil {
-		collectorsSvc = collectors.New(appPool, authPool, ca, tel)
+		collectorOpts := []collectors.Option{collectors.WithLogger(logger)}
+		if credentialResolver != nil {
+			collectorOpts = append(collectorOpts, collectors.WithCredentialResolver(credentialResolver))
+		}
+		collectorsSvc = collectors.New(appPool, authPool, ca, tel, collectorOpts...)
 		sessions = collectors.NewSessionRegistry()
 		metricsQuery = metrics.NewQueryService(appPool, collectorsSvc, argus)
 
@@ -229,25 +258,6 @@ func cmdServe(args []string) int {
 	var pollHealthSvc *pollhealth.Service
 	if appPool != nil {
 		pollHealthSvc = pollhealth.New(appPool)
-	}
-
-	// Credentials API (M7-S4): write-only secrets sealed by the SecretsVault
-	// (P2-D2 dev binding; generation is dev-only, prod fails closed on a
-	// missing key file). When the vault cannot load, the credential routes
-	// answer 503 instead of failing the whole server (degraded mode).
-	var credentialsSvc *credentials.Service
-	if appPool != nil {
-		kek, err := secrets.LoadOrCreateLocalKMS(secrets.LocalConfig{
-			Path:          cfg.SecretsKeyFile,
-			KeyID:         cfg.SecretsKeyID,
-			AllowGenerate: cfg.Env == config.EnvDev,
-			Logger:        logger,
-		})
-		if err != nil {
-			logger.Error("credentials API disabled: secrets vault unavailable", "error", err)
-		} else {
-			credentialsSvc = credentials.New(appPool, secrets.New(kek), credentials.SlogAudit{Logger: logger})
-		}
 	}
 
 	opts := api.Options{

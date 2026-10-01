@@ -475,9 +475,16 @@ type ClientHello struct {
 	// Informational only: the spool watermark is authoritative for what is resent.
 	LastAckedSeq int64 `protobuf:"varint,4,opt,name=last_acked_seq,json=lastAckedSeq,proto3" json:"last_acked_seq,omitempty"`
 	// Collector boot time, used to distinguish restarts from network drops in logs.
-	StartedAt     *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	StartedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`
+	// PROTOCOL CHANGE M9-S3 (2026-10-01): per-stream ephemeral X25519 public key
+	// (32 raw bytes) used to materialize device credentials into the signed
+	// policy bundle. Additive: absent means the collector cannot receive
+	// credentials and the server delivers the base bundle without a session
+	// block. One key per stream session; the private half never leaves the
+	// collector's RAM and is never persisted.
+	SessionPublicKey []byte `protobuf:"bytes,6,opt,name=session_public_key,json=sessionPublicKey,proto3" json:"session_public_key,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *ClientHello) Reset() {
@@ -541,6 +548,13 @@ func (x *ClientHello) GetLastAckedSeq() int64 {
 func (x *ClientHello) GetStartedAt() *timestamppb.Timestamp {
 	if x != nil {
 		return x.StartedAt
+	}
+	return nil
+}
+
+func (x *ClientHello) GetSessionPublicKey() []byte {
+	if x != nil {
+		return x.SessionPublicKey
 	}
 	return nil
 }
@@ -1575,14 +1589,15 @@ const file_argus_collector_v1_collector_proto_rawDesc = "" +
 	"\x05batch\x18\x03 \x01(\v2\x1f.argus.collector.v1.MetricBatchH\x00R\x05batch\x12>\n" +
 	"\n" +
 	"policy_ack\x18\x04 \x01(\v2\x1d.argus.collector.v1.PolicyAckH\x00R\tpolicyAckB\x05\n" +
-	"\x03msg\"\xe1\x01\n" +
+	"\x03msg\"\x8f\x02\n" +
 	"\vClientHello\x12!\n" +
 	"\fcollector_id\x18\x01 \x01(\tR\vcollectorId\x12#\n" +
 	"\ragent_version\x18\x02 \x01(\tR\fagentVersion\x12)\n" +
 	"\x10protocol_version\x18\x03 \x01(\rR\x0fprotocolVersion\x12$\n" +
 	"\x0elast_acked_seq\x18\x04 \x01(\x03R\flastAckedSeq\x129\n" +
 	"\n" +
-	"started_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\"\x9c\x03\n" +
+	"started_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tstartedAt\x12,\n" +
+	"\x12session_public_key\x18\x06 \x01(\fR\x10sessionPublicKey\"\x9c\x03\n" +
 	"\tHeartbeat\x123\n" +
 	"\asent_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x06sentAt\x12\x1f\n" +
 	"\vspool_bytes\x18\x02 \x01(\x04R\n" +

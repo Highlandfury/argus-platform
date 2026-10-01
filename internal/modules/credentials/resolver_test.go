@@ -8,7 +8,7 @@ import (
 
 func candidateFor(name, scopeType string, priority int, credentialID uuid.UUID) candidate {
 	return candidate{
-		Credential: Credential{ID: credentialID, Name: name, Kind: "snmp_v2c"},
+		Credential: Credential{ID: credentialID, Name: name, Kind: "snmp_v2c", KeyVersion: 3},
 		Binding:    Binding{CredentialID: credentialID, ScopeType: scopeType, Priority: priority},
 	}
 }
@@ -84,6 +84,9 @@ func TestSelectEffectivePriorityAndTieBreak(t *testing.T) {
 	})
 	if !ok || got.CredentialID != newerID || got.Priority != 10 {
 		t.Fatalf("priority selection = %+v", got)
+	}
+	if got.Version != 3 {
+		t.Fatalf("effective credential version = %d, want the stored key_version 3", got.Version)
 	}
 
 	got, ok = selectEffective([]candidate{

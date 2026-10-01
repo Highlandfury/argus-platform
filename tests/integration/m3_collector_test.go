@@ -74,7 +74,11 @@ func startM3Env(t *testing.T, opts ...m3Option) *m3Env {
 	dir := t.TempDir()
 	ca, err := collectors.LoadOrCreateCA(filepath.Join(dir, "ca"), []string{"localhost", "127.0.0.1"})
 	must(t, err)
-	svc := collectors.New(appPool, authPool, ca, nil)
+	svcOpts := []collectors.Option{}
+	if cfg.credResolver != nil {
+		svcOpts = append(svcOpts, collectors.WithCredentialResolver(cfg.credResolver))
+	}
+	svc := collectors.New(appPool, authPool, ca, nil, svcOpts...)
 	registry := collectors.NewSessionRegistry()
 
 	enrollTCP, err := net.Listen("tcp", "127.0.0.1:0")
@@ -154,14 +158,22 @@ func (e *m3Env) restartStream(t *testing.T) {
 }
 
 type m3EnvConfig struct {
-	limiter   bool
-	logBuffer *bytes.Buffer
+	limiter      bool
+	logBuffer    *bytes.Buffer
+	credResolver collectors.CredentialResolver
 }
 
 type m3Option func(*m3EnvConfig)
 
 func withEnrollLimiter() m3Option {
 	return func(c *m3EnvConfig) { c.limiter = true }
+}
+
+// withCredentialResolver wires the M9-S3 credentials resolver into the
+// in-process collector service so policy sessions materialize real
+// SecretsVault-opened credentials.
+func withCredentialResolver(r collectors.CredentialResolver) m3Option {
+	return func(c *m3EnvConfig) { c.credResolver = r }
 }
 
 // withLogBuffer routes the in-process gRPC/ingest server logs into buf (used

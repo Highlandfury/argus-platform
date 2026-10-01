@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/argus-platform/argus/internal/platform/sessioncrypto"
 )
 
 // ErrVerification is returned when the Ed25519 signature does not match.
@@ -34,7 +36,8 @@ const PolicyRetention = 3
 // server-side collectors.MaxPolicyTargets ceiling).
 const MaxTargets = 10000
 
-// Document mirrors the Phase-1 policy payload plus the M9-S1 poll targets.
+// Document mirrors the Phase-1 policy payload plus the M9-S1 poll targets and
+// the M9-S3 per-session credential material.
 type Document struct {
 	HeartbeatIntervalSeconds int      `json:"heartbeat_interval_seconds"`
 	ReportIntervalSeconds    int      `json:"report_interval_seconds"`
@@ -44,6 +47,10 @@ type Document struct {
 	// Targets are the per-device poll targets (M9-S1). Absent in Phase-1
 	// documents; validated when present.
 	Targets []Target `json:"targets,omitempty"`
+	// Session is the M9-S3 per-bundle credential material (ciphertext sealed
+	// to this stream session's ephemeral key). Absent in Phase-1/2 documents
+	// and ignored by collectors that do not implement it.
+	Session *sessioncrypto.Session `json:"session,omitempty"`
 }
 
 // Metric is one instructed metric source.
@@ -121,6 +128,15 @@ func Validate(doc Document) error {
 	}
 	if len(doc.Targets) > MaxTargets {
 		return fmt.Errorf("%w: targets list exceeds %d", ErrValidation, MaxTargets)
+	}
+	if doc.Session != nil {
+		// Structural bounds only: an unknown algorithm with a well-formed
+		// shape stays applicable (the material is then ignored per record and
+		// the device reports credential_missing instead of the whole bundle
+		// being rejected).
+		if err := doc.Session.Validate(); err != nil {
+			return fmt.Errorf("%w: session material: %w", ErrValidation, err)
+		}
 	}
 	seen := make(map[string]bool, len(doc.Targets))
 	for _, t := range doc.Targets {

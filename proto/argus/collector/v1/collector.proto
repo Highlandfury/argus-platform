@@ -118,6 +118,14 @@ message ClientHello {
 
   // Collector boot time, used to distinguish restarts from network drops in logs.
   google.protobuf.Timestamp started_at = 5;
+
+  // PROTOCOL CHANGE M9-S3 (2026-10-01): per-stream ephemeral X25519 public key
+  // (32 raw bytes) used to materialize device credentials into the signed
+  // policy bundle. Additive: absent means the collector cannot receive
+  // credentials and the server delivers the base bundle without a session
+  // block. One key per stream session; the private half never leaves the
+  // collector's RAM and is never persisted.
+  bytes session_public_key = 6;
 }
 
 message Heartbeat {

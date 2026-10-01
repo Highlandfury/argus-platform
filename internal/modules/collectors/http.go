@@ -342,8 +342,11 @@ func (h *HTTP) ResyncPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.Registry != nil {
-		if latest, err := h.Svc.LatestPolicy(r.Context(), p.OrgID, id); err == nil && latest != nil {
-			h.Registry.PushPolicy(id, latest)
+		// M9-S3: a live session that presented an ephemeral key receives the
+		// new version materialized to its session; without a key (or when
+		// nothing resolves) the base bundle is pushed unchanged.
+		if sp, err := h.Svc.PolicyForSession(r.Context(), p.OrgID, id, h.Registry.SessionPublicKey(id)); err == nil && sp != nil {
+			h.Registry.PushPolicy(id, sp)
 		}
 	}
 	httpx.WriteJSON(w, http.StatusAccepted, map[string]any{"policy_version": version})

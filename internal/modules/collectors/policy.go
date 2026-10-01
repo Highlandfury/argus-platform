@@ -5,13 +5,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/argus-platform/argus/internal/platform/sessioncrypto"
 )
 
 // PolicyDocument is the Phase-1 policy payload delivered to collectors
 // (SPEC §11). The exact serialized bytes are signed; collectors verify the
 // signature before applying anything. M9-S1 adds `targets` additively: the
 // old document shape remains valid, and a collector that does not understand
-// targets ignores the field.
+// targets ignores the field. M9-S3 adds `session` additively: per-session
+// materialized credentials (never persisted in this stored document).
 type PolicyDocument struct {
 	HeartbeatIntervalSeconds int            `json:"heartbeat_interval_seconds"`
 	ReportIntervalSeconds    int            `json:"report_interval_seconds"`
@@ -21,6 +24,10 @@ type PolicyDocument struct {
 	// Targets are the per-device poll targets for the org (M9-S1). Only live
 	// devices with a management IP are included.
 	Targets []PolicyTarget `json:"targets,omitempty"`
+	// Session is the M9-S3 per-bundle credential materialization. It is set
+	// only on the signed copy delivered to a collector that presented an
+	// ephemeral session key; the persisted base bundle never carries it.
+	Session *sessioncrypto.Session `json:"session,omitempty"`
 }
 
 // PolicyMetric describes one metric the collector should produce.
@@ -137,5 +144,30 @@ func (ca *CA) BuildSignedPolicyWithTargets(version int64, targets []PolicyTarget
 		Signature:  ca.SignPolicy(doc),
 		KeyID:      ca.PolicyKeyID(),
 		JitterSalt: hex.EncodeToString(salt),
+	}, nil
+}
+
+// SignMaterializedPolicy signs the M9-S3 per-session variant of a stored base
+// document: the base document with a `session` block attached. Only the
+// returned bytes carry credential material; the persisted base bundle is
+// untouched. The signature covers the materialized bytes exactly like any
+// other policy document (Ed25519 over the exact UTF-8 JSON).
+func (ca *CA) SignMaterializedPolicy(version int64, doc PolicyDocument, session *sessioncrypto.Session) (*SignedPolicy, error) {
+	if session == nil {
+		return nil, fmt.Errorf("collectors: materialized policy requires a session block")
+	}
+	if len(session.Credentials) == 0 {
+		return nil, fmt.Errorf("collectors: materialized policy requires at least one credential")
+	}
+	doc.Session = session
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("collectors: marshal materialized policy: %w", err)
+	}
+	return &SignedPolicy{
+		Version:   version,
+		Document:  raw,
+		Signature: ca.SignPolicy(raw),
+		KeyID:     ca.PolicyKeyID(),
 	}, nil
 }

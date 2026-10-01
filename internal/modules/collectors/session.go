@@ -19,6 +19,9 @@ type Session struct {
 	collectorID uuid.UUID
 	notify      chan DisconnectMsg
 	policyCh    chan *SignedPolicy
+	// sessionKey is the collector's ephemeral X25519 public key for M9-S3
+	// credential materialization (nil for collectors that do not present one).
+	sessionKey []byte
 }
 
 // Notify is the disconnect request channel.
@@ -26,6 +29,15 @@ func (s *Session) Notify() <-chan DisconnectMsg { return s.notify }
 
 // Policy is the push channel for new signed policies.
 func (s *Session) Policy() <-chan *SignedPolicy { return s.policyCh }
+
+// SessionPublicKey returns a copy of the session's ephemeral public key (nil
+// when the collector did not present one).
+func (s *Session) SessionPublicKey() []byte {
+	if s == nil || len(s.sessionKey) == 0 {
+		return nil
+	}
+	return append([]byte(nil), s.sessionKey...)
+}
 
 // SessionRegistry tracks live collector streams. One collector has at most one
 // current session; a newer connection deterministically supersedes the older
@@ -43,11 +55,19 @@ func NewSessionRegistry() *SessionRegistry {
 // Register installs a new session for the collector, notifying any previous
 // session to disconnect with SUPERSEDED. Returns (session, superseded).
 func (r *SessionRegistry) Register(collectorID uuid.UUID) (*Session, bool) {
+	return r.RegisterWithSessionKey(collectorID, nil)
+}
+
+// RegisterWithSessionKey installs a new session advertising the collector's
+// ephemeral X25519 public key for M9-S3 policy materialization (nil when the
+// collector did not present one).
+func (r *SessionRegistry) RegisterWithSessionKey(collectorID uuid.UUID, sessionKey []byte) (*Session, bool) {
 	superseded := false
 	s := &Session{
 		collectorID: collectorID,
 		notify:      make(chan DisconnectMsg, 1),
 		policyCh:    make(chan *SignedPolicy, 4),
+		sessionKey:  append([]byte(nil), sessionKey...),
 	}
 	r.mu.Lock()
 	if old, ok := r.sessions[collectorID]; ok {
@@ -60,6 +80,18 @@ func (r *SessionRegistry) Register(collectorID uuid.UUID) (*Session, bool) {
 	r.sessions[collectorID] = s
 	r.mu.Unlock()
 	return s, superseded
+}
+
+// SessionPublicKey returns the live session's ephemeral public key for a
+// collector (nil when offline or not presented).
+func (r *SessionRegistry) SessionPublicKey(collectorID uuid.UUID) []byte {
+	r.mu.Lock()
+	s, ok := r.sessions[collectorID]
+	r.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return s.SessionPublicKey()
 }
 
 // Unregister removes the session if it is still the current one.

@@ -201,8 +201,11 @@ func cmdRun(args []string) int {
 		_, err := sp.Append(&spool.Batch{At: time.Now().UTC(), Health: toSpoolHealth(records)})
 		return err
 	}, logger)
+	bundleCreds := poll.NewBundleCredentialSource(logger)
 	snmpProber := poll.NewSNMPProber(poll.SNMPProberConfig{
-		Credentials: snmpCredentials(cfg),
+		// M9-S3 materialized credentials first; the M9-S2 fixture/env source
+		// (dev-only) is the fallback so fixture runs keep working.
+		Credentials: poll.NewChainCredentialSource(bundleCreds, snmpCredentials(cfg)),
 		Logger:      logger,
 	})
 	pollEngine := poll.NewEngine(poll.Config{
@@ -279,6 +282,7 @@ func cmdRun(args []string) int {
 			cmet.SetBackoff(backoff)
 		},
 		OnClockSkew: cmet.SetClockSkew,
+		Credentials: bundleCreds,
 		OnPolicyApplied: func(version int64) {
 			if err := idStore.UpdatePolicyVersion(id, version); err != nil {
 				logger.Error("persist policy version", "error", err)
@@ -497,9 +501,10 @@ func pollTargets(doc policy.Document, logger *slog.Logger) []poll.Target {
 }
 
 // snmpCredentials builds the M9-S2 fixture credential source from collector
-// config. v3 authPriv takes precedence over v2c (canonical preference order);
-// with no fixture configured every SNMP target reports credential_missing
-// until M9-S3 materializes per-device credentials in signed bundles.
+// config; since M9-S3 it is the fallback behind the RAM-only materialized
+// bundle source (ChainCredentialSource). v3 authPriv takes precedence over v2c
+// (canonical preference order). With no fixture configured every SNMP target
+// without materialized credentials reports credential_missing.
 func snmpCredentials(cfg config.Collector) poll.CredentialSource {
 	src := poll.NewStaticCredentialSource()
 	if user := strings.TrimSpace(cfg.SNMPFixtureV3User); user != "" {

@@ -138,7 +138,7 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 			"protocol_version", hello.GetProtocolVersion())
 	}
 
-	session, superseded := s.Registry.Register(ident.CollectorID)
+	session, superseded := s.Registry.RegisterWithSessionKey(ident.CollectorID, hello.GetSessionPublicKey())
 	defer s.Registry.Unregister(ident.CollectorID, session)
 	metrics.streamsActive.Inc()
 	defer metrics.streamsActive.Dec()
@@ -149,10 +149,13 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 		metrics.connects.WithLabelValues("ok").Inc()
 	}
 
-	// ServerHello: latest signed policy is always included; the collector
-	// applies it only when the version is newer and acks either way (the ack
-	// is the server's source of truth for applied version).
-	latest, err := s.Svc.LatestPolicy(ctx, ident.OrgID, ident.CollectorID)
+	// ServerHello: latest signed policy is always included; when the collector
+	// presented an ephemeral session key (M9-S3) the document additionally
+	// carries credentials materialized to that key. The collector acks every
+	// delivery and (re)applies credential material at version >= its applied
+	// version (a reconnect re-keys the material), so the ack is the server's
+	// source of truth for the applied version.
+	latest, err := s.Svc.PolicyForSession(ctx, ident.OrgID, ident.CollectorID, hello.GetSessionPublicKey())
 	if err != nil && s.Log != nil {
 		s.Log.Error("load latest policy", "collector_id", ident.CollectorID, "error", err)
 	}

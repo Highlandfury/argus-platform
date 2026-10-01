@@ -178,11 +178,15 @@ type candidate struct {
 }
 
 // EffectiveCredential is the resolver's decision: the credential that applies
-// to a device and where it was bound.
+// to a device and where it was bound. Version is the stored envelope
+// key_version (encryption_context.version) at resolution time; collector
+// materialization binds it into the authenticated ciphertext context so a
+// record cannot be replayed across envelope generations.
 type EffectiveCredential struct {
 	CredentialID uuid.UUID
 	Name         string
 	Kind         string
+	Version      int
 	ScopeType    string
 	ScopeID      uuid.UUID
 	Priority     int
@@ -220,6 +224,7 @@ func selectEffective(candidates []candidate) (EffectiveCredential, bool) {
 		CredentialID: win.Credential.ID,
 		Name:         win.Credential.Name,
 		Kind:         win.Credential.Kind,
+		Version:      win.Credential.KeyVersion,
 		ScopeType:    win.Binding.ScopeType,
 		ScopeID:      win.Binding.ScopeID,
 		Priority:     win.Binding.Priority,

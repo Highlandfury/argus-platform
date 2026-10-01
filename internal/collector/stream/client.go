@@ -23,6 +23,7 @@ import (
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
 	"github.com/argus-platform/argus/internal/collector"
 	"github.com/argus-platform/argus/internal/collector/policy"
+	"github.com/argus-platform/argus/internal/platform/sessioncrypto"
 )
 
 const protocolVersion = 1
@@ -39,6 +40,20 @@ type BatchSource interface {
 	NextBatch() (*collectorv1.MetricBatch, bool)
 	// BatchResult consumes a server BatchResult for a previously sent batch.
 	BatchResult(*collectorv1.BatchResult)
+}
+
+// CredentialSink receives the per-session policy credential material (M9-S3).
+// The stream client installs the session seed it generates, hands every
+// verified bundle's material to ApplySession, and clears the sink when the
+// session ends. poll.BundleCredentialSource implements it RAM-only.
+type CredentialSink interface {
+	// SetSessionKey installs (a copy of) the ephemeral X25519 seed.
+	SetSessionKey(seed []byte)
+	// ApplySession replaces the credential set from a verified bundle's
+	// material (nil = no material: clear; fail closed, no stale use).
+	ApplySession(session *sessioncrypto.Session)
+	// Clear drops the key and all decrypted material.
+	Clear()
 }
 
 // DisconnectError carries a server-ordered disconnect code.
@@ -88,6 +103,11 @@ type Config struct {
 	// OnClockSkew reports the skew estimate (collector minus server, ms)
 	// whenever the server provides a timestamp (ServerHello/ServerPing).
 	OnClockSkew func(ms int64)
+	// Credentials, when set, receives the per-session credential material from
+	// verified policy bundles (M9-S3). The client generates one ephemeral
+	// X25519 keypair per stream session and includes the public half in the
+	// hello; the private half never leaves RAM.
+	Credentials CredentialSink
 }
 
 // TelemetryStats is the spool/sender accounting published in heartbeats.
@@ -237,11 +257,28 @@ func (c *Client) runOnce(ctx context.Context) error {
 	}
 	send := func(m *collectorv1.ClientMessage) error { return gstream.Send(m) }
 
+	// M9-S3: one ephemeral X25519 keypair per stream session. The public half
+	// is advertised in the hello; the seed is copied into the RAM-only
+	// credential sink and cleared here immediately, and the sink is cleared
+	// whenever this session ends (disconnect, error, shutdown).
+	var sessionPublic []byte
+	if c.cfg.Credentials != nil {
+		seed, pub, err := sessioncrypto.NewKeyPair()
+		if err != nil {
+			return fmt.Errorf("stream: session keypair: %w", err)
+		}
+		c.cfg.Credentials.SetSessionKey(seed)
+		clear(seed)
+		sessionPublic = pub
+		defer c.cfg.Credentials.Clear()
+	}
+
 	if err := send(&collectorv1.ClientMessage{
 		Msg: &collectorv1.ClientMessage_Hello{Hello: &collectorv1.ClientHello{
-			CollectorId:     c.cfg.CollectorID,
-			AgentVersion:    c.cfg.AgentVersion,
-			ProtocolVersion: protocolVersion,
+			CollectorId:      c.cfg.CollectorID,
+			AgentVersion:     c.cfg.AgentVersion,
+			ProtocolVersion:  protocolVersion,
+			SessionPublicKey: sessionPublic,
 		}},
 	}); err != nil {
 		return fmt.Errorf("stream: hello: %w", err)
@@ -427,9 +464,17 @@ func (c *Client) handlePolicy(send func(*collectorv1.ClientMessage) error, p *co
 		return nil
 	}
 	version := p.GetVersion()
-	if _, err := policy.VerifyAndValidate(p.GetDocument(), p.GetSignature(), c.cfg.PolicyKeyDER); err != nil {
+	doc, err := policy.VerifyAndValidate(p.GetDocument(), p.GetSignature(), c.cfg.PolicyKeyDER)
+	if err != nil {
 		ack(version, false, err.Error())
 		return err
+	}
+	// M9-S3: material from an accepted, verified bundle replaces the RAM-only
+	// credential set. Same-version re-deliveries re-apply (a reconnect has a
+	// new session key, so the material must be decrypted again); an older
+	// version never re-applies (no stale use).
+	if c.cfg.Credentials != nil && version >= c.cfg.AppliedVersion {
+		c.cfg.Credentials.ApplySession(doc.Session)
 	}
 	if version <= c.cfg.AppliedVersion {
 		// Idempotent re-delivery. Still (re)persist the document so a missing

@@ -9,6 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/argus-platform/argus/internal/platform/sessioncrypto"
 )
 
 func validDocument(t *testing.T, targets []Target) []byte {
@@ -146,5 +150,98 @@ func TestStoreKeepsLastThreeBundles(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join(dir, "policy-v5.json")) //nolint:gosec // path under t.TempDir()
 	if err != nil || string(raw) != "{}" {
 		t.Fatalf("load newest: %q err=%v", raw, err)
+	}
+}
+
+func validSessionMaterial() *sessioncrypto.Session {
+	return &sessioncrypto.Session{
+		Algorithm:          sessioncrypto.Algorithm,
+		EphemeralPublicKey: make([]byte, sessioncrypto.PublicKeyLen),
+		OrgID:              uuid.New().String(),
+		CollectorID:        uuid.New().String(),
+		PolicyVersion:      4,
+		Credentials: []sessioncrypto.Credential{{
+			DeviceID: uuid.New().String(), CredentialID: uuid.New().String(),
+			Kind: "snmp_v2c", Version: 1, Nonce: make([]byte, sessioncrypto.NonceLen),
+			Ciphertext: make([]byte, sessioncrypto.MinCiphertextLen),
+		}},
+	}
+}
+
+// TestValidateSessionMaterial pins the M9-S3 additive block: a structurally
+// valid session passes validation (including an unknown future algorithm, so
+// old collectors still apply the rest of the bundle), while malformed shapes
+// reject the document.
+func TestValidateSessionMaterial(t *testing.T) {
+	base := func() Document {
+		return Document{
+			HeartbeatIntervalSeconds: 30, ReportIntervalSeconds: 5, BatchMaxSamples: 5000, SpoolMaxBytes: 1 << 20,
+			Metrics: []Metric{{Key: "k", Unit: "u", Source: "s", IntervalSeconds: 1}},
+		}
+	}
+	doc := base()
+	doc.Session = validSessionMaterial()
+	if err := Validate(doc); err != nil {
+		t.Fatalf("valid session material rejected: %v", err)
+	}
+
+	unknown := validSessionMaterial()
+	unknown.Algorithm = "X25519-FUTURE"
+	doc = base()
+	doc.Session = unknown
+	if err := Validate(doc); err != nil {
+		t.Fatalf("unknown algorithm must stay structurally valid: %v", err)
+	}
+
+	shapes := map[string]func(*sessioncrypto.Session){
+		"bad ephemeral key": func(s *sessioncrypto.Session) { s.EphemeralPublicKey = []byte{1, 2, 3} },
+		"bad org":           func(s *sessioncrypto.Session) { s.OrgID = "not-a-uuid" },
+		"bad device":        func(s *sessioncrypto.Session) { s.Credentials[0].DeviceID = "not-a-uuid" },
+		"short nonce":       func(s *sessioncrypto.Session) { s.Credentials[0].Nonce = []byte{1} },
+		"short ciphertext":  func(s *sessioncrypto.Session) { s.Credentials[0].Ciphertext = []byte{1} },
+		"too many records": func(s *sessioncrypto.Session) {
+			s.Credentials = make([]sessioncrypto.Credential, sessioncrypto.MaxCredentials+1)
+		},
+		"negative policy":     func(s *sessioncrypto.Session) { s.PolicyVersion = -1 },
+		"negative credential": func(s *sessioncrypto.Session) { s.Credentials[0].Version = -1 },
+	}
+	for name, mutate := range shapes {
+		t.Run(name, func(t *testing.T) {
+			s := validSessionMaterial()
+			mutate(s)
+			d := base()
+			d.Session = s
+			if err := Validate(d); err == nil {
+				t.Fatalf("malformed session material (%s) accepted", name)
+			}
+		})
+	}
+}
+
+// TestVerifyAndValidateMaterializedDocument round-trips a signed document with
+// a session block through the exact collector verification path (base64 JSON
+// encoding included).
+func TestVerifyAndValidateMaterializedDocument(t *testing.T) {
+	pubDER, priv := signPolicy(t, nil)
+	session := validSessionMaterial()
+	doc := Document{
+		HeartbeatIntervalSeconds: 30, ReportIntervalSeconds: 5, BatchMaxSamples: 5000, SpoolMaxBytes: 1 << 20,
+		Metrics: []Metric{{Key: "k", Unit: "u", Source: "s", IntervalSeconds: 1}},
+		Session: session,
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	sig := ed25519.Sign(priv, raw)
+	got, err := VerifyAndValidate(raw, sig, pubDER)
+	if err != nil {
+		t.Fatalf("VerifyAndValidate materialized: %v", err)
+	}
+	if got.Session == nil || got.Session.Credentials[0].DeviceID != session.Credentials[0].DeviceID {
+		t.Fatalf("session material lost in round trip: %+v", got.Session)
+	}
+	if len(got.Session.Credentials[0].Ciphertext) != sessioncrypto.MinCiphertextLen {
+		t.Fatalf("ciphertext length changed: %d", len(got.Session.Credentials[0].Ciphertext))
 	}
 }

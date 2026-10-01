@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,7 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/argus-platform/argus/internal/modules/credentials"
 	"github.com/argus-platform/argus/internal/platform/database"
+	"github.com/argus-platform/argus/internal/platform/sessioncrypto"
 	"github.com/argus-platform/argus/internal/platform/telemetry"
 )
 
@@ -34,11 +38,45 @@ type Service struct {
 	auth    *pgxpool.Pool
 	ca      *CA
 	metrics *metrics
+	// creds is the M7-S4 credentials resolver boundary used to materialize
+	// effective SNMP credentials into policy bundles (M9-S3). Nil (or a typed
+	// nil *credentials.Resolver) disables materialization: bundles are then
+	// delivered without a session block.
+	creds CredentialResolver
+	// log is optional; materialization failures are logged without any secret
+	// material.
+	log *slog.Logger
+}
+
+// CredentialResolver is the M9-S3 dispatch boundary: it resolves the effective
+// credential for a device (bindings enforced server-side, RLS-scoped) and
+// returns its decrypted plaintext plus identity metadata. It is implemented by
+// *credentials.Resolver; the interface keeps the policy path testable without
+// a database.
+type CredentialResolver interface {
+	Materialize(ctx context.Context, orgID, deviceID uuid.UUID) ([]byte, credentials.EffectiveCredential, error)
+}
+
+// Option configures the collectors service.
+type Option func(*Service)
+
+// WithCredentialResolver wires the M9-S3 materialization resolver.
+func WithCredentialResolver(r CredentialResolver) Option {
+	return func(s *Service) { s.creds = r }
+}
+
+// WithLogger wires the optional service logger (errors never carry secrets).
+func WithLogger(log *slog.Logger) Option {
+	return func(s *Service) { s.log = log }
 }
 
 // New wires the collectors service (tel may be nil in unit contexts).
-func New(app, auth *pgxpool.Pool, ca *CA, tel *telemetry.Registry) *Service {
-	return &Service{app: app, auth: auth, ca: ca, metrics: newMetrics(tel)}
+func New(app, auth *pgxpool.Pool, ca *CA, tel *telemetry.Registry, opts ...Option) *Service {
+	s := &Service{app: app, auth: auth, ca: ca, metrics: newMetrics(tel)}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // EnrollRequest mirrors the gRPC enrollment input.
@@ -357,6 +395,113 @@ func (s *Service) LatestPolicy(ctx context.Context, orgID, collectorID uuid.UUID
 		return err
 	})
 	return sp, err
+}
+
+// PolicyForSession returns the newest signed policy for a collector with M9-S3
+// per-session credential materialization attached when the collector presented
+// an ephemeral session public key and SNMP credentials resolve for its poll
+// targets. The stored base bundle is never modified or persisted with the
+// material: the returned SignedPolicy is a per-request, per-session document
+// signed by the same Ed25519 key.
+//
+// Materialization is best-effort per device (a credential that cannot be
+// opened is skipped, and that device reports credential_missing; it can never
+// make the bundle undeliverable). Bindings are enforced by the resolver:
+// ErrNoCredential / ErrDeviceNotFound simply produce no record.
+func (s *Service) PolicyForSession(ctx context.Context, orgID, collectorID uuid.UUID, collectorSessionPublicKey []byte) (*SignedPolicy, error) {
+	base, err := s.LatestPolicy(ctx, orgID, collectorID)
+	if err != nil || base == nil {
+		return base, err
+	}
+	return s.materializePolicy(ctx, orgID, collectorID, base, collectorSessionPublicKey), nil
+}
+
+// materializePolicy attaches credential material to a copy of the stored base
+// bundle. It never returns an error: the base bundle is always deliverable, and
+// materialization failures are fail-closed per device.
+func (s *Service) materializePolicy(ctx context.Context, orgID, collectorID uuid.UUID, base *SignedPolicy, collectorSessionPublicKey []byte) *SignedPolicy {
+	if s.creds == nil || len(collectorSessionPublicKey) == 0 {
+		return base
+	}
+	var doc PolicyDocument
+	if err := json.Unmarshal(base.Document, &doc); err != nil {
+		// A stored document always unmarshals (it was built here); if that
+		// invariant ever breaks, deliver the base bundle rather than failing
+		// the stream.
+		s.warn("materialize: stored policy unreadable", "collector_id", collectorID, "error", err)
+		return base
+	}
+
+	creds := make([]sessioncrypto.PlainCredential, 0, 8)
+	for _, t := range doc.Targets {
+		if !strings.EqualFold(strings.TrimSpace(t.PollType), "snmp") {
+			continue
+		}
+		deviceID, err := uuid.Parse(t.DeviceID)
+		if err != nil {
+			continue
+		}
+		plaintext, eff, err := s.creds.Materialize(ctx, orgID, deviceID)
+		if err != nil {
+			if !errors.Is(err, credentials.ErrNoCredential) && !errors.Is(err, credentials.ErrDeviceNotFound) {
+				// Unexpected (vault/resolver) failure: skip this device only.
+				s.warn("materialize: credential resolution failed", "device_id", deviceID, "error", err)
+			}
+			continue
+		}
+		if !isSNMPCredentialKind(eff.Kind) {
+			clear(plaintext)
+			continue
+		}
+		creds = append(creds, sessioncrypto.PlainCredential{
+			DeviceID:     t.DeviceID,
+			CredentialID: eff.CredentialID.String(),
+			Kind:         eff.Kind,
+			Version:      eff.Version,
+			Plaintext:    plaintext,
+		})
+	}
+	defer func() {
+		for i := range creds {
+			clear(creds[i].Plaintext)
+		}
+	}()
+	if len(creds) == 0 {
+		return base
+	}
+
+	orgIDStr := orgID.String()
+	collectorIDStr := collectorID.String()
+	session, err := sessioncrypto.Seal(collectorSessionPublicKey, orgIDStr, collectorIDStr, base.Version, creds)
+	if err != nil {
+		s.warn("materialize: seal failed", "collector_id", collectorID, "error", err)
+		return base
+	}
+	materialized, err := s.ca.SignMaterializedPolicy(base.Version, doc, session)
+	if err != nil {
+		s.warn("materialize: sign failed", "collector_id", collectorID, "error", err)
+		return base
+	}
+	materialized.JitterSalt = base.JitterSalt
+	return materialized
+}
+
+// isSNMPCredentialKind reports whether the effective credential kind is SNMP
+// material the collector can consume. Non-SNMP credentials bound to a device
+// never become SNMP poll material.
+func isSNMPCredentialKind(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "snmp_v2c", "snmp_v3":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) warn(msg string, args ...any) {
+	if s.log != nil {
+		s.log.Warn(msg, args...)
+	}
 }
 
 // ResolveCertificate maps an mTLS fingerprint to its collector identity.

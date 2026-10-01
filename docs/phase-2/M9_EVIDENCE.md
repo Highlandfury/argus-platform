@@ -1,24 +1,30 @@
 # M9-EVIDENCE — Polling engine (ICMP + SNMP)
 
-**Status: M9-S1 COMPLETE and M9-S2 COMPLETE (both recorded here).** This
-record covers **M9-S1**, the polling foundation end-to-end with ICMP, and
-**M9-S2**, SNMP v2c/v3 polling with the declarative core template pack, the
-counter state machine, snmpsim fixtures and the scheduler/wire integration.
-**No credential materialization (S3), no full adaptive backoff/jitter/rate
-caps (S4), no M10 UI and no alerts exist or are claimed.** P2-AC-14 is
-satisfied for ICMP; P2-AC-15 (SNMP client/templates/fixtures/no SET) and
-P2-AC-16 (counter correctness) are satisfied for the S2 scope; P2-AC-20's
-error classification now includes the SNMP classes. P2-AC-17/18 completion
-(doubling/jitter/caps) and the failure-suite additions named in P2-AC-17/18
-(poll outage, credential revoked, restart mid-poll) remain S4 work; the
-scheduler exposes the hooks they will use.
+**Status: M9-S1 COMPLETE, M9-S2 COMPLETE and M9-S3 COMPLETE (all recorded
+here).** This record covers **M9-S1**, the polling foundation end-to-end with
+ICMP, **M9-S2**, SNMP v2c/v3 polling with the declarative core template pack,
+the counter state machine, snmpsim fixtures and the scheduler/wire integration,
+and **M9-S3**, real credential materialization into the signed policy bundles
+(per-session ECDH+AEAD, RAM-only, revocation). **No full adaptive
+backoff/jitter/rate caps (S4), no M10 UI and no alerts exist or are claimed.**
+P2-AC-14 is satisfied for ICMP; P2-AC-15 (SNMP client/templates/fixtures/no
+SET), P2-AC-16 (counter correctness) and P2-AC-19 (credential use flow:
+signed-bundle delivery, per-session encryption, RAM-only, revocation, log
+scan, server-side bindings) are satisfied for the S1-S3 scope; P2-AC-20's
+error classification includes the SNMP classes. P2-AC-17/18 completion
+(doubling/jitter/caps) and the remaining failure-suite additions named in
+P2-AC-17/18 (poll outage, restart mid-poll) remain S4 work; the scheduler
+exposes the hooks they will use.
 
-References: `PHASE_2_SPEC.md` M9 deliverables + P2-AC-14/17/20; canonical
+References: `PHASE_2_SPEC.md` M9 deliverables + P2-AC-14/17/19/20; canonical
 `docs/07 §12.2-12.4/§12.7` (ICMP requirements, tiers, failure modes),
-`docs/06 §` collector policy/scheduling + poll health, `docs/11 §21.1/§21.2`
+`docs/06` collector policy/scheduling + SecretsVault, `docs/11 §21.1/§21.2`
 (`poll_health`, 90 d retention, hypertables), `docs/12 §22` (endpoint
-conventions), `docs/15` (policy sync "keeps last 3 bundles", ICMP concurrency
-budget), `ARCHITECTURE.md` equivalents; `M8_EVIDENCE.md` (style).
+conventions), `docs/14 §24.5` (envelope encryption, collector
+materialization, mlock best-effort, no persistence), `docs/15` (policy sync
+"keeps last 3 bundles", ICMP concurrency budget); `ARCHITECTURE.md`
+equivalents; `M7_EVIDENCE.md` (credentials resolver/vault) and `M8_EVIDENCE.md`
+(style).
 
 ---
 
@@ -28,8 +34,8 @@ budget), `ARCHITECTURE.md` equivalents; `M8_EVIDENCE.md` (style).
 |---|---|---|
 | **S1** | Poll targets in the signed bundle; collector scheduler + ICMP prober; `net.icmp.*` samples through the existing spool/stream/ingest path; `poll_health` end-to-end; read API; tests/evidence | **done** |
 | **S2** | SNMP v2c/v3 client (GETBULK/GETNEXT, no SET), declarative core template pack, counter state machine, snmpsim fixtures, targets carry poll type + template inputs | **done** (see §12) |
-| S3 | Credential materialization in signed bundles (per-session ECDH+AEAD, RAM-only, revocation) | not started |
-| S4 | Full adaptive backoff/jitter/rate/safety caps (one walk in flight, per-tier sessions, ~100 sessions), failure-suite additions (poll outage, credential revoked, restart mid-poll) | hooks present (`BackoffPolicy`, per-device walk lock); policy fixed-tier |
+| **S3** | Credential materialization in signed bundles (per-session ECDH+AEAD, RAM-only, revocation) | **done** (see §13) |
+| **S4** | Full adaptive backoff/jitter/rate/safety caps (one walk in flight, per-tier sessions, ~100 sessions), failure-suite additions (poll outage, restart mid-poll) | hooks present (`BackoffPolicy`, per-device walk lock); policy fixed-tier |
 | M10/M11 | Device/interface UI, status rollups, alerts | untouched |
 
 ---
@@ -291,7 +297,8 @@ device_id parsing).
 - `mibgen` compilation of vendor MIBs into template skeletons + vendor packs,
   sysObjectID-based template selection, and operator-loaded template packs —
   future M9 work (§12.7/§12.8 record the core-pack-only limitation).
-- Credential materialization/rotation/revocation in bundles — S3.
+- Credential materialization in signed bundles — **closed in S3 (§13)**;
+  `credential.use` audit events remain deferred (see §13.7).
 - Adaptive doubling/jitter, safety caps (one walk in flight,
   ≤300 req/min, session caps), failure-suite additions — S4.
 - Device/interface UI, status rollups — M10; alerts/events — M11; dashboards —
@@ -527,8 +534,9 @@ engine dual-poll-type, v2c warning). Integration:
 
 ### 12.8 Deferred (explicit, S2 remainder)
 
-- Credential materialization/rotation/revocation in signed bundles — S3
-  (`CredentialSource` is the swap point; fixture env config is dev-only).
+- Credential materialization/rotation/revocation in signed bundles — **closed
+  in S3 (§13)** (`CredentialSource` is the swap point; fixture env config
+  remains a dev-only fallback behind the materialized source).
 - Adaptive backoff/jitter, ≤300 req/min per-device budget, per-tier/global
   session ceilings, v3 engine-ID caching, pooling — S4.
 - `mibgen`, vendor packs, sysObjectID-based selection, operator-loaded
@@ -561,3 +569,226 @@ engine dual-poll-type, v2c warning). Integration:
   base digest, snmpsim pip pins); this file.
 - Dependencies: `github.com/gosnmp/gosnmp v1.45.0`, `gopkg.in/yaml.v3 v3.0.1`
   (direct; testify bumped v1.11.1→v1.12.1 as a gosnmp test dependency via MVS).
+
+---
+
+## 13. M9-S3 — Credential materialization (signed bundles, per-session ECDH+AEAD, RAM-only, revocation)
+
+**Status: COMPLETE (this section).** Real device credentials flow from the
+server to the collector only inside the signed policy bundle, encrypted to the
+collector's per-stream ephemeral key; the collector decrypts them into RAM,
+serves them through the existing `CredentialSource` seam, and drops them on
+revocation/binding removal with fail-closed poll health. P2-AC-19 is satisfied
+for this scope (signed-bundle delivery, per-session ECDH+AEAD, RAM-only
+verified by disk/log scan, revocation on next sync, server-side bindings, no
+secret in logs). Adaptive scheduling/safety caps (S4), M10 UI and alerts remain
+out of scope; there is still no SNMP SET anywhere.
+
+### 13.1 End-to-end flow
+
+Server (inside the collector stream):
+
+1. `ClientHello` carries a per-stream ephemeral X25519 public key (new
+   additive field `session_public_key = 6`). A collector that does not present
+   one receives the base bundle unchanged.
+2. `Stream` calls `Service.PolicyForSession`, which loads the newest stored
+   base bundle in the tenant transaction and, per `snmp` poll target, calls the
+   M7-S4 `credentials.Resolver.Materialize` — precedence
+   device > device_group (documented hook) > site > org, RLS-scoped, envelope
+   opened through the process `SecretsVault` (P2-D2 local-KMS binding).
+3. Resolved plaintext is sealed to the collector's session key inside a new
+   `session` block attached to a copy of the document; the exact bytes are
+   signed with the same Ed25519 policy key, under the same policy version.
+   Nothing materialized is persisted: `collector_policies` keeps only the base
+   document, and the per-session bytes exist only for the request lifetime.
+4. The `policy:resync` push path materializes for the live session key too
+   (`SessionRegistry.SessionPublicKey`); enrollment returns the base bundle
+   (no session exists yet; the first stream connect materializes).
+
+Collector:
+
+1. Every stream session generates a fresh X25519 keypair; the public half goes
+   in the hello, the seed is installed in the RAM-only credential source
+   (mlock best-effort on Linux) and cleared on session end.
+2. Every signature-verified bundle is handed to
+   `poll.BundleCredentialSource.ApplySession`: records are decrypted with the
+   session seed, parsed into `poll.SNMPCredentials`, and the whole set is
+   swapped atomically (a bundle without material clears it).
+3. The SNMP prober consumes the source through `ChainCredentialSource`
+   (materialized credentials first; the S2 fixture/env source is a dev-only
+   fallback so fixture runs keep working).
+4. Fail closed: undecryptable/absent material → `credential_missing`;
+   decrypted but malformed payload → `credential_invalid` (both existing
+   poll-health classes).
+
+### 13.2 Crypto design (canonical refs; documented choices)
+
+`docs/14 §24.5` specifies "HPKE-like: ECDH + AEAD over the mTLS channel, fresh
+key per session, no persistence" without naming primitives. Per the phase-2
+delivery brief, the conservative pairing is fixed and recorded here:
+
+| Element | Choice |
+|---|---|
+| Key agreement | **X25519** (`crypto/ecdh`), fresh server ephemeral per bundle + one collector ephemeral per stream session |
+| KDF | **HKDF-SHA256**; salt = SHA-256(server ephemeral ‖ collector public key), info = `argus-policy-credential/v1`, 32-byte output |
+| AEAD | **AES-256-GCM**, fresh random 96-bit nonce per record |
+| Context (AAD) | canonical string: domain `argus-policy-credential/v1`, `org_id`, `collector_id`, `device_id`, `credential_id`, `credential_version` (stored envelope `key_version`), `policy_version` |
+
+Consequences pinned by tests: ciphertext cannot be replayed across collectors,
+sessions, tenants, devices or credential generations; swapping or flipping any
+ciphertext/nonce/context byte fails authentication; two bundles never share an
+ephemeral key (`sessioncrypto` unit suite, real crypto, no mocks).
+
+Plaintext discipline: `Seal`/`Open` never place secret bytes in errors;
+authentication failures collapse to `sessioncrypto.ErrAuthentication`;
+credential payload parse errors collapse to a sanitized sentinel before they
+reach logs or poll health. The server never interprets vault plaintext — it
+moves opaque bytes and labels them with the credential kind; the collector
+parses by kind.
+
+**Payload schema** (documented wire contract between vault plaintext and the
+SNMP session): `snmp_v2c` is the community string itself; `snmp_v3` is JSON
+`{"username","auth_protocol","auth_key","priv_protocol","priv_key","context"}`.
+
+### 13.3 Protocol delta (additive; `buf lint` clean)
+
+- `proto/argus/collector/v1/collector.proto`: `ClientHello.session_public_key`
+  (field 6, `bytes`, 32 raw bytes; absence = no materialization). No other
+  message changed; old collectors ignore the field, old servers leave the
+  bundle untouched.
+- Signed policy document gains the additive `session` block:
+  `{"algorithm":"X25519-HKDF-SHA256-AES-256-GCM","ephemeral_public_key":…,
+  "org_id":…,"collector_id":…,"policy_version":N,
+  "credentials":[{"device_id","credential_id","kind","version","nonce","ciphertext"}]}`.
+- The materialized document keeps the base bundle's policy version. The
+  collector applies material from any verified bundle with
+  `version >= applied_version` (a reconnect gets a new session key, so the
+  same version must re-apply) and never from an older version. Persisted policy
+  storage, last-3 bundle retention and the ingest allowlist are unchanged.
+- Base64 is the JSON encoding for the byte fields (Go defaults on both sides).
+
+### 13.4 Bindings, revocation and rotation semantics
+
+- **Bindings are enforced server-side** by the M7-S4 resolver inside the
+  tenant transaction; the API is still write-only and the collector never
+  resolves scopes. `device_group` membership remains the documented resolver
+  hook (no dynamic selector schema yet), and `listPolicyTargets` only emits an
+  SNMP target for device/site/org bindings, so group-only bindings materialize
+  nothing — recorded, not silently invented.
+- **Binding removal**: the next policy sync (resync push or reconnect) resolves
+  nothing for that device, the bundle carries no record, the collector replaces
+  its RAM set with the shorter one, and the next poll reports
+  `credential_missing` — no stale use. Integration-pinned.
+- **Collector revocation**: the server refuses revoked streams before hello and
+  disconnects a live session with `CODE_REVOKED`; the collector's session ends,
+  which clears the seed and all decrypted material. Integration-pinned.
+- **Rotation**: the resolver returns the current envelope each sync, so the
+  next bundle carries the rotated plaintext with the new `key_version` bound
+  into the AAD; old ciphertext does not authenticate under the new record. The
+  rotation wizard UI/test flow is not part of this slice.
+
+### 13.5 RAM-only handling (collector)
+
+`poll.BundleCredentialSource` holds the session seed and the decrypted
+`SNMPCredentials` in mutex-guarded memory only:
+
+- no filesystem API exists in the type; nothing about it is written to disk;
+- the session seed is copied, zeroed on `Clear`, and mlock-ed best-effort on
+  Linux (`memlock_linux.go`, `syscall.Mlock`; a build-tagged no-op elsewhere) —
+  canonical "Linux mlock best-effort";
+- decrypted plaintext is zeroed immediately after parsing;
+- each applied bundle atomically replaces the previous set; `Clear` runs on
+  disconnect/error/shutdown and on revocation;
+- the only collector-visible bytes at rest are the per-session AEAD ciphertext
+  inside the signed bundle cache (`policy-vN.json`, existing last-3 store);
+  without the RAM-only session seed they are undecryptable, and a restart
+  requires a fresh materialization on reconnect. The scan tests read every
+  file under the collector policy dir and assert the sentinel plaintext is
+  absent; captured slog output (collector + server) is scanned the same way.
+
+### 13.6 Verification (observed 2026-10-01)
+
+Environment: Windows 11 dev host, Docker Desktop 29.8.1 (WSL2), pinned
+TimescaleDB 2.30.1-pg18 + snmpsim fixtures (testcontainers), Go 1.27.1 local
+toolchain, golangci-lint v2.14.0, buf v1.73.0.
+
+| Command | Result |
+|---|---|
+| `go build ./...` | pass (also `GOOS=linux GOARCH=amd64 go build ./...` pass) |
+| `go test ./internal/... -count=1` | pass (all packages, incl. new sessioncrypto/bundle-source/materialization tests) |
+| `go test ./tests/integration/ -run '^TestM9' -count=1 -v` | **pass, 16/16** (S1 6, S2 4, S3 6; 89.4 s) |
+| `go test ./tests/integration/ -run '^TestM9S3' -count=1 -v` | **pass, 6/6** (v2c E2E through real spool→stream→ingest; v3 authPriv E2E; binding removal + revocation + RAM-only disk/log scan; cross-tenant isolation; bundle tamper; org/site tier precedence) |
+| `go test ./tests/integration/ -count=1` | **pass, full suite (248.4 s)** — T4/T5/T9, M8 metrics/ingest, M7 inventory/credentials, M9 S1/S2/S3 all green |
+| `go test ./tests/contract/... -count=1` | pass |
+| `gofmt -l internal cmd tests` | empty |
+| `golangci-lint run --timeout 10m ./...` (v2.14.0) | **0 issues** |
+| `buf lint` / `buf generate` + `git diff --exit-code -- gen` | exit 0; only the additive `collector.pb.go` change (regenerated, commit-ready) |
+
+New unit tests: `internal/platform/sessioncrypto/sessioncrypto_test.go`
+(real-crypto round trip, wrong session key, context binding incl. cross-record
+ciphertext, tamper, fresh ephemerals, bounds), 
+`internal/modules/collectors/policy_session_test.go` (materialize round trip,
+wrong-key, fail-closed paths, multi-device),
+`internal/collector/poll/bundle_credentials_test.go` (apply/lookup v2c+v3,
+wrong key, malformed→invalid, replacement/clear, no-files/sanitized-logs,
+payload parser, chain),
+`internal/collector/policy/apply_test.go` (session structural validation,
+materialized-document verify round trip). Integration:
+`tests/integration/m9s3_credentials_test.go` (v2c and v3 polling with the
+materialized credential against the pinned snmpsim fixtures, org/site
+precedence, binding removal + revocation, RAM-only disk/log scans,
+cross-tenant isolation, tamper rejection).
+
+### 13.7 Design decisions and limitations
+
+1. **The server never parses secrets.** Vault plaintext travels as opaque
+   bytes; the collector interprets it by credential kind. This keeps the
+   crypto boundary simple and avoids a second secret-schema parser server-side.
+2. **Fresh server ephemeral per bundle** (on top of the per-session collector
+   key) makes every bundle independently decryptable within its session, so
+   out-of-order/repeated deliveries are safe; a bundle cached on disk from a
+   previous session is dead on restart (reconnect re-materializes).
+3. **Same policy version for materialized re-delivery.** Version churn per
+   reconnect is avoided; the collector treats `version >= applied` as
+   eligible for material application and `version < applied` as
+   non-applicable, preserving the no-stale-use rule.
+4. **Per-device resolver transactions.** Materialization calls the existing
+   per-device `Resolver.Materialize` (one tenant transaction per SNMP-bound
+   device per sync). Batching it is a follow-up; it is bounded by the target
+   ceiling (10,000/collector documented hard cap).
+5. **mlock is best-effort by design**: Go string copies of key material cannot
+   be pinned; the seed buffer is. Recorded as the canonical best-effort
+   contract, not a hard guarantee.
+6. **`credential_version` = envelope `key_version`** (the stored
+   `encryption_context.version`). A re-seal that keeps the same KEK version
+   does not change it; replaying an old ciphertext within a live session would
+   require the server to sign it (signature is the trust boundary).
+7. **No `credential.use` audit event yet**: the M7 resolver has no audit sink
+   in this slice; the canonical §24.5 use-audit row (purpose-tagged audit per
+   use) is an honest deferred item (M10/M11 or a dedicated follow-up).
+8. **Old collectors keep working**: without `session_public_key` they get the
+   base bundle and their SNMP targets report `credential_missing` unless the
+   S2 fixture env vars are set (dev only).
+
+### 13.8 Files changed (M9-S3)
+
+- Crypto: `internal/platform/sessioncrypto/sessioncrypto.go` (new) + tests.
+- Server policy/stream: `internal/modules/collectors/{policy,service,session,
+  stream,http}.go`; `internal/modules/credentials/{resolver,models}.go`
+  (`EffectiveCredential.Version`); `cmd/argus-server/main.go` (shared vault,
+  resolver wiring).
+- Proto/gen: `proto/argus/collector/v1/collector.proto` (+ regenerated
+  `gen/go/argus/collector/v1/collector.pb.go`).
+- Collector: `internal/collector/poll/{credential_payload,bundle_credentials}.go`,
+  `memlock_linux.go`, `memlock_other.go` (new); `internal/collector/policy/apply.go`
+  (session block + validation); `internal/collector/stream/client.go` (session
+  keypair, hello field, material application, clear on session end);
+  `cmd/argus-collector/run.go` (RAM-only source + chain wiring).
+- Tests: `internal/platform/sessioncrypto/sessioncrypto_test.go`,
+  `internal/modules/collectors/policy_session_test.go`,
+  `internal/collector/poll/bundle_credentials_test.go`,
+  `internal/collector/policy/apply_test.go`,
+  `internal/modules/credentials/resolver_test.go`,
+  `tests/integration/m9s3_credentials_test.go`,
+  `tests/integration/m3_collector_test.go` (resolver option).
+- Docs: this file.

@@ -158,8 +158,11 @@ func (r *Resolver) deviceGroupIDs(ctx context.Context, tx pgx.Tx, deviceID uuid.
 // group-tier memberships, site, org) with its credential metadata. The safe
 // column list is used: resolution needs identity, not key material.
 func candidateBindings(ctx context.Context, tx pgx.Tx, deviceID, siteID uuid.UUID, groupIDs []uuid.UUID) ([]candidate, error) {
+	// key_version is selected alongside the metadata projection: dispatch
+	// materialization binds the envelope generation into the authenticated
+	// context (M9-S3) without exposing envelope bytes to the resolver result.
 	rows, err := tx.Query(ctx, `
-		SELECT `+credentialMetaColumns+`,
+		SELECT `+credentialMetaColumns+`, c.key_version,
 		       b.id, b.org_id, b.credential_id, b.scope_type, b.scope_id, b.priority, b.created_at
 		FROM credential_bindings b
 		JOIN device_credentials c ON c.id = b.credential_id
@@ -179,7 +182,7 @@ func candidateBindings(ctx context.Context, tx pgx.Tx, deviceID, siteID uuid.UUI
 			b Binding
 		)
 		if err := rows.Scan(&c.ID, &c.OrgID, &c.Name, &c.Kind, &c.Metadata,
-			&c.RotatedAt, &c.CreatedAt, &c.UpdatedAt,
+			&c.RotatedAt, &c.CreatedAt, &c.UpdatedAt, &c.KeyVersion,
 			&b.ID, &b.OrgID, &b.CredentialID, &b.ScopeType, &b.ScopeID, &b.Priority, &b.CreatedAt); err != nil {
 			return nil, err
 		}
