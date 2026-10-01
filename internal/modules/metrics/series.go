@@ -212,6 +212,58 @@ func ensureSeries(ctx context.Context, tx pgx.Tx, specs []SeriesSpec) (SeriesRes
 	}
 	seriesCreated.Add(float64(created))
 
+	// Concurrent-first-delivery race: another transaction can create the same
+	// series between our SELECT and the upsert. ON CONFLICT DO NOTHING skips
+	// those rows without returning them, so re-read the keys that are still
+	// unresolved. The conflicting transaction has committed by the time the
+	// upsert returns (speculative insertion waits on the in-progress tuple), and
+	// this is a new statement, so the committed rows are visible here.
+	unresolved := make([]SeriesSpec, 0)
+	for _, sp := range missing {
+		if _, ok := res.IDs[sp.Key()]; !ok {
+			unresolved = append(unresolved, sp)
+		}
+	}
+	if len(unresolved) > 0 {
+		keys := make([]string, len(unresolved))
+		hashes := make([]int64, len(unresolved))
+		for i, sp := range unresolved {
+			keys[i], hashes[i] = sp.MetricKey, sp.DimHash
+		}
+		rows, err := tx.Query(ctx, `
+			SELECT s.metric_key, s.dim_hash, s.id, s.quarantined_at IS NOT NULL
+			FROM metric_series s
+			JOIN unnest($3::text[], $4::bigint[]) AS t(metric_key, dim_hash)
+			  ON s.metric_key = t.metric_key AND s.dim_hash = t.dim_hash
+			WHERE s.org_id = $1 AND s.collector_id = $2 AND s.device_id IS NULL`,
+			orgID, collectorID, keys, hashes)
+		if err != nil {
+			return res, fmt.Errorf("metrics: re-read raced series: %w", err)
+		}
+		for rows.Next() {
+			var (
+				metricKey   string
+				dimHash     int64
+				id          int64
+				quarantined bool
+			)
+			if err := rows.Scan(&metricKey, &dimHash, &id, &quarantined); err != nil {
+				rows.Close()
+				return res, fmt.Errorf("metrics: scan raced series: %w", err)
+			}
+			key := seriesMapKey(metricKey, dimHash)
+			if quarantined {
+				res.Quarantined[key] = true
+			} else {
+				res.IDs[key] = id
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return res, fmt.Errorf("metrics: iterate raced series: %w", err)
+		}
+	}
+
 	for key := range distinct {
 		if _, ok := res.IDs[key]; !ok {
 			return res, fmt.Errorf("metrics: series %s unresolved after upsert", key)

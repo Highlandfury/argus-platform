@@ -1,0 +1,1 @@
+{"variant":"unnest","batch":2000,"parallel":1,"batches":60,"elapsed_s":12.902,"samples_accepted":120000,"failed":0,"achieved_samples_per_s":9301.0,"p50_ms":209.3,"p95_ms":261.1,"p99_ms":300.4}

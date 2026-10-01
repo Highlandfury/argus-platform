@@ -31,7 +31,7 @@ func unsetServerEnv(t *testing.T) {
 		"ARGUS_SERVER_GRPC_ADDR", "ARGUS_SERVER_ENROLL_ADDR",
 		"ARGUS_SERVER_DB_DSN", "ARGUS_SERVER_AUTH_DB_DSN", "ARGUS_SERVER_MIGRATE_DSN",
 		"ARGUS_SERVER_CA_DIR", "ARGUS_DEV_SEED",
-		"ARGUS_METRICS_RAW_RETENTION_DAYS",
+		"ARGUS_METRICS_RAW_RETENTION_DAYS", "ARGUS_SERVER_DB_MAX_CONNS",
 	)
 }
 
@@ -107,6 +107,30 @@ func TestLoadServerRawRetentionBounds(t *testing.T) {
 	t.Setenv("ARGUS_METRICS_RAW_RETENTION_DAYS", "91")
 	if _, err := LoadServer(); err == nil {
 		t.Fatal("expected error for raw retention above 90 d")
+	}
+}
+
+func TestLoadServerDBMaxConnsBounds(t *testing.T) {
+	unsetServerEnv(t)
+	cfg, err := LoadServer()
+	if err != nil {
+		t.Fatalf("LoadServer: %v", err)
+	}
+	if cfg.DBMaxConns != 10 {
+		t.Fatalf("DB pool default = %d, want 10 (Phase-1 sizing)", cfg.DBMaxConns)
+	}
+	t.Setenv("ARGUS_SERVER_DB_MAX_CONNS", "25")
+	cfg, err = LoadServer()
+	if err != nil || cfg.DBMaxConns != 25 {
+		t.Fatalf("DB pool 25: %d, %v", cfg.DBMaxConns, err)
+	}
+	t.Setenv("ARGUS_SERVER_DB_MAX_CONNS", "0")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("expected error for DB pool of 0")
+	}
+	t.Setenv("ARGUS_SERVER_DB_MAX_CONNS", "81")
+	if _, err := LoadServer(); err == nil {
+		t.Fatal("expected error for DB pool above 80")
 	}
 }
 

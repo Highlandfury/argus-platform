@@ -1,0 +1,19 @@
+{
+  "mode": "fleet",
+  "collectors": 200,
+  "duration_seconds": 614.66,
+  "batch_size": 500,
+  "offered_samples_per_sec": 20000,
+  "achieved_samples_per_sec": 14192.39,
+  "batches_ok": 17571,
+  "batches_duplicate": 0,
+  "batches_rejected": 0,
+  "batches_retry": 0,
+  "samples_accepted": 8723454,
+  "samples_duplicate": 0,
+  "transport_errors": 597,
+  "reconnects": 597,
+  "ack_p50_ms": 15165.768,
+  "ack_p95_ms": 27722.743,
+  "ack_p99_ms": 28943.812
+}

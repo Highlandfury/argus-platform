@@ -7,6 +7,7 @@ plane (no mocks):
 |---|---|---|
 | Ingest load generator | `tests/load/gen` (Go) | M4a smoke, L-01 (single stream), L-02 (fleet), reconnect/dedup behavior |
 | Query latency probe | `tests/load/query` (Go) | Per-shape query latency (latest, 15m, 1h, 6h, 24h) |
+| ADR-016 write-path bench | `tests/load/writepath` (Go) | unnest vs staging+COPY and per-stream concurrency, against the real ingest.Service (M8-S2a) |
 | API load leg | `tests/load/k6/api.js` (k6) | L-03: 50 VUs, 5 min, mixed reads (collectors list + 24 h metric query) |
 
 Full measured results and the observed bottleneck live in
@@ -75,11 +76,20 @@ contract.
 docker compose -f deployments\compose\docker-compose.dev.yml cp server:/var/lib/argus/ca/root.pem .dev\ca-root.pem
 # L-01: one stream, batch 2000, 20k samples/s offered, 10 min
 go run ./tests/load/gen -mode single-stream -duration 10m -samples-per-sec 20000 -batch 2000 -name-prefix l01
-# L-02: 200 collectors x 100 samples/s, batch 500/5 s, 10 min
+# L-02: 200 collectors x 100 samples/s equivalent, batch 500, 10 min
 #   (fleet enrollment uses the documented load override for the per-IP limiter:
 #    docker compose -f docker-compose.dev.yml -f docker-compose.load.yml up -d server)
 go run ./tests/load/gen -mode fleet -collectors 200 -samples-per-sec 20000 -batch 500 -duration 10m -name-prefix l02
 ```
+
+Fleet-mode note (M8-S2a): the harness sends one batch per collector per
+`batch/samples-per-sec` tick while the 8-batch window has room, so at fleet
+scale it runs at window-bounded **max pressure**, not at exactly 100 samples/s
+per collector. Under deep queueing its default 15 s no-ack watchdog closes the
+stream (a real collector instead keeps the spool and replays); the opt-in
+`-ack-timeout` flag (default 15 s, unchanged) raises that watchdog to measure
+service capacity without the synthetic abandons. Both measurements are recorded
+in `docs/phase-2/M8_EVIDENCE.md` §7.2.
 
 ## Query latency probe
 
@@ -87,6 +97,24 @@ go run ./tests/load/gen -mode fleet -collectors 200 -samples-per-sec 20000 -batc
 go run ./tests/load/query -iterations 25                    # dev-collector
 go run ./tests/load/query -collector l01-0000 -iterations 25 # large series
 ```
+
+## ADR-016 write-path bench (M8-S2a)
+
+The ADR-016 measurement harness drives the real `ingest.Service` (RLS, batch
+claim, series resolution, sample write, touch, chunk-RLS sweep) with the
+runtime app role. Variants: `unnest` (current path) and `staging` (binary
+`COPY` into a per-session temp table + `INSERT ... SELECT ... ON CONFLICT`).
+
+```powershell
+go run ./tests/load/writepath `
+  -owner-dsn "postgres://argus_owner:<pw>@127.0.0.1:5432/argus?sslmode=disable" `
+  -app-dsn   "postgres://argus_app_login:<pw>@127.0.0.1:5432/argus?sslmode=disable" `
+  -variant unnest -batch 2000 -batches 60 -parallel 6
+```
+
+Results and the resulting decision are recorded in
+[`docs/phase-2/M8_EVIDENCE.md`](../../docs/phase-2/M8_EVIDENCE.md) §6. Raw final
+L-01/L-02 artifacts live under `tests/load/results/`.
 
 ## Cleanup (development only)
 

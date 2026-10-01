@@ -1,0 +1,1 @@
+{"variant":"staging","batch":2000,"parallel":6,"batches":60,"elapsed_s":6.324,"samples_accepted":120000,"failed":0,"achieved_samples_per_s":18976.5,"p50_ms":530.8,"p95_ms":1377.1,"p99_ms":1394.0}

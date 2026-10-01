@@ -1,0 +1,16 @@
+-- 000014_drop_redundant_series_ts_index.up.sql
+-- ADR-016 (M8-S2a): drop the redundant sample index.
+--
+-- metric_samples_series_ts (series_id, ts DESC) duplicates metric_samples_pk
+-- (series_id, ts, unique): same leading columns, same physical ordering modulo
+-- per-column direction, and the planner serves the (series_id, ts) range and
+-- ORDER BY ts DESC raw-query shapes from the primary key (verified with
+-- EXPLAIN on the dev stack: Index Scan Backward using metric_samples_pk, and
+-- the time_bucket aggregation path likewise). The duplicate doubled the B-tree
+-- write amplification of every ingest batch; removing it measured ~11% lower
+-- serial batch latency and improved concurrent throughput in the ADR-016
+-- harness (tests/load/writepath, docs/phase-2/M8_EVIDENCE.md §6).
+--
+-- Query behavior is unchanged: no query predicate in the codebase referenced
+-- the index by name, and its two use cases are strictly covered by the PK.
+DROP INDEX IF EXISTS metric_samples_series_ts;

@@ -81,16 +81,29 @@ func (TimescaleStore) InsertSamples(ctx context.Context, tx pgx.Tx, samples []Sa
 // TouchSeries implements Store. New activity is the inverse of retirement:
 // a tombstoned series that receives samples again becomes live in the same
 // statement (documented in M8_EVIDENCE.md §4).
+//
+// Concurrency (ADR-016): concurrent batches of one collector target the same
+// series row, so a plain UPDATE queued every pipelined transaction behind the
+// first one until COMMIT and serialized the stream. SKIP LOCKED makes the
+// touch strictly best-effort: a batch that finds the row locked skips it, the
+// lock holder advances last_seen_at, and the next batch refreshes it again.
+// That bounds the retirement-clock lag to one batch window — irrelevant for a
+// 30-day retirement threshold — and removes the hotspot.
 func (TimescaleStore) TouchSeries(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, seriesIDs []int64, ts time.Time) error {
 	if len(seriesIDs) == 0 || ts.IsZero() {
 		return nil
 	}
 	_, err := tx.Exec(ctx, `
+		WITH target AS (
+			SELECT id FROM metric_series
+			WHERE org_id = $1 AND id = ANY($2)
+			  AND (last_seen_at IS NULL OR last_seen_at < $3 OR retired_at IS NOT NULL)
+			FOR UPDATE SKIP LOCKED
+		)
 		UPDATE metric_series
 		SET last_seen_at = GREATEST(COALESCE(last_seen_at, $3), $3),
 		    retired_at   = CASE WHEN retired_at IS NOT NULL THEN NULL ELSE retired_at END
-		WHERE org_id = $1 AND id = ANY($2)
-		  AND (last_seen_at IS NULL OR last_seen_at < $3 OR retired_at IS NOT NULL)`,
+		WHERE id IN (SELECT id FROM target)`,
 		orgID, seriesIDs, ts)
 	if err != nil {
 		return fmt.Errorf("metrics: touch series: %w", err)

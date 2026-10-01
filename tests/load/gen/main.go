@@ -57,6 +57,7 @@ type config struct {
 	samplesPerS   int
 	batchSize     int
 	duration      time.Duration
+	ackTimeout    time.Duration
 	jsonOut       string
 	enrollTimeout time.Duration
 }
@@ -91,6 +92,7 @@ func run() int {
 	flag.IntVar(&cfg.samplesPerS, "samples-per-sec", 20000, "offered samples/s across all collectors")
 	flag.IntVar(&cfg.batchSize, "batch", 2000, "samples per batch")
 	flag.DurationVar(&cfg.duration, "duration", 60*time.Second, "run duration")
+	flag.DurationVar(&cfg.ackTimeout, "ack-timeout", 15*time.Second, "client-side no-ack stream timeout (default matches the historical harness; raise it to measure capacity without abandoning deep queues)")
 	flag.StringVar(&cfg.jsonOut, "json", "", "write the summary JSON to this path")
 	flag.DurationVar(&cfg.enrollTimeout, "enroll-timeout", 20*time.Second, "per-enrollment timeout")
 	flag.Parse()
@@ -483,7 +485,7 @@ func runCollector(ctx context.Context, cfg config, pool *x509.CertPool, agg *sta
 				}
 			case <-ctx.Done():
 				break ackLoop
-			case <-time.After(15 * time.Second):
+			case <-time.After(cfg.ackTimeout):
 				agg.transportErrs.Add(1)
 				break ackLoop
 			}

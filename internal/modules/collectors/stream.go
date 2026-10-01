@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -20,6 +21,18 @@ import (
 const (
 	maxInflightBatches = 8
 	maxBatchSamples    = 5000
+
+	// streamIngestConcurrency is the process-wide budget of concurrent batch
+	// transactions. One stream may use the whole budget (measured: a single
+	// stream needs ~6-8 concurrent transactions to move from ~9k to ~19k
+	// samples/s); a fleet shares it. Without the process-wide bound, 200
+	// collectors × 6 in-flight batches queue 1,200 transactions against the
+	// 10-connection pool, per-batch latency crosses the collector ack timeout,
+	// and streams cancel their own in-flight work (measured during L-02;
+	// ADR-016). Acquisition happens in the stream's receive loop, so a stream
+	// never builds an internal queue: backpressure reaches the collector
+	// through gRPC flow control instead.
+	streamIngestConcurrency = 8
 )
 
 // StreamServer implements collectorv1.CollectorService (port 8443, mTLS).
@@ -33,13 +46,23 @@ type StreamServer struct {
 	Registry *SessionRegistry
 	Ingest   ingest.Ingester
 	Log      *slog.Logger
+
+	// ingestGlobal is the process-wide batch-transaction budget (see
+	// streamIngestConcurrency). Initialized by NewStreamServer.
+	ingestGlobal chan struct{}
 }
 
 // NewStreamServer wires the collector stream service. ingester may be nil in
 // degraded configurations (batches are then explicitly rejected, never
 // silently dropped).
 func NewStreamServer(svc *Service, registry *SessionRegistry, ingester ingest.Ingester, log *slog.Logger) *StreamServer {
-	return &StreamServer{Svc: svc, Registry: registry, Ingest: ingester, Log: log}
+	return &StreamServer{
+		Svc:          svc,
+		Registry:     registry,
+		Ingest:       ingester,
+		Log:          log,
+		ingestGlobal: make(chan struct{}, streamIngestConcurrency),
+	}
 }
 
 // Stream is the single bidirectional control/telemetry stream per collector.
@@ -158,6 +181,60 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 		return normalizeStreamErr(err)
 	}
 
+	// Batch pipelining (ADR-016, M8-S2a): the client may keep up to
+	// maxInflightBatches batches in flight. Processing them strictly serially
+	// capped one stream at a single commit at a time (measured ~9k samples/s
+	// on the dev node); a process-wide worker budget lets a stream run several
+	// batch transactions concurrently (WAL group commit + CPU parallelism)
+	// while preserving every guarantee: each batch claims its own ledger row
+	// (duplicate/concurrent batches stay idempotent, original wins), a
+	// BatchResult is emitted only after IngestBatch returns
+	// (ack-after-commit), ordering is not required by the protocol (the
+	// collector advances its watermark on contiguous acks), and there are no
+	// drops: with the budget exhausted the receive loop stops reading, so
+	// backpressure reaches the collector and unacked batches are replayed.
+	ingestResults := make(chan *collectorv1.ServerMessage, 2*streamIngestConcurrency)
+	var ingestWG sync.WaitGroup
+	defer ingestWG.Wait()
+
+	dispatchBatch := func(batch *collectorv1.MetricBatch, allow map[string]ingest.MetricDef) {
+		select {
+		case s.ingestGlobal <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		ingestWG.Add(1)
+		seq := batch.GetBatchSeq()
+		go func() {
+			defer ingestWG.Done()
+			outcome := ingest.BatchOutcome{
+				Status: collectorv1.BatchResult_STATUS_REJECTED,
+				Reason: "ingest.unavailable",
+			}
+			switch {
+			case s.Ingest == nil:
+				// Degraded: explicit rejection; never a silent drop.
+			case allow == nil:
+				samples := 0
+				if batch != nil {
+					samples = len(batch.GetSamples())
+				}
+				outcome = ingest.BatchOutcome{
+					Status:   collectorv1.BatchResult_STATUS_REJECTED,
+					Reason:   "validation.policy_unavailable",
+					Rejected: uint32(samples), //nolint:gosec // bounded by maxBatchSamples
+				}
+			default:
+				outcome = s.Ingest.IngestBatch(ctx, ident.OrgID, ident.CollectorID, allow, batch)
+			}
+			<-s.ingestGlobal // release before the (bounded) result send: no dispatch deadlock
+			select {
+			case ingestResults <- batchResultMsg(seq, outcome):
+			case <-ctx.Done():
+			}
+		}()
+	}
+
 	for {
 		select {
 		case msg := <-recvCh:
@@ -186,34 +263,15 @@ func (s *StreamServer) Stream(gstream collectorv1.CollectorService_StreamServer)
 					s.Log.Error("record policy ack", "request_id", reqID, "collector_id", ident.CollectorID, "error", err)
 				}
 			case msg.GetBatch() != nil:
-				batch := msg.GetBatch()
-				outcome := ingest.BatchOutcome{
-					Status: collectorv1.BatchResult_STATUS_REJECTED,
-					Reason: "ingest.unavailable",
-				}
-				switch {
-				case s.Ingest == nil:
-					// Degraded: explicit rejection; never a silent drop.
-				case allowlist == nil:
-					samples := 0
-					if batch != nil {
-						samples = len(batch.GetSamples())
-					}
-					outcome = ingest.BatchOutcome{
-						Status:   collectorv1.BatchResult_STATUS_REJECTED,
-						Reason:   "validation.policy_unavailable",
-						Rejected: uint32(samples), //nolint:gosec // bounded by maxBatchSamples
-					}
-				default:
-					outcome = s.Ingest.IngestBatch(ctx, ident.OrgID, ident.CollectorID, allowlist, batch)
-				}
-				if err := gstream.Send(batchResultMsg(batch.GetBatchSeq(), outcome)); err != nil {
-					return normalizeStreamErr(err)
-				}
+				dispatchBatch(msg.GetBatch(), allowlist)
 			case msg.GetHello() != nil:
 				return s.protocolError(gstream, "duplicate hello")
 			default:
 				return s.protocolError(gstream, "unsupported message")
+			}
+		case out := <-ingestResults:
+			if err := gstream.Send(out); err != nil {
+				return normalizeStreamErr(err)
 			}
 		case dm := <-session.Notify():
 			if s.Log != nil {

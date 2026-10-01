@@ -41,8 +41,12 @@ type Server struct {
 	DBDSN            string // runtime role (argus_app_login), RLS-enforced
 	AuthDBDSN        string // auth role (argus_auth_login), pre-auth lookups only
 	MigrateDSN       string // owner role (argus_owner); used only by `migrate`
-	CADir            string // internal CA material; required from M3
-	DevSeed          bool
+	// DBMaxConns bounds the runtime (app) connection pool. Default 10 keeps
+	// the Phase-1 sizing; ADR-016 measured the fleet scenario at this and a
+	// larger bound and set the documented default (docs/phase-2/M8_EVIDENCE.md).
+	DBMaxConns int
+	CADir      string // internal CA material; required from M3
+	DevSeed    bool
 	// SecretsKeyFile is the master-key file backing the SecretsVault
 	// envelope encryption (M7-S2, P2-D2: local file KMS binding for Phase 2;
 	// an external KMS/HSM arrives in V2 behind the same interface).
@@ -70,6 +74,7 @@ func LoadServer() (Server, error) {
 		DBDSN:                   env("ARGUS_SERVER_DB_DSN", ""),
 		AuthDBDSN:               env("ARGUS_SERVER_AUTH_DB_DSN", ""),
 		MigrateDSN:              env("ARGUS_SERVER_MIGRATE_DSN", ""),
+		DBMaxConns:              int(envInt64("ARGUS_SERVER_DB_MAX_CONNS", 10)),
 		CADir:                   env("ARGUS_SERVER_CA_DIR", "./.dev/ca"),
 		DevSeed:                 envBool("ARGUS_DEV_SEED", false),
 		SecretsKeyFile:          env("ARGUS_SECRETS_KEY_FILE", "./.dev/secrets/master.key"),
@@ -106,6 +111,12 @@ func LoadServer() (Server, error) {
 	// value is rejected instead of silently clamped.
 	if cfg.MetricsRawRetentionDays < 30 || cfg.MetricsRawRetentionDays > 90 {
 		return cfg, fmt.Errorf("ARGUS_METRICS_RAW_RETENTION_DAYS: must be within [30,90], got %d", cfg.MetricsRawRetentionDays)
+	}
+	// Pool bound: >0 (pgx rejects 0 as "unlimited" surprises) and well under
+	// the server's max_connections budget (default 100) so migrations/other
+	// clients are never starved.
+	if cfg.DBMaxConns < 1 || cfg.DBMaxConns > 80 {
+		return cfg, fmt.Errorf("ARGUS_SERVER_DB_MAX_CONNS: must be within [1,80], got %d", cfg.DBMaxConns)
 	}
 	if cfg.Env == EnvProd {
 		if cfg.DBDSN == "" {

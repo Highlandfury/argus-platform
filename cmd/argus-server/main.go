@@ -114,7 +114,9 @@ func cmdServe(args []string) int {
 		}})
 	} else {
 		var poolErr error
-		appPool, poolErr = database.NewPool(context.Background(), cfg.DBDSN, "argus-server", database.DefaultPoolConfig())
+		poolCfg := database.DefaultPoolConfig()
+		poolCfg.MaxConns = int32(cfg.DBMaxConns) //nolint:gosec // validated to 1..80
+		appPool, poolErr = database.NewPool(context.Background(), cfg.DBDSN, "argus-server", poolCfg)
 		if poolErr != nil {
 			fmt.Fprintln(os.Stderr, "database:", poolErr)
 			return 1
