@@ -1,6 +1,6 @@
 # M8-EVIDENCE — Metrics pipeline completion
 
-**Status: M8 COMPLETE (M8-S2b recorded here).** This record covers **M8-S1**
+**Status: M8 COMPLETE - gate signed off by user 2026-10-01 (M8-S2b recorded here).** This record covers **M8-S1**
 (storage completion: CAGGs/refresh/compression/retention, query resolution
 picker + caps, cardinality guards/retirement, verification + tests + evidence),
 **M8-S2a** (ADR-016 ingest write-path decision + optimization, correctness tests
