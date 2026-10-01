@@ -112,18 +112,31 @@ func TestTierIntervalsAndNormalization(t *testing.T) {
 }
 
 func TestTargetFromPolicyValidation(t *testing.T) {
-	if _, err := TargetFromPolicy("dev-1", "not-an-ip", "d", TierFast); err == nil {
+	if _, err := TargetFromPolicy(TargetSpec{DeviceID: "dev-1", MgmtIP: "not-an-ip", Name: "d", Tier: TierFast}); err == nil {
 		t.Fatal("invalid IP must be rejected")
 	}
-	if _, err := TargetFromPolicy("", "192.0.2.1", "d", TierFast); err == nil {
+	if _, err := TargetFromPolicy(TargetSpec{DeviceID: "", MgmtIP: "192.0.2.1", Name: "d", Tier: TierFast}); err == nil {
 		t.Fatal("empty device id must be rejected")
 	}
-	got, err := TargetFromPolicy("dev-1", "192.0.2.1", "d", "nonsense")
+	got, err := TargetFromPolicy(TargetSpec{DeviceID: "dev-1", MgmtIP: "192.0.2.1", Name: "d", Tier: "nonsense"})
 	if err != nil {
 		t.Fatalf("TargetFromPolicy: %v", err)
 	}
 	if got.Tier != TierStandard {
 		t.Fatalf("unknown tier normalized to %q, want standard", got.Tier)
+	}
+	if got.PollType != PollICMP {
+		t.Fatalf("unknown poll type normalized to %q, want icmp", got.PollType)
+	}
+	snmp, err := TargetFromPolicy(TargetSpec{DeviceID: "dev-1", MgmtIP: "192.0.2.1", Name: "d", Tier: TierFast, PollType: PollSNMP, Kind: "switch"})
+	if err != nil {
+		t.Fatalf("TargetFromPolicy snmp: %v", err)
+	}
+	if snmp.PollType != PollSNMP || snmp.Kind != "switch" {
+		t.Fatalf("snmp target = %+v, want snmp/switch", snmp)
+	}
+	if snmp.Key() != "dev-1:snmp" {
+		t.Fatalf("target key = %q, want dev-1:snmp", snmp.Key())
 	}
 }
 

@@ -1,0 +1,79 @@
+# Core template pack: IF-MIB (RFC 2863) — ifTable + ifXTable.
+#
+# HC 64-bit counters are mandatory for bandwidth (canonical docs/07 §12.1/12.3;
+# 32-bit ifInOctets wraps in ~34 s at 1 Gbps). Errors/discards stay 32-bit as
+# defined by the MIB. Rows are keyed by ifName (primary) with ifDescr fallback
+# and joined by their single-level table index; ifIndex is never the identity
+# (it is not part of the dimension set), so an ifIndex renumbering does not
+# create a new series and the counter discontinuity/reboot rules keep the rate
+# correct.
+#
+# Counter units are rates (docs/08 §13.2/§13.4: counters are converted to
+# rates at normalize time — for this platform the collector is the normalizer,
+# see docs/11 §20.4). max_rate is the false-spike guard ceiling
+# (12500000000 B/s = 100 Gbps; 10000000 = 10M errors or discards/s).
+name: core/if-mib
+version: 1
+description: IF-MIB ifTable + ifXTable with HC 64-bit counters and errors/discards
+required: true
+select:
+  kinds: [switch, router, firewall, ap, gateway, load_balancer]
+identity:
+  - dim: if_name
+    oids:
+      - "1.3.6.1.2.1.31.1.1.1.1"  # ifName
+      - "1.3.6.1.2.1.2.2.1.2"     # ifDescr (fallback)
+  - dim: if_alias
+    oids:
+      - "1.3.6.1.2.1.31.1.1.1.18" # ifAlias
+tables:
+  - name: ifTable
+    walk: "1.3.6.1.2.1.2.2.1"
+    required: true
+  - name: ifXTable
+    walk: "1.3.6.1.2.1.31.1.1.1"
+    required: true
+columns:
+  - oid: "1.3.6.1.2.1.2.2.1.8"
+    key: net.if.oper_status
+    unit: state
+    type: state
+  - oid: "1.3.6.1.2.1.2.2.1.13"
+    key: net.if.in_discards
+    unit: count/s
+    type: counter
+    width: 32
+    max_rate: 10000000
+  - oid: "1.3.6.1.2.1.2.2.1.14"
+    key: net.if.in_errors
+    unit: count/s
+    type: counter
+    width: 32
+    max_rate: 10000000
+  - oid: "1.3.6.1.2.1.2.2.1.19"
+    key: net.if.out_discards
+    unit: count/s
+    type: counter
+    width: 32
+    max_rate: 10000000
+  - oid: "1.3.6.1.2.1.2.2.1.20"
+    key: net.if.out_errors
+    unit: count/s
+    type: counter
+    width: 32
+    max_rate: 10000000
+  - oid: "1.3.6.1.2.1.31.1.1.1.6"
+    key: net.if.in_octets
+    unit: B/s
+    type: counter
+    width: 64
+    max_rate: 12500000000
+  - oid: "1.3.6.1.2.1.31.1.1.1.10"
+    key: net.if.out_octets
+    unit: B/s
+    type: counter
+    width: 64
+    max_rate: 12500000000
+  - oid: "1.3.6.1.2.1.31.1.1.1.19"
+    type: gauge
+    role: discontinuity

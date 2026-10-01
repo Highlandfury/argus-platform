@@ -65,6 +65,14 @@ type Config struct {
 // (docs/15 §: "ICMP 20 flows").
 const DefaultConcurrency = 20
 
+// TargetRemovedHook is implemented by probers that keep per-device state (the
+// SNMP prober's counter state machine). The engine calls it when it drops the
+// last target of that poll type for a device, so long-lived state cannot leak
+// for removed devices (and is reseeded if the target returns).
+type TargetRemovedHook interface {
+	TargetRemoved(deviceID, pollType string)
+}
+
 // Engine is the deterministic poll scheduler. Every state transition is
 // computed from the clock and the target set: given the same inputs, the same
 // due sequence results (no wall-clock reads outside Clock, no random values).
@@ -115,27 +123,46 @@ func NewEngine(cfg Config) *Engine {
 
 // ApplyTargets atomically replaces the target set with the one from the newly
 // applied signed policy. Existing targets keep their next-run time and failure
-// state; new targets are due immediately; removed targets are dropped (a probe
-// already in flight completes and is discarded by Complete).
+// state (keyed by device id + poll type, so an ICMP and an SNMP target for the
+// same device schedule independently); new targets are due immediately;
+// removed targets are dropped (a probe already in flight completes and is
+// discarded by Complete). Removing the last target of a device notifies a
+// TargetRemovedHook prober so per-device state is released.
 func (e *Engine) ApplyTargets(targets []Target) {
 	now := e.clock.Now()
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	next := make(map[string]*targetState, len(targets))
 	for _, t := range targets {
-		if prev, ok := e.targets[t.DeviceID]; ok {
-			// Keep scheduling state, refresh the mutable fields (IP/name/tier
-			// may have changed with the policy).
+		key := t.Key()
+		if prev, ok := e.targets[key]; ok {
+			// Keep scheduling state, refresh the mutable fields (IP/name/tier/
+			// kind may have changed with the policy).
 			prev.target = t
-			next[t.DeviceID] = prev
+			next[key] = prev
 			continue
 		}
-		next[t.DeviceID] = &targetState{target: t, next: now}
+		next[key] = &targetState{target: t, next: now}
+	}
+	type removedKey struct{ deviceID, pollType string }
+	var removed []removedKey
+	for key, st := range e.targets {
+		if _, ok := next[key]; !ok {
+			removed = append(removed, removedKey{st.target.DeviceID, NormalizePollType(st.target.PollType)})
+		}
 	}
 	e.targets = next
 	select {
 	case e.wake <- struct{}{}:
 	default:
+	}
+	e.mu.Unlock()
+
+	// Per-device prober state (SNMP counters) is released when the last target
+	// of its poll type disappears; a re-added target reseeds.
+	if hook, ok := e.cfg.Prober.(TargetRemovedHook); ok {
+		for _, r := range removed {
+			hook.TargetRemoved(r.deviceID, r.pollType)
+		}
 	}
 	if e.cfg.Log != nil {
 		e.cfg.Log.Info("poll targets applied", "targets", len(next))
@@ -150,7 +177,12 @@ func (e *Engine) Targets() []Target {
 	for _, st := range e.targets {
 		out = append(out, st.target)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].DeviceID < out[j].DeviceID })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].DeviceID != out[j].DeviceID {
+			return out[i].DeviceID < out[j].DeviceID
+		}
+		return out[i].PollType < out[j].PollType
+	})
 	return out
 }
 
@@ -212,7 +244,7 @@ func (e *Engine) reserveDue(now time.Time) []*targetState {
 		st.running = true
 		out = append(out, st)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].target.DeviceID < out[j].target.DeviceID })
+	sort.Slice(out, func(i, j int) bool { return out[i].target.Key() < out[j].target.Key() })
 	return out
 }
 
@@ -221,7 +253,7 @@ func (e *Engine) releaseReservations(states []*targetState) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	for _, st := range states {
-		if cur, ok := e.targets[st.target.DeviceID]; ok && cur == st {
+		if cur, ok := e.targets[st.target.Key()]; ok && cur == st {
 			st.running = false
 		}
 	}
@@ -254,7 +286,7 @@ func (e *Engine) probe(ctx context.Context, st *targetState) {
 	}
 	st.next = finished.Add(interval)
 	st.running = false
-	_, stillCurrent := e.targets[target.DeviceID]
+	_, stillCurrent := e.targets[target.Key()]
 	e.mu.Unlock()
 
 	if e.cfg.OnHealth != nil {

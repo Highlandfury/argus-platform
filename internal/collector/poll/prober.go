@@ -47,10 +47,26 @@ type Result struct {
 	LossPercent float64
 	Latency     time.Duration // whole-probe duration (poll_health.latency_ms)
 	ErrorClass  string
+
+	// SNMP fields (M9-S2). SnmpDone reports that every SNMP step of the probe
+	// completed (a table walk that timed out leaves it false even when some
+	// samples were produced). SnmpSamples carries already-rendered series, so
+	// Result.Samples returns them verbatim.
+	SnmpDone          bool
+	SnmpSamples       []Sample
+	SnmpMetricsSeen   int
+	SnmpMetricsExpect int
 }
 
-// Reachable reports whether at least one echo reply was received.
-func (r Result) Reachable() bool { return r.Received > 0 }
+// Reachable reports whether the poll produced a completed, usable result. For
+// ICMP that is at least one echo reply; for SNMP it is a fully completed
+// probe (a respond-but-truncated walk is a failure, P2-AC-20).
+func (r Result) Reachable() bool {
+	if r.PollType == PollSNMP {
+		return r.SnmpDone
+	}
+	return r.Received > 0
+}
 
 // Outcome returns the poll-health outcome string.
 func (r Result) Outcome() string {
@@ -60,12 +76,17 @@ func (r Result) Outcome() string {
 	return OutcomeFailure
 }
 
-// Samples renders the ICMP series for one poll window. When no packet was
-// actually sent (unsupported platform / transport failure before send) no
-// samples are produced: an untried probe must not fabricate loss data. A
-// failed attempt produces reachable=0 and loss=100; the RTT series is omitted
-// for windows without replies so the outage is a gap, not a fake zero.
+// Samples renders the series for one poll window. SNMP samples are rendered by
+// the SNMP prober (they carry counter math and dimensions) and returned as-is.
+// When no packet was actually sent (unsupported platform / transport failure
+// before send) no samples are produced: an untried probe must not fabricate
+// loss data. A failed attempt produces reachable=0 and loss=100; the RTT
+// series is omitted for windows without replies so the outage is a gap, not a
+// fake zero.
 func (r Result) Samples(target Target, ts time.Time) []Sample {
+	if r.PollType == PollSNMP {
+		return r.SnmpSamples
+	}
 	if r.Sent == 0 {
 		return nil
 	}

@@ -160,16 +160,33 @@ func maxPolicyVersion(ctx context.Context, tx pgx.Tx, collectorID uuid.UUID) (in
 }
 
 // listPolicyTargets returns the org's poll targets for the signed policy
-// bundle (M9-S1): live devices (not soft-deleted, not retired) that have a
-// management IP. Must run inside a tenant transaction. host() strips any /32
-// suffix an operator may have stored so the collector always receives a bare
-// address.
+// bundle (M9-S1; extended in M9-S2). Live devices (not soft-deleted, not
+// retired) with a management IP get an ICMP target for liveness and, when an
+// applicable SNMP credential binding exists (device/site/org scope;
+// group-scope selector resolution is not available before S3's dispatch
+// resolution), an additional SNMP target carrying the device kind for
+// template selection. Must run inside a tenant transaction. host() strips any
+// /32 suffix an operator may have stored so the collector always receives a
+// bare address.
 func listPolicyTargets(ctx context.Context, tx pgx.Tx) ([]PolicyTarget, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT id, host(mgmt_ip), name, poll_profile
-		FROM devices
-		WHERE deleted_at IS NULL AND status <> 'retired' AND mgmt_ip IS NOT NULL
-		ORDER BY id`)
+		SELECT d.id, host(d.mgmt_ip), d.name, d.poll_profile, d.kind,
+		       EXISTS (
+		           SELECT 1
+		           FROM credential_bindings b
+		           JOIN device_credentials c
+		             ON c.id = b.credential_id AND c.org_id = b.org_id
+		           WHERE b.org_id = d.org_id
+		             AND c.kind IN ('snmp_v2c', 'snmp_v3')
+		             AND (
+		                 (b.scope_type = 'device' AND b.scope_id = d.id)
+		                 OR (b.scope_type = 'site' AND b.scope_id = d.site_id)
+		                 OR (b.scope_type = 'org' AND b.scope_id = d.org_id)
+		             )
+		       ) AS snmp_bound
+		FROM devices d
+		WHERE d.deleted_at IS NULL AND d.status <> 'retired' AND d.mgmt_ip IS NOT NULL
+		ORDER BY d.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -178,11 +195,18 @@ func listPolicyTargets(ctx context.Context, tx pgx.Tx) ([]PolicyTarget, error) {
 	for rows.Next() {
 		var id uuid.UUID
 		var t PolicyTarget
-		if err := rows.Scan(&id, &t.MgmtIP, &t.Name, &t.Tier); err != nil {
+		var snmpBound bool
+		if err := rows.Scan(&id, &t.MgmtIP, &t.Name, &t.Tier, &t.Kind, &snmpBound); err != nil {
 			return nil, err
 		}
 		t.DeviceID = id.String()
+		t.PollType = "icmp"
 		out = append(out, t)
+		if snmpBound {
+			snmp := t
+			snmp.PollType = "snmp"
+			out = append(out, snmp)
+		}
 	}
 	return out, rows.Err()
 }

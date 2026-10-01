@@ -94,7 +94,9 @@ func runSuite(m *testing.M) (int, error) {
 	}
 	defer authPool.Close()
 
-	return m.Run(), nil
+	code := m.Run()
+	terminateSNMPSimFixture()
+	return code, nil
 }
 
 // waitStable waits until the database answers two canary queries three seconds

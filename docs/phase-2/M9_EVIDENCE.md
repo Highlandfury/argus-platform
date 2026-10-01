@@ -1,16 +1,17 @@
 # M9-EVIDENCE — Polling engine (ICMP + SNMP)
 
-**Status: M9-S1 COMPLETE (recorded here).** This record covers **M9-S1**, the
-polling foundation end-to-end with ICMP: per-device poll targets delivered in
-the signed policy bundle, the collector scheduler + ICMP prober, device-scoped
-metric samples, poll health flowing back over the existing spool/stream/ingest
-path, the `poll_health` table (migration 000015) and a minimal session-read
-API. **No SNMP client/templates (S2), no credential materialization (S3), no
-full adaptive backoff/jitter/rate caps (S4), no M10 UI and no alerts exist or
-are claimed.** P2-AC-14 is satisfied for ICMP; P2-AC-20 is satisfied for the
-recorded/exposed poll health. The failure-suite additions named in P2-AC-17/18
-(poll outage, credential revoked, restart mid-poll) are S4 work; the scheduler
-exposes the hooks they will use.
+**Status: M9-S1 COMPLETE and M9-S2 COMPLETE (both recorded here).** This
+record covers **M9-S1**, the polling foundation end-to-end with ICMP, and
+**M9-S2**, SNMP v2c/v3 polling with the declarative core template pack, the
+counter state machine, snmpsim fixtures and the scheduler/wire integration.
+**No credential materialization (S3), no full adaptive backoff/jitter/rate
+caps (S4), no M10 UI and no alerts exist or are claimed.** P2-AC-14 is
+satisfied for ICMP; P2-AC-15 (SNMP client/templates/fixtures/no SET) and
+P2-AC-16 (counter correctness) are satisfied for the S2 scope; P2-AC-20's
+error classification now includes the SNMP classes. P2-AC-17/18 completion
+(doubling/jitter/caps) and the failure-suite additions named in P2-AC-17/18
+(poll outage, credential revoked, restart mid-poll) remain S4 work; the
+scheduler exposes the hooks they will use.
 
 References: `PHASE_2_SPEC.md` M9 deliverables + P2-AC-14/17/20; canonical
 `docs/07 §12.2-12.4/§12.7` (ICMP requirements, tiers, failure modes),
@@ -25,10 +26,10 @@ budget), `ARCHITECTURE.md` equivalents; `M8_EVIDENCE.md` (style).
 
 | Slice | Content | State |
 |---|---|---|
-| **S1 (this)** | Poll targets in the signed bundle; collector scheduler + ICMP prober; `net.icmp.*` samples through the existing spool/stream/ingest path; `poll_health` end-to-end; read API; tests/evidence | **done** |
-| S2 | SNMP v2c/v3 client, GETBULK/GETNEXT, core templates, counter state machine, `mibgen` | not started |
+| **S1** | Poll targets in the signed bundle; collector scheduler + ICMP prober; `net.icmp.*` samples through the existing spool/stream/ingest path; `poll_health` end-to-end; read API; tests/evidence | **done** |
+| **S2** | SNMP v2c/v3 client (GETBULK/GETNEXT, no SET), declarative core template pack, counter state machine, snmpsim fixtures, targets carry poll type + template inputs | **done** (see §12) |
 | S3 | Credential materialization in signed bundles (per-session ECDH+AEAD, RAM-only, revocation) | not started |
-| S4 | Full adaptive backoff/jitter/rate/safety caps (one walk in flight, per-tier sessions, ~100 sessions), failure-suite additions (poll outage, credential revoked, restart mid-poll) | hook present (`BackoffPolicy`); policy fixed-tier in S1 |
+| S4 | Full adaptive backoff/jitter/rate/safety caps (one walk in flight, per-tier sessions, ~100 sessions), failure-suite additions (poll outage, credential revoked, restart mid-poll) | hooks present (`BackoffPolicy`, per-device walk lock); policy fixed-tier |
 | M10/M11 | Device/interface UI, status rollups, alerts | untouched |
 
 ---
@@ -286,10 +287,13 @@ device_id parsing).
 
 ## 10. Deferred (explicit)
 
-- SNMP v2c/v3, templates, counter correctness — S2.
+- SNMP v2c/v3, templates, counter correctness — **closed in S2 (§12)**.
+- `mibgen` compilation of vendor MIBs into template skeletons + vendor packs,
+  sysObjectID-based template selection, and operator-loaded template packs —
+  future M9 work (§12.7/§12.8 record the core-pack-only limitation).
 - Credential materialization/rotation/revocation in bundles — S3.
-- Adaptive doubling/jitter, safety caps (one walk in flight, ≤300 req/min,
-  session caps), failure-suite additions — S4.
+- Adaptive doubling/jitter, safety caps (one walk in flight,
+  ≤300 req/min, session caps), failure-suite additions — S4.
 - Device/interface UI, status rollups — M10; alerts/events — M11; dashboards —
   M12.
 
@@ -318,3 +322,242 @@ device_id parsing).
   `NET_RAW`); `docs/phase-1/RUNBOOK.md` §17 (CI ICMP capability);
   `docs/phase-1/VERSIONS.md` (x/net promoted to direct, pin unchanged); this
   file.
+
+---
+
+## 12. M9-S2 — SNMP polling, templates, counter correctness
+
+**Status: COMPLETE (this section).** SNMP v2c/v3 polling against pinned
+snmpsim fixtures, a declarative core template pack, a collector-side counter
+state machine, and the S1 scheduler/spool/stream/poll-health wiring. P2-AC-15
+and P2-AC-16 are satisfied for this scope; P2-AC-20's classification now
+covers the SNMP classes. Credential materialization (S3) and adaptive
+scheduling/safety-cap completion (S4) remain out of scope. No SNMP SET exists
+anywhere in the monitoring path.
+
+### 12.1 SNMP client (`internal/collector/poll/snmp.go`)
+
+Library: **`github.com/gosnmp/gosnmp v1.45.0`** (released 2026-09-19, active
+community maintenance, pure Go, builds on Windows and Linux — the same library
+ADR-006 names). Pin justification: stable API, native GETBULK/GETNEXT, v3 USM
+with SHA-2 + AES; the alternative `soniah/gosnmp` is the pre-fork archived
+ancestor. The client's plain-message timeout/auth classification is written
+against this exact pin (VERSIONS.md).
+
+| Behavior | Implementation |
+|---|---|
+| v2c | Community; **warning posture**: one `slog.Warn` per device on first use (canonical docs/07 §12.6). |
+| v3 authPriv (preferred) | SHA / SHA-224 / SHA-256 / SHA-384 / SHA-512 + AES / AES-192 / AES-256; v1 and v3 authNoPriv/noAuthNoPriv are rejected by credential validation. |
+| Per-RPC budget | `Timeout = 2s`, `Retries = 2` (canonical docs/07 §12.3), configurable per profile. |
+| GETBULK | `max-repetitions` clamped to the documented **10-25** band, default 25; a `TooBig` response halves it down to 10 and then falls back to **GETNEXT** for the remainder. |
+| Walk integrity | Out-of-subtree varbind ends the walk; `endOfMibView`/`noSuch*` end it; a non-increasing OID or a no-progress page raises `walk_truncation`; request/varbind caps bound runaway agents. |
+| One walk in flight | The client serializes walks (`sync.Mutex`); the scheduler additionally reserves a target while its probe runs, and one client is built per probe. Session pooling is S4. |
+| No SET | The `SNMPClient` surface is exactly `{Get, Walk, Close}` and the session surface `{Get, GetBulk, GetNext, Close}` — pinned by `TestSNMPClientSurfaceHasNoSet` (reflection over the interface method sets and the concrete types). There is no code path that can call `GoSNMP.Set`. |
+
+Error classes fed to `poll_health` (P2-AC-20): `timeout` (per-RPC budget
+exhausted / `context.DeadlineExceeded`), `auth_failure` (USM wrong digest /
+unknown user / decryption / not-in-time-window / authorization error),
+`walk_truncation`, `template_drift`, `unreachable` (other transport errors),
+plus `credential_missing` / `credential_invalid` for the S3 seam.
+
+### 12.2 Declarative template engine and CORE pack
+
+Templates are YAML (`internal/collector/poll/templates/core/*.yaml`, embedded
+via `go:embed`), parsed with strict `KnownFields(true)` and validated at load:
+metric/OID syntax, counter width 32/64, units required for series, roles
+(`sys_uptime`, `discontinuity`), duplicate metric keys rejected across the
+whole set. Packs select by device `kind` (empty/`*` matches all).
+
+| Pack | Series keys | Source | Type | Unit / rule |
+|---|---|---|---|---|
+| `core/system` | `sys.uptime_s` | sysUpTime.0 | gauge | `s`, scale 0.01; also the reboot signal |
+| | `sys.descr`, `sys.object_id`, `sys.name` | system group | string | collected for identity/drift only (see limitation 12.7) |
+| `core/if-mib` | `net.if.in_octets`, `net.if.out_octets` | ifHCInOctets / ifHCOutOctets | **counter 64** | `B/s`, `max_rate` 12.5e9 |
+| | `net.if.in_errors`, `net.if.out_errors`, `net.if.in_discards`, `net.if.out_discards` | ifTable | counter 32 | `count/s`, `max_rate` 1e7 |
+| | `net.if.oper_status` | ifOperStatus | state | `state` |
+| `core/host-resources` | `sys.cpu.util` | hrProcessorLoad | gauge | `percent`, dim `cpu` = hrDeviceIndex |
+
+- Selection: `switch/router/firewall/ap/gateway/load_balancer` also get
+  IF-MIB, `host/server` get HOST-RESOURCES; every kind gets system.
+- Interface rows are **keyed `device_id` + dimensions**: `if_name` (ifName,
+  falling back to ifDescr) plus `if_alias`; **ifIndex is never part of the
+  identity** (unit-test-pinned, and no series carries an `if_index`
+  dimension). The current series model (`metric_series.dimensions`) has no
+  separate interface link, so the server-side `interfaces` row association
+  and automatic audited rebinding land with the interface/UI work (M10);
+  identity stability across an ifIndex renumbering is preserved because the
+  index is not in the dimension set.
+- Counter entries are **emitted as rates** (docs/08 §13.2, docs/11 §20.4:
+  "collectors convert monotonic counters to deltas at ingestion"). Ingest
+  stores normalized values unchanged; there is no double conversion (M8
+  evidence: values arrive already normalized).
+
+### 12.3 Counter state machine (`snmp_counter.go`)
+
+Per counter series (device + row dimensions + metric key), with injected clock
+and values:
+
+1. First observation seeds the baseline (no sample).
+2. `ifCounterDiscontinuityTime` change reseeds that series.
+3. `sysUpTime` decrease reseeds **every** counter of the device. A 497-day
+   TimeTicks wrap is indistinguishable within one interval and also reseeds
+   (one skipped sample per 497 days) — strictly safer than a post-wrap spike.
+4. `value >= previous`: delta = value - previous.
+5. `value < previous`: if the previous value was in the upper half of the
+   counter space the decrease is a **wrap** and the modular delta is used
+   (32- and 64-bit); otherwise it is a **reset** and reseeds.
+6. Any implied rate above `max_rate` is rejected as a false spike (reseed),
+   never emitted.
+7. Non-positive elapsed time (duplicate ts / out-of-order replay) is ignored
+   without advancing state.
+
+Unit tests cover 32-bit and 64-bit wraps, reset, reboot reseed, discontinuity
+change, rate guard, out-of-order, seeding, and the uptime-decrease case
+(`snmp_counter_test.go`, `snmp_prober_test.go`). The fixture integration
+scenario (`switch -> swrap -> sreset -> sreset`) asserts exact wrap rates,
+zero counter samples at reboot, and no value above the guard anywhere.
+
+### 12.4 snmpsim fixtures (pinned) and integration tests
+
+No maintained upstream snmpsim image exists at the required v3 SHA-2/AES
+level, so the fixture image is built from a **digest-pinned** `python:3.13-slim`
+with pip pins `snmpsim==1.2.2`, `pysmi==2.0.0` (undeclared runtime import),
+`pysnmp==7.1.30`, `cryptography==50.0.2` (`tests/fixtures/snmpsim/Dockerfile`;
+all pins in VERSIONS.md). `cryptography` is mandatory: without it every SNMPv3
+request fails with authentication/decryption errors (verified). The responder
+listens on non-privileged `1161/udp` inside the container and drops to
+`nobody`.
+
+| Fixture (`tests/fixtures/snmpsim/data/`) | Community / v3 context | Content |
+|---|---|---|
+| `switch.snmprec` | `switch` | ifTable + ifXTable, 3 interfaces; if1 HC counters at the 64-bit ceiling, if1 ifInErrors at the 32-bit ceiling |
+| `swrap.snmprec` | `swrap` | same device after a counter wrap (no reboot) |
+| `sreset.snmprec` | `sreset` | same device after reboot (sysUpTime drops) + counter reset |
+| `host.snmprec` | `host` | hrProcessorLoad for 2 CPUs |
+
+`.snmprec` data is **column-major** (agents return lexicographic varbind
+order; snmpsim replays file order and pads with `endOfMibView`, so a
+row-major file is (correctly) classified as walk truncation by the walk
+checker). Integration tests build/start the container once per suite via
+testcontainers (files copied in, no host bind mount), use community selection
+as the deterministic "fixture reset", and poll through the real gosnmp client.
+A `snmpsim` compose profile (`docker-compose.dev.yml`) serves the same data
+for manual dev/e2e runs.
+
+### 12.5 Wiring into S1 (targets, scheduler, credentials seam)
+
+- Signed policy targets now carry `poll_type` (`icmp`|`snmp`) and `kind`.
+  Server assembly emits an ICMP target for every live device with a management
+  IP and an additional SNMP target when an applicable SNMP credential binding
+  exists (device/site/org scope; group-selector resolution arrives with S3's
+  dispatch resolution). Invalid/unknown poll types normalize to ICMP on the
+  collector; duplicates are rejected per (device, normalized poll type).
+- The engine keys target state by `(device_id, poll_type)`, so one device can
+  run an ICMP and an SNMP schedule independently, each with its own failure
+  counter and tier interval. `TargetRemoved(deviceID, pollType)` releases the
+  SNMP prober's counter state when the last SNMP target goes away.
+- `MultiProber` dispatches by poll type; the ICMP prober is unchanged.
+- Credentials: `CredentialSource` is the M9-S3 seam; S2 ships
+  `StaticCredentialSource` (fixtures) and collector env config
+  (`ARGUS_SNMP_FIXTURE_COMMUNITY` / `ARGUS_SNMP_FIXTURE_V3_*`). With none
+  configured, SNMP targets report `credential_missing` — no secret is ever
+  persisted by the collector.
+- The signed policy allowlist gains the nine SNMP metric keys (units as
+  above), so existing ingest authorization applies unchanged.
+
+### 12.6 Verification (observed 2026-10-01)
+
+Environment: Windows 11 dev host, Docker Desktop 29.8.1 (WSL2), pinned
+TimescaleDB 2.30.1-pg18 (testcontainers), Go 1.27.1 local toolchain,
+golangci-lint v2.14.0, buf v1.73.0.
+
+| Command | Result |
+|---|---|
+| `go build ./...` | pass (also `GOOS=linux GOARCH=amd64 go build ./...` pass) |
+| `go test ./internal/... -count=1` | pass (all packages, incl. the new SNMP client/template/counter/prober tests) |
+| `go test ./tests/integration/ -run '^TestM9S2' -count=1 -v` | **pass, 4/4** (end-to-end switch wrap/reboot through spool→stream→ingest; timeout + auth failure health; host hrProcessorLoad; signed-policy SNMP target) |
+| `go test ./tests/integration/ -count=1` | **pass, full suite (207.3 s)** |
+| `go test ./tests/contract/... -count=1` | pass |
+| `gofmt -l internal cmd tests` | empty |
+| `golangci-lint run --timeout 10m ./...` (v2.14.0) | **0 issues** |
+| `buf lint` / `buf generate` + `git diff --exit-code -- gen` | exit 0; no proto/gen changes (SLICE did not touch the proto) |
+
+New unit tests: `snmp_test.go` (bulk pages, TooBig smaller-bulk + GETNEXT
+fallback, truncation, timeout mapping, error classification, **no-SET
+surface**, credential validation/source, v2c warning once), `snmp_counter_test.go`
+(seed/rate, 32- and 64-bit wraps, reset, rate guard, discontinuity, reboot,
+out-of-order), `snmp_template_test.go` (core pack load, kind selection, HC
+64-bit declarations, identity never ifIndex, strict validation), 
+`snmp_prober_test.go` (switch poll + exact wrapped rates, reboot no-spike,
+discontinuity reseed, drift, truncation, client error classes, credential
+states, host selection, state release, uptime-decrease reseed, multi-prober +
+engine dual-poll-type, v2c warning). Integration:
+`tests/integration/m9s2_snmp_test.go`.
+
+### 12.7 Design decisions and limitations (recorded)
+
+1. **Rates are derived in the collector**, before the spool: the platform has
+   no other normalization point (M8 ingest stores values verbatim;
+   docs/11 §20.4 assigns counter→delta conversion to collectors). One
+   conversion only.
+2. **String system-group values** are fetched and used for identity/drift but
+   are not persisted: `metric_samples.value` is numeric-only. A text/identity
+   series type (or device-identity ingestion) is not part of Phase 2's M9
+   scope; recorded rather than invented.
+3. **SNMP-bound devices keep their ICMP target** (two targets per device), so
+   liveness/RTT/loss series are not lost when metrics move to SNMP.
+4. **Uptime decrease = reboot** (no 2^31 heuristic): a TimeTicks wrap reseeds
+   once per 497 days instead of risking a post-reboot spike.
+5. **max_rate is the false-spike ceiling** declared per counter in the
+   template (100 Gbps for octets, 10M/s for errors/discards). A reset
+   misread as a wrap cannot emit a rate above it.
+6. **32-bit counters that wrap more than once per interval cannot be
+   inverted** (information loss); HC counters are mandatory for bandwidth and
+   the rate guard prevents a false spike in that case.
+7. **Walk truncation is failure-classified** (`walk_truncation`, outcome
+   failure): a partial table is not silently treated as complete. Partial
+   samples collected before a failed later walk are still emitted (real data)
+   while health records the failure.
+8. **Template drift** is outcome success + `error_class=template_drift` (the
+   device answered): a required pack that produced no metrics is flagged so
+   M11/M12 can alert without backing off like an outage.
+9. **No session pooling / no v3 engine-ID cache yet** (one client per probe);
+   per-device walk serialization is enforced. S4 owns pooling, rate caps and
+   session ceilings.
+
+### 12.8 Deferred (explicit, S2 remainder)
+
+- Credential materialization/rotation/revocation in signed bundles — S3
+  (`CredentialSource` is the swap point; fixture env config is dev-only).
+- Adaptive backoff/jitter, ≤300 req/min per-device budget, per-tier/global
+  session ceilings, v3 engine-ID caching, pooling — S4.
+- `mibgen`, vendor packs, sysObjectID-based selection, operator-loaded
+  template directory, template signatures/checksums — remaining M9/Phase 3.
+- Server-side interface linking/automatic audited ifIndex rebinding — M10
+  (series model has no interface FK today).
+- `poll.health` events and alerts — M11/M12; on-demand check endpoint — M9
+  remaining deliverable.
+
+### 12.9 Files changed (M9-S2)
+
+- Collector: `internal/collector/poll/{snmp,snmp_counter,snmp_template,
+  snmp_prober,multi}.go` (new) + `templates/core/{system,ifmib,
+  hostresources}.yaml` (new); `poll.go` (target spec, poll types, error
+  classes), `prober.go` (SNMP result fields), `scheduler.go` (composite key,
+  `TargetRemovedHook`); `internal/collector/policy/apply.go`
+  (poll_type/kind validation); `internal/platform/config/config.go` (fixture
+  credential env, validation); `cmd/argus-collector/run.go` (multi-prober +
+  credential source).
+- Server policy: `internal/modules/collectors/{policy,repo}.go` (target
+  poll_type/kind, SNMP-binding resolution, metric allowlist).
+- Tests: `internal/collector/poll/snmp*_test.go` (new),
+  `internal/collector/policy/apply_test.go`,
+  `internal/modules/collectors/policy_targets_test.go`,
+  `tests/integration/m9s2_snmp_test.go` (new), `tests/integration/harness_test.go`
+  (fixture teardown hook).
+- Fixtures/ops: `tests/fixtures/snmpsim/{Dockerfile,data/*.snmprec}` (new);
+  `deployments/compose/docker-compose.dev.yml` (snmpsim dev profile,
+  collector fixture env); `docs/phase-1/VERSIONS.md` (gosnmp, yaml.v3, python
+  base digest, snmpsim pip pins); this file.
+- Dependencies: `github.com/gosnmp/gosnmp v1.45.0`, `gopkg.in/yaml.v3 v3.0.1`
+  (direct; testify bumped v1.11.1→v1.12.1 as a gosnmp test dependency via MVS).

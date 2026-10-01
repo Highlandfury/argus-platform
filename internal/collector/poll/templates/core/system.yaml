@@ -1,0 +1,29 @@
+# Core template pack: SNMPv2-MIB system group (canonical docs/07 §12.2).
+#
+# sysDescr / sysObjectID / sysName are string entries: they are collected for
+# identity and template-drift checks but never emitted as metric samples (the
+# platform's metric model stores numeric values only, docs/11 §20.4). sysUpTime
+# is emitted as seconds and doubles as the device reboot signal for the counter
+# state machine (role: sys_uptime).
+name: core/system
+version: 1
+description: SNMPv2-MIB system group (identity, uptime/reboot signal)
+required: true
+select:
+  kinds: ["*"]
+scalars:
+  - oid: "1.3.6.1.2.1.1.1.0"
+    key: sys.descr
+    type: string
+  - oid: "1.3.6.1.2.1.1.2.0"
+    key: sys.object_id
+    type: string
+  - oid: "1.3.6.1.2.1.1.3.0"
+    key: sys.uptime_s
+    unit: s
+    type: gauge
+    scale: 0.01
+    role: sys_uptime
+  - oid: "1.3.6.1.2.1.1.5.0"
+    key: sys.name
+    type: string

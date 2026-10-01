@@ -3,11 +3,14 @@
 // poll-health records.
 //
 // Scope boundary (PHASE_2_SPEC M9, slices S1-S4):
-//   - S1 (this package): tiers, deterministic scheduling with an injectable
-//     clock, ICMP prober, samples + poll health through the existing spool.
+//   - S1: tiers, deterministic scheduling with an injectable clock, ICMP
+//     prober, samples + poll health through the existing spool.
+//   - S2 (this package): SNMP v2c/v3 client (GETBULK/GETNEXT, no SET),
+//     declarative core templates, counter state machine (wrap/reset/reboot/
+//     discontinuity), snmpsim-backed tests.
+//   - S3: credential materialization behind CredentialSource.
 //   - S4 adds adaptive backoff profiles, jitter and rate/safety caps through
 //     the BackoffPolicy hook (present here) and Config limits.
-//   - S2 adds SNMP; no SNMP code exists in this package yet.
 package poll
 
 import (
@@ -73,24 +76,58 @@ type Target struct {
 	MgmtIP   netip.Addr
 	Name     string
 	Tier     string // canonical tier
+	// PollType selects the prober: PollICMP (default) or PollSNMP (M9-S2).
+	PollType string
+	// Kind is the device kind from inventory; it selects SNMP templates
+	// (M9-S2). Empty is treated as unknown (system template only).
+	Kind string
+}
+
+// Key is the engine's scheduling identity. One device may carry both an ICMP
+// and an SNMP target (liveness and metrics), each with its own cadence state.
+func (t Target) Key() string { return t.DeviceID + ":" + NormalizePollType(t.PollType) }
+
+// TargetSpec is the raw, unvalidated target shape from the signed policy.
+type TargetSpec struct {
+	DeviceID string
+	MgmtIP   string
+	Name     string
+	Tier     string
+	PollType string
+	Kind     string
+}
+
+// NormalizePollType maps a policy poll-type string onto a canonical type.
+// Unknown/empty values normalize to ICMP: liveness is always safe to attempt
+// and a bad operator value must never disable a device from polling (same
+// posture as NormalizeTier). SNMP-only targets are expressed explicitly.
+func NormalizePollType(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case PollSNMP:
+		return PollSNMP
+	default:
+		return PollICMP
+	}
 }
 
 // TargetFromPolicy validates and normalizes one policy target. The server
 // already validated the shape; re-validation here fails closed on a malformed
 // signed document (defense in depth, SPEC §11).
-func TargetFromPolicy(deviceID, mgmtIP, name, tier string) (Target, error) {
-	addr, err := netip.ParseAddr(strings.TrimSpace(mgmtIP))
+func TargetFromPolicy(spec TargetSpec) (Target, error) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(spec.MgmtIP))
 	if err != nil {
-		return Target{}, fmt.Errorf("poll: target %s: invalid mgmt_ip %q", deviceID, mgmtIP)
+		return Target{}, fmt.Errorf("poll: target %s: invalid mgmt_ip %q", spec.DeviceID, spec.MgmtIP)
 	}
-	if strings.TrimSpace(deviceID) == "" {
+	if strings.TrimSpace(spec.DeviceID) == "" {
 		return Target{}, fmt.Errorf("poll: target with empty device_id")
 	}
 	return Target{
-		DeviceID: deviceID,
+		DeviceID: spec.DeviceID,
 		MgmtIP:   addr.Unmap(),
-		Name:     name,
-		Tier:     NormalizeTier(tier),
+		Name:     spec.Name,
+		Tier:     NormalizeTier(spec.Tier),
+		PollType: NormalizePollType(spec.PollType),
+		Kind:     strings.TrimSpace(spec.Kind),
 	}, nil
 }
 
@@ -122,18 +159,29 @@ const (
 	OutcomeFailure = "failure"
 )
 
-// Error classes (stable strings; SNMP classes arrive with M9-S2).
+// Error classes (stable strings; fed to poll_health). SNMP adds M9-S2 classes:
+// auth_failure (v3 authentication/decryption/usm errors), walk_truncation (a
+// table walk terminated early or the agent stopped making progress) and
+// template_drift (the device answered but an expected table/metric produced no
+// data). credential_missing/credential_invalid cover the seam M9-S3 fills with
+// materialized credentials.
 const (
-	ErrorNone        = ""
-	ErrorTimeout     = "timeout"
-	ErrorLoss        = "loss"
-	ErrorUnreachable = "unreachable"
-	ErrorUnsupported = "unsupported"
+	ErrorNone              = ""
+	ErrorTimeout           = "timeout"
+	ErrorLoss              = "loss"
+	ErrorUnreachable       = "unreachable"
+	ErrorUnsupported       = "unsupported"
+	ErrorAuthFailure       = "auth_failure"
+	ErrorWalkTruncation    = "walk_truncation"
+	ErrorTemplateDrift     = "template_drift"
+	ErrorCredentialMissing = "credential_missing" //nolint:gosec // poll-health class string, not a secret
+	ErrorCredentialInvalid = "credential_invalid" //nolint:gosec // poll-health class string, not a secret
 )
 
 // Poll types.
 const (
 	PollICMP = "icmp"
+	PollSNMP = "snmp"
 )
 
 // ICMP metric keys (M9-S1). Naming follows the canonical dotted namespace

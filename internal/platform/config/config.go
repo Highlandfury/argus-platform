@@ -141,6 +141,18 @@ type Collector struct {
 	SpoolMaxBytes   int64
 	FsyncIntervalMS int
 	EnrollTokenFile string // read once when enrolling; never persisted
+
+	// M9-S2 SNMP fixture credentials. M9-S3 replaces these with per-device
+	// materialization from signed bundles; until then a collector may be
+	// configured with one v2c community or one v3 authPriv identity for
+	// dev/test. No secret is ever written to disk by the collector.
+	SNMPFixtureCommunity   string
+	SNMPFixtureV3User      string
+	SNMPFixtureV3AuthProto string
+	SNMPFixtureV3AuthKey   string
+	SNMPFixtureV3PrivProto string
+	SNMPFixtureV3PrivKey   string
+	SNMPFixtureV3Context   string
 }
 
 // LoadCollector reads collector configuration from the environment.
@@ -156,6 +168,14 @@ func LoadCollector() (Collector, error) {
 		SpoolMaxBytes:   envInt64("ARGUS_COLLECTOR_SPOOL_MAX_BYTES", 64<<20),
 		FsyncIntervalMS: int(envInt64("ARGUS_COLLECTOR_FSYNC_INTERVAL_MS", 1000)),
 		EnrollTokenFile: env("ARGUS_ENROLL_TOKEN_FILE", ""),
+
+		SNMPFixtureCommunity:   env("ARGUS_SNMP_FIXTURE_COMMUNITY", ""),
+		SNMPFixtureV3User:      env("ARGUS_SNMP_FIXTURE_V3_USER", ""),
+		SNMPFixtureV3AuthProto: env("ARGUS_SNMP_FIXTURE_V3_AUTH_PROTO", "SHA-256"),
+		SNMPFixtureV3AuthKey:   env("ARGUS_SNMP_FIXTURE_V3_AUTH_KEY", ""),
+		SNMPFixtureV3PrivProto: env("ARGUS_SNMP_FIXTURE_V3_PRIV_PROTO", "AES"),
+		SNMPFixtureV3PrivKey:   env("ARGUS_SNMP_FIXTURE_V3_PRIV_KEY", ""),
+		SNMPFixtureV3Context:   env("ARGUS_SNMP_FIXTURE_V3_CONTEXT", ""),
 	}
 
 	if _, err := logging.ParseLevel(cfg.LogLevel); err != nil {
@@ -185,6 +205,13 @@ func LoadCollector() (Collector, error) {
 	}
 	if cfg.FsyncIntervalMS < 0 || cfg.FsyncIntervalMS > 10_000 {
 		return cfg, fmt.Errorf("ARGUS_COLLECTOR_FSYNC_INTERVAL_MS must be within [0,10000], got %d", cfg.FsyncIntervalMS)
+	}
+	// M9-S2 fixture credentials: v3 needs both keys; a v3 identity takes
+	// precedence over a configured v2c community (canonical preference order).
+	if strings.TrimSpace(cfg.SNMPFixtureV3User) != "" {
+		if strings.TrimSpace(cfg.SNMPFixtureV3AuthKey) == "" || strings.TrimSpace(cfg.SNMPFixtureV3PrivKey) == "" {
+			return cfg, errors.New("ARGUS_SNMP_FIXTURE_V3_AUTH_KEY and ARGUS_SNMP_FIXTURE_V3_PRIV_KEY are required with ARGUS_SNMP_FIXTURE_V3_USER")
+		}
 	}
 	return cfg, nil
 }

@@ -32,15 +32,19 @@ type PolicyMetric struct {
 	Dimensions      map[string]string `json:"dimensions,omitempty"`
 }
 
-// PolicyTarget is one device the collector should poll (M9-S1). Tier is the
-// device's poll_profile (`fast|standard|slow|inventory` per docs/07 §12.4);
-// the collector normalizes unknown tiers to `standard` so one bad operator
-// value can never invalidate the whole signed policy.
+// PolicyTarget is one device/poll-type pair the collector should poll (M9-S1;
+// extended in M9-S2). Tier is the device's poll_profile (`fast|standard|slow|
+// inventory` per docs/07 §12.4); the collector normalizes unknown tiers to
+// `standard` so one bad operator value can never invalidate the whole signed
+// policy. PollType is `icmp` or `snmp`; Kind is the device kind used for SNMP
+// template selection (e.g. switch -> IF-MIB, host -> HOST-RESOURCES).
 type PolicyTarget struct {
 	DeviceID string `json:"device_id"`
 	MgmtIP   string `json:"mgmt_ip"`
 	Name     string `json:"name"`
 	Tier     string `json:"tier"`
+	PollType string `json:"poll_type,omitempty"`
+	Kind     string `json:"kind,omitempty"`
 }
 
 // MaxPolicyTargets bounds the targets list a policy document may carry. The
@@ -78,6 +82,18 @@ func policyDocument(targets []PolicyTarget) PolicyDocument {
 			{Key: "net.icmp.reachable", Unit: "state", Source: "icmp", IntervalSeconds: 30},
 			{Key: "net.icmp.rtt_ms", Unit: "ms", Source: "icmp", IntervalSeconds: 30},
 			{Key: "net.icmp.loss_pct", Unit: "percent", Source: "icmp", IntervalSeconds: 30},
+			// M9-S2 SNMP core-pack metrics (P2-AC-15). Counters are emitted as
+			// rates by the collector-side counter state machine (docs/08 §13.2;
+			// docs/11 §20.4), so units are rate units.
+			{Key: "sys.uptime_s", Unit: "s", Source: "snmp", IntervalSeconds: 60},
+			{Key: "sys.cpu.util", Unit: "percent", Source: "snmp", IntervalSeconds: 60},
+			{Key: "net.if.oper_status", Unit: "state", Source: "snmp", IntervalSeconds: 60},
+			{Key: "net.if.in_octets", Unit: "B/s", Source: "snmp", IntervalSeconds: 60},
+			{Key: "net.if.out_octets", Unit: "B/s", Source: "snmp", IntervalSeconds: 60},
+			{Key: "net.if.in_errors", Unit: "count/s", Source: "snmp", IntervalSeconds: 60},
+			{Key: "net.if.out_errors", Unit: "count/s", Source: "snmp", IntervalSeconds: 60},
+			{Key: "net.if.in_discards", Unit: "count/s", Source: "snmp", IntervalSeconds: 60},
+			{Key: "net.if.out_discards", Unit: "count/s", Source: "snmp", IntervalSeconds: 60},
 			// M9-S2b adaptive-backoff telemetry is NOT part of this slice.
 		},
 		Targets: targets,

@@ -32,6 +32,8 @@
 | golang.org/x/time | v0.16.0 | repo tags - added M2b (login rate limiting) |
 | golang.org/x/net | v0.58.0 | repo tags - promoted from indirect to direct in M9-S1 (ICMP echo raw/unprivileged sockets; x/net/icmp + x/net/ipv4). Pin was already resolved by tidy; no version change. |
 | golang.org/x/sync | v0.23.0 | repo tags — **added when errgroup first used** |
+| github.com/gosnmp/gosnmp | **v1.45.0** | GitHub release (2026-09-19) — added M9-S2 (SNMP client; canonical ADR-006 names gosnmp). Maintained, pure Go, cross-platform. Pinned exactly; the client's timeout/error message checks depend on this pin. Bumps `stretchr/testify` (test-only dependency of gosnmp) v1.11.1 → v1.12.1. |
+| gopkg.in/yaml.v3 | **v3.0.1** | repo tag — promoted from indirect to direct in M9-S2 (declarative SNMP templates). |
 | github.com/google/go-cmp | v0.7.0 (indirect) | tidy |
 
 > Note (M3a): protobuf codegen and runtime are aligned at **v1.36.12**; the older
@@ -61,6 +63,7 @@
 | timescale/timescaledb | **2.30.1-pg18** | `sha256:9dede0e3ccc071cf71935b17f76bf243331df0b1575338c8ac294640fcf12a36` | Chosen because official `*-pg18` tags confirm PostgreSQL 18 compatibility, and 2.30.1 contains `INSERT … ON CONFLICT` conflict-handling fixes relevant to the ingest claim path. **PG18 volume layout:** mount `/var/lib/postgresql` (not the pre-18 `/var/lib/postgresql/data`). |
 | golang (build stage) | **1.27.1** | `sha256:3680233e3204827fbdc66088528ae6d4b3d034f51d03a99d454f6de034888244` | Multi-arch index digest; resolved via `docker buildx imagetools` and BuildKit. |
 | gcr.io/distroless/static-debian12 | **:nonroot** | `sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab` | Multi-arch index digest; runtime stage. |
+| python (snmpsim fixture base) | **3.13-slim** | `sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b` | M9-S2 fixture only (`tests/fixtures/snmpsim/Dockerfile`, built by the integration suite via testcontainers). No maintained upstream snmpsim image exists at a usable version, so the fixture image is built from this digest-pinned base and pinned pip artifacts below. |
 
 Note: Dockerfiles intentionally omit the `# syntax=docker/dockerfile:1` directive — it pulls a
 floating BuildKit frontend image from Docker Hub. The engine's built-in frontend is used instead;
@@ -68,6 +71,15 @@ its version is pinned by the documented Docker Engine minimum (≥ 27, dev verif
 PostgreSQL 18 images declare `/var/lib/postgresql` as their volume target (`PGDATA` lives at
 `/var/lib/postgresql/18/docker`); compose and regression checks enforce this layout
 (`scripts/check-compose.ps1`).
+
+### snmpsim fixture pip pins (M9-S2)
+
+| Package | Pin | Why |
+|---|---|---|
+| snmpsim | **1.2.2** | SNMP simulator (see comments in `tests/fixtures/snmpsim/Dockerfile`; exercised by `tests/integration/TestM9S2*`). |
+| pysmi | **2.0.0** | snmpsim runtime import (`snmpsim.utils`) that snmpsim does not declare; without it the responder crashes at start. |
+| pysnmp | **7.1.30** | snmpsim requires `>=7.1.26,<8`. |
+| cryptography | **50.0.2** | USM auth/privacy backend. pysnmp treats it as optional and snmpsim does not declare it; without this pin every SNMPv3 request fails with auth/decryption errors (verified 2026-10-01). |
 
 ## Verification status (updated 2026-09-29)
 

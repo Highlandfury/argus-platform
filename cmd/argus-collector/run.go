@@ -193,16 +193,24 @@ func cmdRun(args []string) int {
 	sampleCh := make(chan metrics.Sample, 256)
 	healthCh := make(chan poll.Health, 256)
 
-	// Poll engine (M9-S1): ICMP prober + tier scheduler. Samples flow through
-	// the existing producer channel/batcher/spool; poll health is batched into
-	// the same spool so both ride the batch ack/claim path (no new transport).
+	// Poll engine (M9-S1/S2): ICMP + SNMP probers behind one multi-prober and
+	// the deterministic tier scheduler. Samples flow through the existing
+	// producer channel/batcher/spool; poll health is batched into the same
+	// spool so both ride the batch ack/claim path (no new transport).
 	healthBatcher := poll.NewHealthBatcher(rp.max, rp.report, func(records []poll.Health) error {
 		_, err := sp.Append(&spool.Batch{At: time.Now().UTC(), Health: toSpoolHealth(records)})
 		return err
 	}, logger)
+	snmpProber := poll.NewSNMPProber(poll.SNMPProberConfig{
+		Credentials: snmpCredentials(cfg),
+		Logger:      logger,
+	})
 	pollEngine := poll.NewEngine(poll.Config{
-		Prober: poll.NewICMPProber(poll.ICMPConfig{}),
-		Log:    logger,
+		Prober: poll.NewMultiProber(map[string]poll.Prober{
+			poll.PollICMP: poll.NewICMPProber(poll.ICMPConfig{}),
+			poll.PollSNMP: snmpProber,
+		}).WithLogger(logger),
+		Log: logger,
 		OnSample: func(s poll.Sample) {
 			select {
 			case sampleCh <- metrics.Sample{
@@ -471,7 +479,14 @@ func toSpoolHealth(in []poll.Health) []spool.Health {
 func pollTargets(doc policy.Document, logger *slog.Logger) []poll.Target {
 	out := make([]poll.Target, 0, len(doc.Targets))
 	for _, t := range doc.Targets {
-		target, err := poll.TargetFromPolicy(t.DeviceID, t.MgmtIP, t.Name, t.Tier)
+		target, err := poll.TargetFromPolicy(poll.TargetSpec{
+			DeviceID: t.DeviceID,
+			MgmtIP:   t.MgmtIP,
+			Name:     t.Name,
+			Tier:     t.Tier,
+			PollType: t.PollType,
+			Kind:     t.Kind,
+		})
 		if err != nil {
 			logger.Error("policy target dropped", "device_id", t.DeviceID, "error", err)
 			continue
@@ -479,6 +494,33 @@ func pollTargets(doc policy.Document, logger *slog.Logger) []poll.Target {
 		out = append(out, target)
 	}
 	return out
+}
+
+// snmpCredentials builds the M9-S2 fixture credential source from collector
+// config. v3 authPriv takes precedence over v2c (canonical preference order);
+// with no fixture configured every SNMP target reports credential_missing
+// until M9-S3 materializes per-device credentials in signed bundles.
+func snmpCredentials(cfg config.Collector) poll.CredentialSource {
+	src := poll.NewStaticCredentialSource()
+	if user := strings.TrimSpace(cfg.SNMPFixtureV3User); user != "" {
+		src.SetDefault(poll.SNMPCredentials{
+			Version:      poll.SNMPVersionV3,
+			Context:      strings.TrimSpace(cfg.SNMPFixtureV3Context),
+			Username:     user,
+			AuthProtocol: cfg.SNMPFixtureV3AuthProto,
+			AuthKey:      cfg.SNMPFixtureV3AuthKey,
+			PrivProtocol: cfg.SNMPFixtureV3PrivProto,
+			PrivKey:      cfg.SNMPFixtureV3PrivKey,
+		})
+		return src
+	}
+	if community := strings.TrimSpace(cfg.SNMPFixtureCommunity); community != "" {
+		src.SetDefault(poll.SNMPCredentials{
+			Version:   poll.SNMPVersionV2c,
+			Community: community,
+		})
+	}
+	return src
 }
 
 func cmdEnroll(args []string) int {

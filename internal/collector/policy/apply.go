@@ -55,15 +55,18 @@ type Metric struct {
 	Dimensions      map[string]string `json:"dimensions,omitempty"`
 }
 
-// Target is one device the collector should poll (M9-S1). Tier values are the
-// canonical §12.4 tiers; unknown tier strings are normalized by the poll
-// engine (never a policy rejection: one operator typo must not disable
-// polling for the whole collector).
+// Target is one device the collector should poll (M9-S1; extended in M9-S2).
+// Tier values are the canonical §12.4 tiers; unknown tier strings are
+// normalized by the poll engine (never a policy rejection: one operator typo
+// must not disable polling for the whole collector). PollType selects ICMP or
+// SNMP (unknown values normalize to ICMP); Kind selects SNMP template packs.
 type Target struct {
 	DeviceID string `json:"device_id"`
 	MgmtIP   string `json:"mgmt_ip"`
 	Name     string `json:"name"`
 	Tier     string `json:"tier"`
+	PollType string `json:"poll_type,omitempty"`
+	Kind     string `json:"kind,omitempty"`
 }
 
 // VerifyAndValidate checks the signature against the pinned Ed25519 key and
@@ -124,10 +127,15 @@ func Validate(doc Document) error {
 		if _, err := uuid.Parse(t.DeviceID); err != nil {
 			return fmt.Errorf("%w: target device_id %q is not a UUID", ErrValidation, t.DeviceID)
 		}
-		if seen[t.DeviceID] {
-			return fmt.Errorf("%w: duplicate target device_id %q", ErrValidation, t.DeviceID)
+		// One device may carry an ICMP and an SNMP target (M9-S2); duplicates
+		// of the same (device, poll type) pair are rejected. Unknown poll
+		// types normalize to ICMP in the engine, so the duplicate key uses the
+		// same normalization.
+		dupKey := t.DeviceID + ":" + normalizePolicyPollType(t.PollType)
+		if seen[dupKey] {
+			return fmt.Errorf("%w: duplicate target device_id %q poll_type %q", ErrValidation, t.DeviceID, t.PollType)
 		}
-		seen[t.DeviceID] = true
+		seen[dupKey] = true
 		addr, err := netip.ParseAddr(t.MgmtIP)
 		if err != nil || !addr.IsValid() {
 			return fmt.Errorf("%w: target %s mgmt_ip %q is not an IP address", ErrValidation, t.DeviceID, t.MgmtIP)
@@ -138,8 +146,24 @@ func Validate(doc Document) error {
 		if len(t.Tier) > 32 {
 			return fmt.Errorf("%w: target %s tier exceeds 32 chars", ErrValidation, t.DeviceID)
 		}
+		if len(t.PollType) > 16 {
+			return fmt.Errorf("%w: target %s poll_type exceeds 16 chars", ErrValidation, t.DeviceID)
+		}
+		if len(t.Kind) > 64 {
+			return fmt.Errorf("%w: target %s kind exceeds 64 chars", ErrValidation, t.DeviceID)
+		}
 	}
 	return nil
+}
+
+// normalizePolicyPollType mirrors poll.NormalizePollType without importing the
+// poll package into the policy validator (keeps the dependency direction
+// policy -> validation only).
+func normalizePolicyPollType(s string) string {
+	if strings.EqualFold(strings.TrimSpace(s), "snmp") {
+		return "snmp"
+	}
+	return "icmp"
 }
 
 // Store writes a validated policy version atomically under dir and keeps the

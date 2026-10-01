@@ -155,6 +155,13 @@ services:
       ARGUS_COLLECTOR_DATA_DIR: /var/lib/argus
       ARGUS_COLLECTOR_SPOOL_MAX_BYTES: "67108864"
       ARGUS_COLLECTOR_FSYNC_INTERVAL_MS: "1000"
+      # M9-S2 SNMP fixture credentials (dev/test only; empty = SNMP targets
+      # report credential_missing until M9-S3 materializes per-device secrets
+      # from signed bundles). Pair with the `snmpsim` profile service below.
+      ARGUS_SNMP_FIXTURE_COMMUNITY: ${ARGUS_SNMP_FIXTURE_COMMUNITY:-}
+      ARGUS_SNMP_FIXTURE_V3_USER: ${ARGUS_SNMP_FIXTURE_V3_USER:-}
+      ARGUS_SNMP_FIXTURE_V3_AUTH_KEY: ${ARGUS_SNMP_FIXTURE_V3_AUTH_KEY:-}
+      ARGUS_SNMP_FIXTURE_V3_PRIV_KEY: ${ARGUS_SNMP_FIXTURE_V3_PRIV_KEY:-}
     volumes:
       - collector-data:/var/lib/argus
       - ca-data:/var/lib/argus/ca-ro:ro
@@ -168,6 +175,34 @@ services:
     depends_on:
       server:
         condition: service_healthy
+
+  # M9-S2 simulated SNMP devices (optional dev/e2e fixture):
+  #   docker compose -f deployments/compose/docker-compose.dev.yml --profile snmpsim up
+  # Serves the fixtures in tests/fixtures/snmpsim/data on 127.0.0.1:1161
+  # (switch / swrap / sreset / host communities and v3 contexts). The image is
+  # built from the same pinned Dockerfile used by the integration tests.
+  snmpsim:
+    profiles: ["snmpsim"]
+    build:
+      context: ../..
+      dockerfile: tests/fixtures/snmpsim/Dockerfile
+    command:
+      - "--cache-dir=/tmp/snmpsim-cache"
+      - "--log-level=error"
+      - "--process-user=nobody"
+      - "--process-group=nogroup"
+      - "--v3-engine-id=auto"
+      - "--data-dir=/data"
+      - "--agent-udpv4-endpoint=0.0.0.0:1161"
+      - "--v3-user=argus"
+      - "--v3-auth-proto=SHA256"
+      - "--v3-auth-key=argus-auth-pass"
+      - "--v3-priv-proto=AES"
+      - "--v3-priv-key=argus-priv-pass"
+    volumes:
+      - ../../tests/fixtures/snmpsim/data:/data:ro
+    ports:
+      - "1161:1161/udp"
 
 volumes:
   db-data:

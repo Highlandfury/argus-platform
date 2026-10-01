@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -78,10 +79,31 @@ func TestValidateTargetBounds(t *testing.T) {
 		t.Fatalf("valid targets rejected: %v", err)
 	}
 
+	// A device may carry one ICMP and one SNMP target (M9-S2); the same
+	// (device, normalized poll type) pair twice is a duplicate.
+	both := []Target{
+		{DeviceID: "0198d5a3-0000-7000-8000-000000000001", MgmtIP: "192.0.2.1", Name: "d", Tier: "fast", PollType: "icmp", Kind: "switch"},
+		{DeviceID: "0198d5a3-0000-7000-8000-000000000001", MgmtIP: "192.0.2.1", Name: "d", Tier: "fast", PollType: "snmp", Kind: "switch"},
+	}
+	if err := Validate(Document{
+		HeartbeatIntervalSeconds: 30, ReportIntervalSeconds: 5, BatchMaxSamples: 5000, SpoolMaxBytes: 1 << 20,
+		Metrics: []Metric{{Key: "k", Unit: "u", Source: "s", IntervalSeconds: 1}}, Targets: both,
+	}); err != nil {
+		t.Fatalf("icmp+snmp targets rejected: %v", err)
+	}
+
 	cases := map[string][]Target{
 		"bad uuid":  {{DeviceID: "not-a-uuid", MgmtIP: "192.0.2.1", Tier: "fast"}},
 		"bad ip":    {{DeviceID: "0198d5a3-0000-7000-8000-000000000001", MgmtIP: "nope", Tier: "fast"}},
 		"duplicate": {valid[0], valid[0]},
+		// Unknown poll types normalize to ICMP, so they collide with the
+		// explicit ICMP target.
+		"duplicate normalized poll type": {
+			valid[0],
+			{DeviceID: valid[0].DeviceID, MgmtIP: valid[0].MgmtIP, Name: "d", Tier: "fast", PollType: "bogus"},
+		},
+		"poll type too long": {{DeviceID: valid[0].DeviceID, MgmtIP: valid[0].MgmtIP, Tier: "fast", PollType: strings.Repeat("x", 17)}},
+		"kind too long":      {{DeviceID: valid[0].DeviceID, MgmtIP: valid[0].MgmtIP, Tier: "fast", Kind: strings.Repeat("k", 65)}},
 	}
 	for name, targets := range cases {
 		err := Validate(Document{

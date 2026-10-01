@@ -1,0 +1,21 @@
+# Core template pack: HOST-RESOURCES-MIB (RFC 2790) hrProcessorLoad.
+#
+# hrProcessorLoad (1.3.6.1.2.1.25.3.3.1.2) is the 1-minute average CPU
+# utilization per hrDeviceIndex, 0-100. The row dimension is the CPU index
+# (the platform's collector-local CPU metric uses a "cpu" dimension too).
+name: core/host-resources
+version: 1
+description: HOST-RESOURCES-MIB hrProcessorLoad per logical processor
+required: true
+select:
+  kinds: [host, server]
+tables:
+  - name: hrProcessorLoad
+    walk: "1.3.6.1.2.1.25.3.3.1"
+    required: true
+columns:
+  - oid: "1.3.6.1.2.1.25.3.3.1.2"
+    key: sys.cpu.util
+    unit: percent
+    type: gauge
+    dim: cpu
