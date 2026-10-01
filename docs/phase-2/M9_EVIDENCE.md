@@ -1,6 +1,6 @@
 # M9-EVIDENCE — Polling engine (ICMP + SNMP)
 
-**Status: M9-S1, M9-S2, M9-S3 and M9-S4 COMPLETE (all recorded here).** This
+**Status: M9-S1, M9-S2, M9-S3 and M9-S4 COMPLETE (all recorded here); gate signed off by user 2026-10-01.** Deferred items 1-2 (on-demand checks, operator criticality source) are folded into the start of M10; the rest stay with their owning phases. This
 record covers **M9-S1**, the polling foundation end-to-end with ICMP,
 **M9-S2**, SNMP v2c/v3 polling with the declarative core template pack, the
 counter state machine, snmpsim fixtures and the scheduler/wire integration,
