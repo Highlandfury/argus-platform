@@ -21,8 +21,9 @@
 
   Optional stages:
     -WithSuites   integration failure + security suites (testcontainers; Docker required)
+    -WithIntegration  full tests/integration suite - all slice suites (testcontainers; Docker required)
     -WithStack    compose up --build --wait, extract CA, run the e2e harness,
-                  then compose down (volumes kept)
+                  then compose down (volumes kept) AFTER the optional web stage
     -WithWeb      web production build + Playwright suite (needs the stack running;
                   combine with -WithStack or start it yourself)
 
@@ -38,6 +39,7 @@
 param(
   [switch]$Race,
   [switch]$WithSuites,
+  [switch]$WithIntegration,
   [switch]$WithStack,
   [switch]$WithWeb
 )
@@ -113,6 +115,12 @@ if ($WithSuites) {
   }
 }
 
+if ($WithIntegration) {
+  Step 'integration (full suite, testcontainers)' {
+    & $go test ./tests/integration/... -count=1
+  }
+}
+
 if ($WithStack) {
   Step 'stack up (compose --wait)' {
     & $d compose -f $cf up -d --build --wait
@@ -124,7 +132,6 @@ if ($WithStack) {
     try { & $go test ./tests/e2e/... -count=1 -v }
     finally { Remove-Item Env:\ARGUS_E2E -ErrorAction SilentlyContinue }
   }
-  Step 'stack down (volumes kept)' { & $d compose -f $cf down }
 }
 
 if ($WithWeb) {
@@ -138,6 +145,12 @@ if ($WithWeb) {
       Pop-Location
     }
   }
+}
+
+# Tear the stack down only after the web stage, so `-WithStack -WithWeb` keeps
+# the stack serving while Playwright runs.
+if ($WithStack) {
+  Step 'stack down (volumes kept)' { & $d compose -f $cf down }
 }
 
 Write-Host "`n===== local CI summary =====" -ForegroundColor Cyan
