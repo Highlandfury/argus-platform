@@ -365,9 +365,13 @@ Desktop shutdown), so the next start crash-loops with a 404 until the
 container is recreated (observed 2026-09-30). Recommended PAT: fine-grained,
 repository access to this repo, permission Administration: Read and write.
 
-If queued jobs do not start while the log says `Listening for Jobs` (stale
-session after a re-registration), `docker restart argus-runner` resyncs it;
-jobs are picked up within seconds (observed 2026-09-30).
+If queued jobs do not start while the log says `Listening for Jobs`, first
+confirm the runner is genuinely idle (no `Running job:` line in
+`docker logs argus-runner` - a later queued run staying queued while an
+earlier run executes is normal, not a stall). Only then
+`docker restart argus-runner` resyncs a stale session; jobs are picked up
+within seconds (observed 2026-09-30). Never restart while a job is running:
+it aborts that job with "runner lost communication" (observed 2026-10-01).
 
 **Step 3 â€” verify.** Repo â†’ Settings â†’ Actions â†’ Runners shows
 `argus-runner-1` (Idle). Then trigger any workflow (push, or *Actions â†’
