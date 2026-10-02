@@ -5,6 +5,8 @@ import DeviceDetail, {
   type Device,
 } from "@/features/visibility/DeviceDetail";
 import { serverFetch } from "@/lib/api";
+import ErrorState from "@/ui/ErrorState";
+import PageHeader from "@/ui/PageHeader";
 
 interface MeResponse {
   user: { role: string };
@@ -53,8 +55,14 @@ export default async function DeviceDetailPage({
   if (!device) {
     return (
       <section>
-        <h1>Device</h1>
-        <div className="panel">Device unavailable.</div>
+        <PageHeader
+          title="Device"
+          breadcrumbs={[{ label: "Devices", href: "/devices" }]}
+        />
+        <ErrorState
+          title="Device unavailable"
+          message="The device could not be loaded (API unreachable)."
+        />
       </section>
     );
   }

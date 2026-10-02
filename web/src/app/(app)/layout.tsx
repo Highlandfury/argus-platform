@@ -1,73 +1,41 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
-import LogoutButton from "@/components/LogoutButton";
+import AppShell, { type Me } from "@/components/shell/AppShell";
+import ErrorState from "@/ui/ErrorState";
+import Panel from "@/ui/Panel";
 import { serverFetch } from "@/lib/api";
 
-interface MeResponse {
-  user: { id: string; email: string; role: string };
-  org: { id: string; slug: string; name: string };
+function Outage({ message }: { message: string }) {
+  return (
+    <div className="shell-outage">
+      <Panel title="Argus">
+        <ErrorState title="API unavailable" message={message} />
+      </Panel>
+    </div>
+  );
 }
 
+// (app) layout: resolves the caller's identity/org, then renders the Phase 1
+// AppShell (sidebar + topbar + content well). Unauthenticated callers are sent
+// to /login; API outages render an explicit outage surface instead of a blank
+// shell.
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const cookieHeader = (await cookies()).toString();
   let res: Response;
   try {
     res = await serverFetch("/v1/me", cookieHeader);
   } catch {
-    return (
-      <div className="shell">
-        <main className="shell-main">
-          <div className="panel">API unreachable — is the server running?</div>
-        </main>
-      </div>
-    );
+    return <Outage message="API unreachable — is the server running?" />;
   }
   if (res.status === 401) {
     redirect("/login");
   }
   if (!res.ok) {
     return (
-      <div className="shell">
-        <main className="shell-main">
-          <div className="panel">
-            API unavailable (status {res.status}). Is the server running?
-          </div>
-        </main>
-      </div>
+      <Outage message={`API unavailable (status ${res.status}). Is the server running?`} />
     );
   }
-  const me = (await res.json()) as MeResponse;
-  return (
-    <div className="shell">
-      <header className="shell-header">
-        <span className="brand">ARGUS</span>
-        <nav className="shell-nav">
-          <a href="/devices" data-testid="nav-devices">
-            Devices
-          </a>
-          <a href="/device-groups" data-testid="nav-device-groups">
-            Device groups
-          </a>
-          <a href="/checks" data-testid="nav-checks">
-            Checks
-          </a>
-          <a href="/credentials" data-testid="nav-credentials">
-            Credentials
-          </a>
-          <a href="/collectors" data-testid="nav-collectors">
-            Collectors
-          </a>
-        </nav>
-        <span className="who" data-testid="org-name">
-          {me.org.name}
-        </span>
-        <span className="who">
-          {me.user.email} · {me.user.role}
-        </span>
-        <LogoutButton />
-      </header>
-      <main className="shell-main">{children}</main>
-    </div>
-  );
+  const me = (await res.json()) as Me;
+  return <AppShell me={me}>{children}</AppShell>;
 }

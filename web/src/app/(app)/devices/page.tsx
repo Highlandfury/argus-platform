@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 
 import DeviceInventory from "@/features/inventory/DeviceInventory";
 import { serverFetch } from "@/lib/api";
+import PageHeader from "@/ui/PageHeader";
 
 interface MeResponse {
   user: { role: string };
@@ -38,7 +39,10 @@ export default async function DevicesPage() {
 
   return (
     <section>
-      <h1>Devices</h1>
+      <PageHeader
+        title="Devices"
+        description="Inventory across sites with poll status, management addresses and per-device visibility. Filters are URL-driven and shareable."
+      />
       <DeviceInventory sites={sites} canWrite={role === "admin"} />
     </section>
   );

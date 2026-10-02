@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 
 import DeviceGroupsManager from "@/features/inventory/DeviceGroupsManager";
 import { serverFetch } from "@/lib/api";
+import PageHeader from "@/ui/PageHeader";
 
 interface MeResponse {
   user: { role: string };
@@ -23,7 +24,10 @@ export default async function DeviceGroupsPage() {
 
   return (
     <section>
-      <h1>Device groups</h1>
+      <PageHeader
+        title="Device Groups"
+        description="Dynamic groups whose selector is stored as JSON. Membership resolution is deferred; CRUD and validation are live."
+      />
       <DeviceGroupsManager canWrite={role === "admin"} />
     </section>
   );

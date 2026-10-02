@@ -42,6 +42,28 @@ export type FetchResult<T> =
   | { ok: true; data: T }
   | { ok: false; status: number; error: string };
 
+// ServerResult is the server-component counterpart: no error message (the
+// shell/page renders its own error state), just typed data or a status.
+export type ServerResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; status: number };
+
+// serverJSON wraps serverFetch for server components that want typed reads
+// without duplicating try/ok handling.
+export async function serverJSON<T>(
+  path: string,
+  cookieHeader: string,
+  init?: RequestInit,
+): Promise<ServerResult<T>> {
+  try {
+    const res = await serverFetch(path, cookieHeader, init);
+    if (!res.ok) return { ok: false, status: res.status };
+    return { ok: true, data: (await res.json()) as T };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
 // fetchJSON is the read-side counterpart to the existing inline fetch blocks:
 // same no-store semantics, one uniform error string. Client components only.
 export async function fetchJSON<T>(

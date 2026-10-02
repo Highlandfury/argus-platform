@@ -4,6 +4,7 @@ import CreateCredentialForm from "@/components/CreateCredentialForm";
 import CredentialBindings from "@/components/CredentialBindings";
 import RotateCredential from "@/components/RotateCredential";
 import { serverFetch } from "@/lib/api";
+import PageHeader from "@/ui/PageHeader";
 
 interface CredentialBinding {
   id: string;
@@ -60,7 +61,7 @@ export default async function CredentialsPage() {
   let loadError = "";
   try {
     const [listRes, meRes] = await Promise.all([
-      serverFetch("/v1/credentials?limit=100", cookieHeader),
+      serverFetch("/v1/credentials?limit=100&order=desc", cookieHeader),
       serverFetch("/v1/me", cookieHeader),
     ]);
     if (listRes.ok) {
@@ -82,7 +83,10 @@ export default async function CredentialsPage() {
 
   return (
     <section>
-      <h1>Credentials</h1>
+      <PageHeader
+        title="Credentials"
+        description="Write-only secret metadata and bindings. Secrets are sealed on submission and can never be read back."
+      />
       <div className="panel">
         {loadError ? (
           <p className="error" data-testid="credentials-error">

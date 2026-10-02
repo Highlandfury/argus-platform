@@ -1,0 +1,114 @@
+/* Argus design tokens (Phase 1 redesign).
+ *
+ * Single source of truth for the enterprise NOC look: restrained dark
+ * surfaces, compact typography, subtle borders/radii/shadows and one
+ * canonical status palette shared by every surface. Feature code should
+ * reference these variables instead of hard-coded colors.
+ *
+ * Status semantics (never color-only; StatusIndicator/Badge always pair a
+ * glyph/label with the tone):
+ *   healthy / up / active / success      -> --status-healthy   (green)
+ *   degraded / warning                   -> --status-degraded  (amber)
+ *   down / failed / revoked / critical   -> --status-down      (red)
+ *   unknown / no data                    -> --status-unknown   (gray)
+ *   maintenance / acknowledged           -> --status-maintenance (blue)
+ *   pending / new / snoozed              -> --status-pending   (violet)
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- surfaces ---- */
+  --bg: #0d1117; /* app background (legacy alias kept) */
+  --bg-app: #0d1117;
+  --bg-surface: #161b22;
+  --bg-surface-2: #1c2128; /* raised/hover panels */
+  --bg-inset: #0a0e13; /* inputs, code, wells */
+  --bg-hover: rgba(177, 186, 196, 0.08);
+  --bg-active: rgba(76, 154, 255, 0.12);
+
+  /* ---- borders ---- */
+  --border: #30363d; /* legacy alias kept */
+  --border-muted: #262c34;
+  --border-strong: #444c56;
+
+  /* ---- text ---- */
+  --text: #e6edf3;
+  --text-muted: #9aa7b4; /* legacy alias --muted below */
+  --text-faint: #6e7b8a;
+
+  /* ---- accent ---- */
+  --accent: #4c9aff;
+  --accent-strong: #79b8ff;
+  --accent-dim: rgba(76, 154, 255, 0.14);
+  --accent-contrast: #06121f;
+
+  /* ---- status semantics ---- */
+  --status-healthy: #3fb950;
+  --status-healthy-bg: rgba(63, 185, 80, 0.12);
+  --status-degraded: #d29922;
+  --status-degraded-bg: rgba(210, 153, 34, 0.12);
+  --status-down: #f85149;
+  --status-down-bg: rgba(248, 81, 73, 0.12);
+  --status-unknown: #8b949e;
+  --status-unknown-bg: rgba(139, 148, 158, 0.12);
+  --status-maintenance: #58a6ff;
+  --status-maintenance-bg: rgba(88, 166, 255, 0.12);
+  --status-pending: #a371f7;
+  --status-pending-bg: rgba(163, 113, 247, 0.12);
+
+  /* alert severities map onto the status palette */
+  --sev-critical: var(--status-down);
+  --sev-warning: var(--status-degraded);
+  --sev-info: var(--status-maintenance);
+
+  /* ---- typography ---- */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Consolas,
+    "Liberation Mono", monospace;
+
+  --fs-2xs: 10px;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 14px;
+  --fs-xl: 16px;
+  --fs-2xl: 18px;
+  --fs-3xl: 22px;
+
+  --lh-tight: 1.25;
+  --lh-base: 1.45;
+
+  /* ---- spacing scale (4px base) ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+
+  /* ---- radii (restrained) ---- */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  /* ---- shadows (subtle, for overlays only) ---- */
+  --shadow-sm: 0 1px 2px rgba(1, 4, 9, 0.5);
+  --shadow-md: 0 8px 24px rgba(1, 4, 9, 0.55);
+  --shadow-lg: 0 16px 48px rgba(1, 4, 9, 0.6);
+
+  /* ---- layout ---- */
+  --sidebar-w: 232px;
+  --topbar-h: 48px;
+  --content-max: 1680px;
+
+  /* ---- legacy aliases (existing feature CSS keeps working) ---- */
+  --panel: var(--bg-surface);
+  --muted: var(--text-muted);
+  --danger: var(--status-down);
+}

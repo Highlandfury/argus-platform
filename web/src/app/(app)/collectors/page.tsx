@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 
 import EnrollCollectorForm from "@/components/EnrollCollectorForm";
 import { serverFetch } from "@/lib/api";
+import PageHeader from "@/ui/PageHeader";
 
 interface Collector {
   id: string;
@@ -65,7 +66,10 @@ export default async function CollectorsPage() {
 
   return (
     <section>
-      <h1>Collectors</h1>
+      <PageHeader
+        title="Collectors"
+        description="Edge collectors that poll devices and stream telemetry: enrollment, identity, heartbeat and the secure control stream."
+      />
       <div className="panel">
         {collectors.length === 0 ? (
           <p className="muted">

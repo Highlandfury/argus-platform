@@ -5,6 +5,8 @@ import InterfaceDetail, {
   type InterfaceDetailData,
 } from "@/features/visibility/InterfaceDetail";
 import { serverFetch } from "@/lib/api";
+import ErrorState from "@/ui/ErrorState";
+import PageHeader from "@/ui/PageHeader";
 
 // Interface detail (M10-S3). The shell resolves the interface and its parent
 // device server-side (404 for unknown/out-of-scope ids); the client component
@@ -44,8 +46,17 @@ export default async function InterfaceDetailPage({
   if (!iface) {
     return (
       <section>
-        <h1>Interface</h1>
-        <div className="panel">Interface unavailable.</div>
+        <PageHeader
+          title="Interface"
+          breadcrumbs={[
+            { label: "Devices", href: "/devices" },
+            { label: "Interface" },
+          ]}
+        />
+        <ErrorState
+          title="Interface unavailable"
+          message="The interface could not be loaded (API unreachable)."
+        />
       </section>
     );
   }

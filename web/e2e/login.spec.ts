@@ -17,6 +17,8 @@ test("login, dashboard, logout", async ({ page }) => {
   await expect(page.getByTestId("org-name")).toHaveText("Dev Org");
   await expect(page.getByTestId("sites-table")).toContainText("HQ");
 
+  // Phase 1 shell: logout now lives in the topbar user menu.
+  await page.getByTestId("user-menu").click();
   await page.getByTestId("logout").click();
   await expect(page).toHaveURL(/\/login$/);
 

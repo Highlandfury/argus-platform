@@ -1,10 +1,11 @@
-import Link from "next/link";
 import { cookies } from "next/headers";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 
 import SiteDashboard from "@/features/visibility/SiteDashboard";
 import { serverFetch } from "@/lib/api";
+import ErrorState from "@/ui/ErrorState";
+import PageHeader from "@/ui/PageHeader";
 
 interface Site {
   id: string;
@@ -40,19 +41,25 @@ export default async function SiteDashboardPage({
   if (!site) {
     return (
       <section>
-        <h1>Site</h1>
-        <div className="panel">Site unavailable.</div>
+        <PageHeader
+          title="Site"
+          breadcrumbs={[{ label: "Sites", href: "/sites" }]}
+        />
+        <ErrorState
+          title="Site unavailable"
+          message="The site could not be loaded (API unreachable)."
+        />
       </section>
     );
   }
 
   return (
     <section>
-      <h1>{site.name}</h1>
-      <p className="muted">
-        <Link href="/">← Dashboard</Link> · site status mix, recent poll-health
-        failures and the device table below.
-      </p>
+      <PageHeader
+        title={site.name}
+        breadcrumbs={[{ label: "Sites", href: "/sites" }]}
+        description="Site status mix, recent poll-health failures and the device table."
+      />
       <Suspense fallback={<p className="muted">Loading site dashboard…</p>}>
         <SiteDashboard siteID={site.id} siteName={site.name} />
       </Suspense>

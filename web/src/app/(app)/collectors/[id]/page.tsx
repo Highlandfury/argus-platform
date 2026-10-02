@@ -4,6 +4,8 @@ import { notFound } from "next/navigation";
 import CollectorActions from "@/components/CollectorActions";
 import MetricChart from "@/features/collectors/MetricChart";
 import { serverFetch } from "@/lib/api";
+import ErrorState from "@/ui/ErrorState";
+import PageHeader from "@/ui/PageHeader";
 
 interface CollectorDetail {
   id: string;
@@ -69,15 +71,25 @@ export default async function CollectorDetailPage({
   if (!collector) {
     return (
       <section>
-        <h1>Collector</h1>
-        <div className="panel">Collector unavailable.</div>
+        <PageHeader
+          title="Collector"
+          breadcrumbs={[{ label: "Collectors", href: "/collectors" }]}
+        />
+        <ErrorState
+          title="Collector unavailable"
+          message="The collector could not be loaded (API unreachable)."
+        />
       </section>
     );
   }
 
   return (
     <section>
-      <h1>{collector.name}</h1>
+      <PageHeader
+        title={collector.name}
+        breadcrumbs={[{ label: "Collectors", href: "/collectors" }]}
+        description="Collector identity, policy sync, spool health and the live telemetry stream."
+      />
       <div className="panel" data-testid="collector-detail">
         <table>
           <tbody>
