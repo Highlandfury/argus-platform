@@ -65,6 +65,33 @@ test("device list renders real inventory data", async () => {
   await expect(row).toContainText(mgmtIP);
 });
 
+// M10-S3b-4: row-level delete with a two-step confirm - no detail-page trip.
+test("device list row delete removes a device without opening its detail", async () => {
+  const sitesRes = await page.request.get("/api/v1/sites?limit=1");
+  expect(sitesRes.ok()).toBeTruthy();
+  const site = ((await sitesRes.json()) as { data: { id: string }[] }).data[0];
+  const name = `e2e-rowdel-${Date.now()}`;
+  const now = Date.now();
+  const mgmtIP = `192.0.${((now / 1000) % 250) | 0}.${(now % 249) + 1}`;
+  const csrf =
+    (await page.context().cookies()).find((c) => c.name === "argus_csrf")
+      ?.value ?? "";
+  const createRes = await page.request.post("/api/v1/devices", {
+    headers: { "X-CSRF-Token": csrf },
+    data: { site_id: site.id, name, kind: "switch", mgmt_ip: mgmtIP },
+  });
+  expect(createRes.status()).toBe(201);
+
+  await page.goto("/devices");
+  const row = page.getByTestId("devices-table").locator("tr", { hasText: name });
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.getByTestId("device-row-delete").click();
+  await row.getByTestId("device-row-delete-confirm").click();
+  await expect(
+    page.getByTestId("devices-table").locator("tr", { hasText: name }),
+  ).toHaveCount(0, { timeout: 15_000 });
+});
+
 // M7-S4a: the Add device form posts /v1/devices with the session + CSRF pair
 // and the new device appears in the list without a manual reload.
 test("add device form creates a device that appears in the list", async () => {

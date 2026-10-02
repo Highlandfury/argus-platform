@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
-import { fetchJSON } from "@/lib/api";
+import { fetchJSON, problemDetail, readCSRF } from "@/lib/api";
 
 interface Device {
   id: string;
@@ -91,7 +91,13 @@ function pollStatus(device: Device): "up" | "down" | "unknown" {
 // URL-driven params (site/status/kind/q), a client-side name/IP search over the
 // loaded rows, and a cursor-driven "Load more". Loading/empty/error states stay
 // observable; refreshKey re-runs the first page after a successful manual add.
-export default function DevicesList({ refreshKey = 0 }: { refreshKey?: number }) {
+export default function DevicesList({
+  refreshKey = 0,
+  canWrite = false,
+}: {
+  refreshKey?: number;
+  canWrite?: boolean;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -336,11 +342,12 @@ export default function DevicesList({ refreshKey = 0 }: { refreshKey?: number })
                   <th>Mgmt IP</th>
                   <th>Last seen</th>
                   <th>Updated</th>
+                  {canWrite && <th>Actions</th>}
                 </tr>
               </thead>
               <tbody>
                 {filtered.map((d) => (
-                  <tr key={d.id}>
+                  <tr key={d.id} data-device-id={d.id}>
                     <td>
                       <a href={`/devices/${d.id}`}>{d.name}</a>
                       {d.critical && (
@@ -369,6 +376,18 @@ export default function DevicesList({ refreshKey = 0 }: { refreshKey?: number })
                     <td className="muted">{d.mgmt_ip ?? "—"}</td>
                     <td className="muted">{shortTime(d.last_seen_at)}</td>
                     <td className="muted">{shortTime(d.updated_at)}</td>
+                    {canWrite && (
+                      <td>
+                        <DeviceRowDelete
+                          deviceId={d.id}
+                          onDeleted={(id) =>
+                            setDevices((prev) =>
+                              prev ? prev.filter((x) => x.id !== id) : prev,
+                            )
+                          }
+                        />
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -395,5 +414,86 @@ export default function DevicesList({ refreshKey = 0 }: { refreshKey?: number })
         </>
       )}
     </>
+  );
+}
+
+// DeviceRowDelete is the M10-S3b-4 row action: a two-step confirm that
+// soft-deletes through DELETE /v1/devices/{id} (session + CSRF) and removes the
+// row locally on success, without a trip to the detail page.
+function DeviceRowDelete({
+  deviceId,
+  onDeleted,
+}: {
+  deviceId: string;
+  onDeleted: (id: string) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function remove() {
+    setBusy(true);
+    setError("");
+    try {
+      const res = await fetch(`/api/v1/devices/${deviceId}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": readCSRF() },
+      });
+      if (!res.ok) {
+        setError(
+          await problemDetail(res, `delete failed (status ${res.status})`),
+        );
+        setConfirming(false);
+        return;
+      }
+      onDeleted(deviceId);
+    } catch {
+      setError("network error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        className="btn-sm btn-ghost"
+        data-testid="device-row-delete"
+        onClick={() => {
+          setConfirming(true);
+          setError("");
+        }}
+      >
+        Delete
+      </button>
+    );
+  }
+  return (
+    <span className="btn-row">
+      <button
+        type="button"
+        className="btn-sm"
+        disabled={busy}
+        data-testid="device-row-delete-confirm"
+        onClick={() => void remove()}
+      >
+        {busy ? "Deleting…" : "Confirm"}
+      </button>
+      <button
+        type="button"
+        className="btn-sm btn-ghost"
+        disabled={busy}
+        data-testid="device-row-delete-cancel"
+        onClick={() => setConfirming(false)}
+      >
+        Cancel
+      </button>
+      {error && (
+        <span className="error" data-testid="device-row-delete-error">
+          {error}
+        </span>
+      )}
+    </span>
   );
 }

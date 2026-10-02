@@ -1583,3 +1583,25 @@ hashing is deliberately slow), not a checks-page regression.
   link).
 - Playwright: `web/e2e/checks.spec.ts` (new, 2 tests).
 - Docs: this section.
+
+---
+
+# 14. M10-S3b-4 - row-level device delete in the list
+
+**Status: COMPLETE (user-requested follow-up).** Deleting a device no longer
+requires opening its detail page: the devices list (admins only) gained an
+Actions column with a two-step per-row delete.
+
+- `Delete` -> `Confirm`/`Cancel` inline; `DELETE /v1/devices/{id}` with session
+  + CSRF (soft delete - identical semantics to the detail-page panel); on
+  success the row is removed from the loaded list locally; problem+json errors
+  render inline (`device-row-delete-error`); non-admins see no Actions column.
+- Playwright: "device list row delete removes a device without opening its
+  detail" (create via API -> delete from the row -> row disappears). Full suite
+  36/36 with `--workers=1`; web build clean. No backend changes.
+
+Verification notes from this batch: the local gate re-ran green (an earlier
+suite start failed on testcontainers DB-readiness under host load - the same
+class of contention documented in 11.4); the dev collector needed one restart
+after repeated server rebuilds before health batches resumed. Neither is a
+code defect.

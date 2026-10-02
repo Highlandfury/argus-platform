@@ -25,7 +25,7 @@ export default function DeviceInventory({
   return (
     <>
       <div className="panel">
-        <DevicesList refreshKey={refreshKey} />
+        <DevicesList refreshKey={refreshKey} canWrite={canWrite} />
       </div>
       {canWrite && (
         <div style={{ marginTop: 16 }}>
