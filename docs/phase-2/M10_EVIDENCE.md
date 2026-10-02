@@ -1,7 +1,7 @@
 # M10-EVIDENCE — Visibility & operational surfaces (Phase 2)
 
 **Status: M10-S0 COMPLETE; M10-S1 COMPLETE (§7); M10-S2 COMPLETE (§8);
-M10-S3 COMPLETE (§9).**
+M10-S3 COMPLETE (§9); M10-S3a COMPLETE (§10).**
 M10-S0 closes the two
 M9-S4 deferrals recorded in `M9_EVIDENCE.md` §14.7 (see the signed M9 gate note
 at the top of that file): the operator-facing device criticality source that
@@ -667,8 +667,8 @@ toolchain, golangci-lint v2.14.0, dev compose stack at schema v17.
 | `go build ./...` (windows/amd64 + linux/amd64) | pass |
 | `gofmt -l internal cmd tests` | empty |
 | `go test ./internal/... -count=1` | pass (all packages) |
-| `go test ./tests/integration/ -run '^TestM10\|^TestM9' -count=1 -v` | **pass, 42/42** (234.4 s) |
-| `go test ./tests/integration/ -count=1 -timeout 30m` | **pass, full suite** |
+| `go test ./tests/integration/ -run '^TestM10\|^TestM9' -count=1 -v` | **pass, 42/42** (136.7 s) |
+| `go test ./tests/integration/ -count=1 -timeout 30m` | **pass, full suite** (609.8 s) |
 | `go test ./tests/contract/... -count=1` | pass |
 | `golangci-lint v2.14.0` (docker, `--timeout 10m`) | **0 issues** |
 
@@ -945,3 +945,124 @@ No Go code was touched, so no Go build/lint run was needed or performed.
   `web/src/app/globals.css` (visibility styles).
 - Tests: `web/e2e/visibility.spec.ts` (new).
 - Docs: this file.
+
+---
+
+# 10. M10-S3a — device edit/delete + SNMP credential binding UI
+
+**Status: M10-S3a COMPLETE.** Web-only follow-up to §9 closing the two
+user-reported gaps: the device detail page offered no way to edit or remove a
+device, and no way to attach an SNMP credential (binding was API-only). No Go,
+OpenAPI, proto or migration change; schema stays v17. All APIs already existed;
+no backend tweak was needed.
+
+## 10.1 What was added
+
+| File | Change |
+|---|---|
+| `web/src/features/visibility/DeviceAdminPanel.tsx` | New: edit form + delete confirm on `/devices/[id]` |
+| `web/src/features/visibility/DeviceCredentialPanel.tsx` | New: bound/effective credentials, bind + unbind controls |
+| `web/src/features/visibility/DeviceDetail.tsx` | Hosts both panels; `current` device state updates in place on edit (`role` already passed) |
+| `web/src/app/(app)/credentials/page.tsx` | Stale "bindings are API-only until the M10 surface" footer replaced with a pointer to the device page panel |
+| `web/e2e/device-admin.spec.ts` | New spec (4 tests, one login) |
+| `docs/phase-2/M10_EVIDENCE.md` | This section |
+
+## 10.2 Edit / delete UX
+
+- **Edit** (`device-edit-open` toggles `device-edit-form`; fields name, kind,
+  mgmt_ip, serial, sys_object_id, critical): `PATCH /v1/devices/{id}` with
+  session + `X-CSRF-Token`. The body always carries the six editable fields;
+  blank mgmt_ip/serial/sysObjectID are sent as JSON `null`, which is the
+  documented "null clears nullable fields" PATCH semantic (non-null fields are
+  changes; there is no "omitted = unchanged" ambiguity in this form because it
+  is pre-filled with the current values). `kind` is constrained to the same
+  canonical taxonomy as the add form (a non-listed current kind is preserved by
+  an extra option).
+- Server errors render verbatim: `400 validation.failed` + `errors[]` field
+  list (`device-edit-field-errors`), `409 device.name_conflict` /
+  `device.identity_conflict` and `403 auth.forbidden` details in
+  `device-edit-error`. Submit is disabled while busy.
+- On success the PATCH payload updates the header immediately via
+  `onUpdated` and `router.refresh()` re-syncs the server props.
+- **Delete** (`device-delete-open`): inline confirm step
+  (`device-delete-confirm-step`) with cancel, then `DELETE /v1/devices/{id}`
+  (session + CSRF). 204 soft-deletes; the UI navigates to `/devices`, whose
+  list no longer contains the device. Errors render in `device-delete-error`.
+- Non-admin callers see `device-admin-readonly` (API enforces admin role +
+  `device.write` + CSRF regardless).
+
+## 10.3 Credential panel
+
+- **Data source**: `GET /v1/credentials?limit=100` (metadata + `bindings[]`
+  summaries; secrets never appear). Panel states: loading, `403` forbidden,
+  error, empty.
+- **Bound to this device**: bindings with `scope_type=device` and
+  `scope_id=device.id`, one row each with kind, priority and an Unbind button
+  (`POST /v1/credentials/{id}/unbind` `{scope_type:"device", scope_id}`).
+- **Effective for this device**: derived client-side from the binding
+  summaries with the same ordering as `credentials.selectEffective` — scope
+  rank `device > device_group > site > org`, then higher priority, then the
+  lowest credential id (UUIDv7 is time-sortable, i.e. the oldest credential).
+  Device-group membership is not resolvable in this view (and the current
+  server resolver's `groupMembership` hook is nil, so the tier does not win
+  today); if any `device_group` binding exists the result is explicitly
+  labelled provisional. Labelled by design, per the slice brief.
+- **Bind control**: select an existing credential (`GET /v1/credentials`
+  list), optional integer priority (default 0), `POST
+  /v1/credentials/{id}/bind` `{scope_type:"device", scope_id, priority}` with
+  session + CSRF. `409 credential.binding_conflict` ("already bound"), `404
+  credential.target_not_found` and every other problem+json detail render in
+  `device-credentials-bind-error`. The panel reloads after bind/unbind; the
+  bind request carries only a credential id (no secret material), and secrets
+  are never returned or rendered by this panel.
+- **Hint/link**: `device-credentials-create-link` points to `/credentials`
+  where the existing create form lives (and the page's stale API-only footer
+  was corrected).
+- **Permission semantics**: the whole credential surface is org-wide
+  (`requireOrgScope`): a caller with site/device scope bindings gets
+  `403 auth.forbidden` "credential management requires org-wide scope" on
+  list, bind and unbind; the panel renders that detail in
+  `device-credentials-forbidden`/`device-credentials-bind-error`. Edit/delete
+  require the admin role + `device.write`; non-admins get the readonly note.
+
+## 10.4 Tests and observed results
+
+Environment: Windows 11 dev host, Docker Desktop (WSL2), dev compose stack
+rebuilt (`docker compose -f deployments/compose/docker-compose.dev.yml up -d
+--build web`), Playwright against `http://127.0.0.1:3000` with the real API.
+
+| Command | Result |
+|---|---|
+| `npm run build` (web/) | **pass** (Next.js 16.3.7, TypeScript clean) |
+| `npx playwright test e2e/device-admin.spec.ts --reporter=list` | **pass, 4/4** (3.5 s) |
+| `npx playwright test --reporter=list` (full suite) | **pass, 22/22** (22.6 s, 4 workers): 18 pre-existing + 4 new, all green |
+
+The new spec covers: (1) mgmt_ip edit → header updated, plus the 400
+field-error path; (2) credential created via the API, bound with priority 5 →
+device row + effective credential, duplicate bind → `binding_conflict`, unbind
+→ gone; (3) delete with cancel then confirm → back on `/devices` and the row
+is absent; (4) intercepted `403` on PATCH and bind → server problem detail
+rendered (the dev caller is org-wide, so the 403 paths need interception to be
+observable).
+
+## 10.5 Decisions and limitations (M10-S3a)
+
+1. **No backend change**: PATCH/DELETE devices, GET credentials with binding
+   summaries, and bind/unbind all existed and were used as documented in
+   `openapi/argus.v1.yaml` (§§ device + credentials). The device_group tier in
+   the effective label is provisional until group membership is resolvable.
+2. **`null` means clear** in the edit form: blanking a nullable field clears
+   it; this is deliberate and surfaced in the labels. `site_id`, `status`,
+   `poll_profile`, `firmware` and `metadata` are not edited here (out of the
+   reported gap).
+3. **Soft delete, not hard delete**: the API soft-deletes and the list hides
+   it; there is no undelete UI in this slice.
+4. **Credential panel is admin-gated in the UI** and org-wide-gated by the
+   API; a scoped admin sees the 403 detail rather than controls. Non-admin
+   users see the readonly note and no bindings.
+5. **Effective credential can change after bind/unbind** (site/org fallbacks),
+   so the panel always reloads; a bounded `limit=100` list is used (no
+   pagination beyond one page).
+6. **Not addressed** (still out of scope): credential edit of non-secret
+   metadata, device-group binding UI, undoing a device delete, and surfacing
+   the effective credential on the devices list.

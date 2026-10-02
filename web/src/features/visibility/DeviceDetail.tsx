@@ -7,6 +7,8 @@ import { fetchJSON } from "@/lib/api";
 
 import AvailabilityRibbon from "./AvailabilityRibbon";
 import CheckRunner from "./CheckRunner";
+import DeviceAdminPanel from "./DeviceAdminPanel";
+import DeviceCredentialPanel from "./DeviceCredentialPanel";
 import StatusChip from "./StatusChip";
 import TimeSeriesChart, {
   type ChartMeta,
@@ -148,6 +150,13 @@ export default function DeviceDetail({
   siteName: string | null;
   role: string;
 }) {
+  // current mirrors the server-resolved device and is updated in place after a
+  // successful edit (M10-S3a), so the header reflects the change immediately;
+  // router.refresh() then re-syncs the server data.
+  const [current, setCurrent] = useState<Device>(device);
+  useEffect(() => {
+    setCurrent(device);
+  }, [device]);
   const [status, setStatus] = useState<DeviceStatus | null>(null);
   const [statusError, setStatusError] = useState("");
   const [identity, setIdentity] = useState<IdentityRecord[] | null>(null);
@@ -360,8 +369,8 @@ export default function DeviceDetail({
       <section className="panel" data-testid="device-header">
         <div className="detail-head">
           <h1 style={{ margin: 0 }}>
-            {device.name}{" "}
-            {device.critical && (
+            {current.name}{" "}
+            {current.critical && (
               <span
                 className="status status-stale"
                 data-testid="device-critical"
@@ -378,14 +387,14 @@ export default function DeviceDetail({
           />
         </div>
         <p className="muted" style={{ marginTop: 8 }}>
-          {device.kind} ·{" "}
+          {current.kind} ·{" "}
           {siteName ? (
-            <Link href={`/sites/${device.site_id}`}>{siteName}</Link>
+            <Link href={`/sites/${current.site_id}`}>{siteName}</Link>
           ) : (
-            device.site_id
+            current.site_id
           )}{" "}
-          · mgmt IP {device.mgmt_ip ?? "—"} · inventory status{" "}
-          {device.status} · poll profile {device.poll_profile}
+          · mgmt IP {current.mgmt_ip ?? "—"} · inventory status{" "}
+          {current.status} · poll profile {current.poll_profile}
         </p>
         {statusError ? (
           <p className="error" data-testid="device-status-error">
@@ -422,6 +431,13 @@ export default function DeviceDetail({
             </li>
           </ul>
         )}
+        <div style={{ marginTop: 12 }}>
+          <DeviceAdminPanel
+            device={current}
+            canWrite={role === "admin"}
+            onUpdated={setCurrent}
+          />
+        </div>
       </section>
 
       <section className="panel" style={{ marginTop: 16 }}>
@@ -530,6 +546,12 @@ export default function DeviceDetail({
           </table>
         )}
       </section>
+
+      <DeviceCredentialPanel
+        deviceID={device.id}
+        siteID={current.site_id}
+        canManage={role === "admin"}
+      />
 
       <section className="panel" style={{ marginTop: 16 }}>
         <h2 style={{ marginTop: 0 }}>ICMP health</h2>

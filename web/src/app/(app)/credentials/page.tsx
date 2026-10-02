@@ -128,8 +128,10 @@ export default async function CredentialsPage() {
       )}
       <p className="muted" style={{ marginTop: 16 }}>
         Secrets are write-only: the API returns metadata only and there is no
-        reveal action for any role. Bindings are managed through the API
-        (<code>/v1/credentials/&#123;id&#125;/bind</code>) until the M10 surface.
+        reveal action for any role. Bind a credential to a device from that
+        device&apos;s detail page (SNMP credentials panel), which posts
+        <code>/v1/credentials/&#123;id&#125;/bind</code> and
+        <code>/unbind</code>.
       </p>
     </section>
   );
