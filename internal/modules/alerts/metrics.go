@@ -24,6 +24,30 @@ var (
 		Namespace: "argus", Subsystem: "alerts", Name: "storm_suppressed_total",
 		Help: "New alerts created Suppressed(storm) by the per-device burst limiter.",
 	})
+
+	// M11-S3a: alerts entering Suppressed(maintenance|silence).
+	alertsSuppressionTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "argus", Subsystem: "alerts", Name: "suppressed_total",
+		Help: "Alert suppression entries by reason (maintenance|silence).",
+	}, []string{"reason"})
+
+	// M11-S3a SSE alert stream: live connection gauge and the drop policy
+	// counter. Drops are recoverable: a client resumes with Last-Event-ID and
+	// replays from the retained buffer or PostgreSQL (docs/12 §22.16).
+	alertsStreamClients = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "argus", Subsystem: "alerts", Name: "stream_clients",
+		Help: "Currently connected /v1/streams/events SSE clients.",
+	})
+
+	alertsStreamDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "argus", Subsystem: "alerts", Name: "stream_dropped_total",
+		Help: "SSE events dropped by reason (buffer_full|write_error).",
+	}, []string{"reason"})
+
+	alertsStreamEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "argus", Subsystem: "alerts", Name: "stream_events_total",
+		Help: "SSE alert events delivered by canonical event name.",
+	}, []string{"event"})
 )
 
 // RegisterMetrics registers the evaluator instruments on the ops registry.
@@ -31,5 +55,9 @@ func RegisterMetrics(tel *telemetry.Registry) {
 	if tel == nil {
 		return
 	}
-	tel.MustRegister(alertsEvaluations, alertsTransitions, alertsStormSuppressed)
+	tel.MustRegister(
+		alertsEvaluations, alertsTransitions, alertsStormSuppressed,
+		alertsSuppressionTotal,
+		alertsStreamClients, alertsStreamDropped, alertsStreamEvents,
+	)
 }

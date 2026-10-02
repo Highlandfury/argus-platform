@@ -36,9 +36,10 @@ type Evaluator struct {
 	maxTargets     int
 	maxGrid        int
 	reopenCooldown time.Duration
-	// sink consumes committed transitions (M11-S2 notify engine). Nil means
-	// notifications are disabled; evaluation semantics are unaffected.
-	sink TransitionSink
+	// sinks consume committed transitions (M11-S2 notify engine, M11-S3a SSE
+	// stream hub). Nil/empty means no consumers; evaluation semantics are
+	// unaffected.
+	sinks []TransitionSink
 }
 
 // EvaluatorOptions configures the evaluator. Zero values take the documented
@@ -93,8 +94,13 @@ func NewEvaluator(app *pgxpool.Pool, opts EvaluatorOptions) *Evaluator {
 // Now returns the evaluator's current instant.
 func (e *Evaluator) Now() time.Time { return e.now().UTC() }
 
-// SetSink installs the committed-transition consumer (notify engine).
-func (e *Evaluator) SetSink(sink TransitionSink) { e.sink = sink }
+// SetSink installs the committed-transition consumer (notify engine),
+// replacing any previously installed sinks.
+func (e *Evaluator) SetSink(sink TransitionSink) { e.sinks = []TransitionSink{sink} }
+
+// AddSink appends a committed-transition consumer (SSE stream hub) without
+// replacing the installed sinks.
+func (e *Evaluator) AddSink(sink TransitionSink) { e.sinks = append(e.sinks, sink) }
 
 // Summary is the outcome of one EvaluateOnce call.
 type Summary struct {
@@ -149,7 +155,7 @@ func (e *Evaluator) EvaluateRule(ctx context.Context, orgID uuid.UUID, rule Rule
 		}
 		sum.Targets = len(targets)
 		for _, tg := range targets {
-			transition, tr, err := e.evaluateTarget(ctx, tx, orgID, rule, tg, now)
+			transition, trs, err := e.evaluateTarget(ctx, tx, orgID, rule, tg, now)
 			if err != nil {
 				return err
 			}
@@ -157,9 +163,7 @@ func (e *Evaluator) EvaluateRule(ctx context.Context, orgID uuid.UUID, rule Rule
 				sum.Transitions++
 				alertsTransitions.WithLabelValues(transition).Inc()
 			}
-			if tr != nil {
-				transitions = append(transitions, *tr)
-			}
+			transitions = append(transitions, trs...)
 			alertsEvaluations.WithLabelValues("ok").Inc()
 		}
 		return nil
@@ -168,9 +172,12 @@ func (e *Evaluator) EvaluateRule(ctx context.Context, orgID uuid.UUID, rule Rule
 		alertsEvaluations.WithLabelValues("error").Inc()
 		return sum, err
 	}
-	if e.sink != nil {
+	for _, sink := range e.sinks {
+		if sink == nil {
+			continue
+		}
 		for _, tr := range transitions {
-			e.sink.Transitioned(ctx, tr)
+			sink.Transitioned(ctx, tr)
 		}
 	}
 	return sum, nil
@@ -208,10 +215,11 @@ func (e *Evaluator) loadEnabledRules(ctx context.Context, orgID uuid.UUID) ([]Ru
 // target is one evaluation target: a resolved (device, series) pair, or a
 // bare device for poll-health absence rules.
 type target struct {
-	DeviceID uuid.UUID
-	SiteID   uuid.UUID
-	SeriesID *int64
-	Dims     []byte // canonical dimension subset (fingerprint input)
+	DeviceID   uuid.UUID
+	SiteID     uuid.UUID
+	DeviceKind string
+	SeriesID   *int64
+	Dims       []byte // canonical dimension subset (fingerprint input)
 }
 
 // resolveTargets resolves the rule's scope selector to concrete series/devices.
@@ -219,7 +227,7 @@ type target struct {
 func (e *Evaluator) resolveTargets(ctx context.Context, tx pgx.Tx, rule Rule) ([]target, error) {
 	if rule.Type == TypeAbsence && rule.Condition.Source == SourcePollHealth {
 		rows, err := tx.Query(ctx, `
-			SELECT d.id, d.site_id
+			SELECT d.id, d.site_id, d.kind
 			FROM devices d
 			WHERE d.deleted_at IS NULL
 			  AND ($1::uuid[] IS NULL OR d.site_id = ANY($1::uuid[]))
@@ -235,7 +243,7 @@ func (e *Evaluator) resolveTargets(ctx context.Context, tx pgx.Tx, rule Rule) ([
 		var out []target
 		for rows.Next() {
 			var tg target
-			if err := rows.Scan(&tg.DeviceID, &tg.SiteID); err != nil {
+			if err := rows.Scan(&tg.DeviceID, &tg.SiteID, &tg.DeviceKind); err != nil {
 				return nil, err
 			}
 			tg.Dims = []byte("{}")
@@ -249,7 +257,7 @@ func (e *Evaluator) resolveTargets(ctx context.Context, tx pgx.Tx, rule Rule) ([
 		dims = sortedDimensions(rule.Selector.Dimensions)
 	}
 	rows, err := tx.Query(ctx, `
-		SELECT ms.id, ms.device_id, d.site_id, ms.dimensions
+		SELECT ms.id, ms.device_id, d.site_id, d.kind, ms.dimensions
 		FROM metric_series ms
 		JOIN devices d ON d.id = ms.device_id AND d.org_id = ms.org_id
 		WHERE ms.device_id IS NOT NULL
@@ -276,7 +284,7 @@ func (e *Evaluator) resolveTargets(ctx context.Context, tx pgx.Tx, rule Rule) ([
 			raw []byte
 			sID int64
 		)
-		if err := rows.Scan(&sID, &tg.DeviceID, &tg.SiteID, &raw); err != nil {
+		if err := rows.Scan(&sID, &tg.DeviceID, &tg.SiteID, &tg.DeviceKind, &raw); err != nil {
 			return nil, err
 		}
 		id := sID
@@ -315,9 +323,13 @@ func canonicalDimensions(raw []byte) []byte {
 }
 
 // evaluateTarget runs the state machine for one target and returns the
-// transition name ("" when the state is unchanged) for metrics plus the
-// notify-worthy transition when one occurred (activated/reactivated/resolved).
-func (e *Evaluator) evaluateTarget(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, rule Rule, tg target, now time.Time) (string, *Transition, error) {
+// transition name ("" when the state is unchanged) for metrics plus every
+// committed timeline event for the sinks. Active maintenance windows and
+// silences (docs/10 §17.6) project the suppression reason onto the alert and
+// hold a firing alert in the canonical Suppressed state; every transition
+// produced while a suppression applies carries Transition.Suppressed so the
+// notify engine never dispatches it.
+func (e *Evaluator) evaluateTarget(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, rule Rule, tg target, now time.Time) (string, []Transition, error) {
 	fp := Fingerprint(rule.RuleID, "device", tg.DeviceID, tg.Dims)
 	open, found, err := findOpenAlert(ctx, tx, orgID, fp)
 	if err != nil {
@@ -334,6 +346,14 @@ func (e *Evaluator) evaluateTarget(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 			return "", nil, nil
 		}
 		return e.openAlert(ctx, tx, orgID, rule, tg, fp, now, triggerData)
+	}
+
+	// Effective suppression at this evaluation instant (silences first, then
+	// maintenance windows). It gates notification dispatch and, for a firing
+	// active alert, moves it into the canonical Suppressed state.
+	plan, err := e.activeSuppression(ctx, tx, orgID, tg, &open.ID, fp, now)
+	if err != nil {
+		return "", nil, err
 	}
 
 	if open.State == StatePending {
@@ -362,39 +382,49 @@ func (e *Evaluator) evaluateTarget(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 			activate = true
 		}
 		if !activate {
+			newReason, newRef := effectiveSuppression(plan, open.State, open.SuppressionReason, open.SuppressionRef)
 			_, err := tx.Exec(ctx, `
-				UPDATE alerts SET value = $2::jsonb, last_evaluated_at = $3 WHERE id = $1`,
-				open.ID, mustMarshal(triggerData), now)
+				UPDATE alerts SET value = $2::jsonb, last_evaluated_at = $3,
+					suppression_reason = $4, suppression_ref = $5
+				WHERE id = $1`,
+				open.ID, mustMarshal(triggerData), now, newReason, newRef)
 			if err != nil {
 				return "", nil, err
 			}
 			return "", nil, nil
 		}
-		_, err := tx.Exec(ctx, `
-			UPDATE alerts SET state = 'active', value = $2::jsonb, last_evaluated_at = $3 WHERE id = $1`,
-			open.ID, mustMarshal(triggerData), now)
-		if err != nil {
-			return "", nil, err
-		}
-		ev, err := appendEvent(ctx, tx, orgID, open.ID, EventActivated, nil, map[string]any{
-			"from": StatePending, "to": StateActive, "value": triggerData,
-		}, now)
-		if err != nil {
-			return "", nil, err
-		}
-		activated := open
-		activated.State = StateActive
-		activated.SiteID = tg.SiteID
-		activated.Value = mustMarshal(triggerData)
-		activated.LastEvaluatedAt = now
-		return StateActive, &Transition{Alert: activated, Event: ev}, nil
+		return e.activatePending(ctx, tx, orgID, open, tg, now, triggerData, plan)
 	}
 
 	// Open, past-pending states: active | acknowledged | snoozed | suppressed.
 	state := open.State
-	var reactivation *Transition
+	transitionName := ""
+	var (
+		transitions  []Transition
+		reactivation *Transition
+	)
 	if state == StateSnoozed && open.SnoozeUntil != nil && !now.Before(*open.SnoozeUntil) {
-		if trigger {
+		switch {
+		case trigger && plan.active():
+			// The snooze expires while a suppression is active: the alert is
+			// still firing, so it enters the canonical Suppressed state
+			// instead of reactivating (no notification).
+			state = StateSuppressed
+			if _, err := tx.Exec(ctx, `
+				UPDATE alerts SET state = 'suppressed', snooze_until = NULL,
+					suppression_reason = $2, suppression_ref = $3
+				WHERE id = $1`,
+				open.ID, plan.Reason, plan.Ref); err != nil {
+				return "", nil, err
+			}
+			tr, err := e.suppressedTransition(ctx, tx, orgID, open, tg, plan, StateSnoozed, now)
+			if err != nil {
+				return "", nil, err
+			}
+			transitions = append(transitions, tr)
+			transitionName = StateSuppressed
+			alertsSuppressionTotal.WithLabelValues(plan.Reason).Inc()
+		case trigger:
 			state = StateActive
 			if _, err := tx.Exec(ctx, `UPDATE alerts SET state = 'active', snooze_until = NULL WHERE id = $1`, open.ID); err != nil {
 				return "", nil, err
@@ -412,36 +442,83 @@ func (e *Evaluator) evaluateTarget(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 			reactivated.Value = mustMarshal(triggerData)
 			reactivated.LastEvaluatedAt = now
 			reactivation = &Transition{Alert: reactivated, Event: ev}
-		} else {
+		default:
 			state = StateActive
 			if _, err := tx.Exec(ctx, `UPDATE alerts SET state = 'active', snooze_until = NULL WHERE id = $1`, open.ID); err != nil {
 				return "", nil, err
 			}
-			if _, err := appendEvent(ctx, tx, orgID, open.ID, EventUnsnoozed, nil, map[string]any{
+			ev, err := appendEvent(ctx, tx, orgID, open.ID, EventUnsnoozed, nil, map[string]any{
 				"from": StateSnoozed, "to": StateActive, "reason": "snooze expired; condition no longer true",
-			}, now); err != nil {
+			}, now)
+			if err != nil {
 				return "", nil, err
 			}
+			unsnoozed := open
+			unsnoozed.State = StateActive
+			unsnoozed.SiteID = tg.SiteID
+			unsnoozed.SnoozeUntil = nil
+			unsnoozed.LastEvaluatedAt = now
+			transitions = append(transitions, Transition{Alert: unsnoozed, Event: ev})
 		}
 	}
 
 	if trigger {
+		// Suppression cleared while still firing: reactivate (re-notify) or
+		// restart the for_duration when continuity was broken.
+		if state == StateSuppressed && suppressionTimeBased(open.SuppressionReason) && !plan.active() {
+			return e.unsuppress(ctx, tx, orgID, rule, open, tg, now, triggerData)
+		}
+		if plan.active() && state == StateActive {
+			// Entering a suppression: state -> suppressed, reason recorded;
+			// no notification is dispatched.
+			if _, err := tx.Exec(ctx, `
+				UPDATE alerts SET state = 'suppressed', suppression_reason = $2, suppression_ref = $3,
+					value = $4::jsonb, last_evaluated_at = $5
+				WHERE id = $1`,
+				open.ID, plan.Reason, plan.Ref, mustMarshal(triggerData), now); err != nil {
+				return "", nil, err
+			}
+			tr, err := e.suppressedTransition(ctx, tx, orgID, open, tg, plan, StateActive, now)
+			if err != nil {
+				return "", nil, err
+			}
+			transitions = append(transitions, tr)
+			alertsSuppressionTotal.WithLabelValues(plan.Reason).Inc()
+			return StateSuppressed, transitions, nil
+		}
 		// Dedup (docs/10 §17.4): the repeat updates value/last_evaluated_at
-		// and appends an event; the row is never duplicated.
+		// and appends an event; the row is never duplicated. The suppression
+		// projection is refreshed (an acknowledged alert stays acknowledged
+		// but shows why it is not paging; a planned window/silence replaces a
+		// storm reason while it applies, and the storm remains on the
+		// timeline).
+		newReason, newRef := effectiveSuppression(plan, state, open.SuppressionReason, open.SuppressionRef)
 		if _, err := tx.Exec(ctx, `
-			UPDATE alerts SET value = $2::jsonb, last_evaluated_at = $3 WHERE id = $1`,
-			open.ID, mustMarshal(triggerData), now); err != nil {
+			UPDATE alerts SET value = $2::jsonb, last_evaluated_at = $3,
+				suppression_reason = $4, suppression_ref = $5
+			WHERE id = $1`,
+			open.ID, mustMarshal(triggerData), now, newReason, newRef); err != nil {
 			return "", nil, err
 		}
-		if _, err := appendEvent(ctx, tx, orgID, open.ID, EventUpdated, nil, map[string]any{
+		ev, err := appendEvent(ctx, tx, orgID, open.ID, EventUpdated, nil, map[string]any{
 			"value": triggerData,
-		}, now); err != nil {
+		}, now)
+		if err != nil {
 			return "", nil, err
 		}
+		updated := open
+		updated.State = state
+		updated.SiteID = tg.SiteID
+		updated.Value = mustMarshal(triggerData)
+		updated.LastEvaluatedAt = now
+		updated.SuppressionReason = newReason
+		updated.SuppressionRef = newRef
+		transitions = append(transitions, Transition{Alert: updated, Event: ev, Suppressed: plan.active()})
 		if reactivation != nil {
-			return StateActive, reactivation, nil
+			transitions = append([]Transition{*reactivation}, transitions...)
+			return StateActive, transitions, nil
 		}
-		return "", nil, nil
+		return transitionName, transitions, nil
 	}
 
 	// Recovery path: the logical inverse must hold continuously for the
@@ -452,12 +529,26 @@ func (e *Evaluator) evaluateTarget(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 		return "", nil, err
 	}
 	if !recovered {
+		newReason, newRef := effectiveSuppression(plan, state, open.SuppressionReason, open.SuppressionRef)
 		if _, err := tx.Exec(ctx, `
-			UPDATE alerts SET value = $2::jsonb, last_evaluated_at = $3 WHERE id = $1`,
-			open.ID, mustMarshal(triggerData), now); err != nil {
+			UPDATE alerts SET value = $2::jsonb, last_evaluated_at = $3,
+				suppression_reason = $4, suppression_ref = $5
+			WHERE id = $1`,
+			open.ID, mustMarshal(triggerData), now, newReason, newRef); err != nil {
 			return "", nil, err
 		}
-		return "", nil, nil
+		return transitionName, transitions, nil
+	}
+	// Resolving under an active suppression is never notified; neither is a
+	// resolution of an alert that never activated outside a suppression
+	// (storm or window/silence born already suppressed).
+	suppressed := plan.active()
+	if !suppressed && state == StateSuppressed {
+		activated, err := hasActivationEvent(ctx, tx, open.ID)
+		if err != nil {
+			return "", nil, err
+		}
+		suppressed = !activated
 	}
 	_, err = tx.Exec(ctx, `
 		UPDATE alerts SET state = 'resolved', resolved_at = $2, snooze_until = NULL, last_evaluated_at = $2, value = $3::jsonb
@@ -467,7 +558,7 @@ func (e *Evaluator) evaluateTarget(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 		return "", nil, err
 	}
 	ev, err := appendEvent(ctx, tx, orgID, open.ID, EventResolved, nil, map[string]any{
-		"from": state, "to": StateResolved, "recovery": recData,
+		"from": state, "to": StateResolved, "recovery": recData, "suppressed": suppressed,
 	}, now)
 	if err != nil {
 		return "", nil, err
@@ -479,31 +570,187 @@ func (e *Evaluator) evaluateTarget(ctx context.Context, tx pgx.Tx, orgID uuid.UU
 	resolved.SnoozeUntil = nil
 	resolved.Value = mustMarshal(recData)
 	resolved.LastEvaluatedAt = now
-	return StateResolved, &Transition{Alert: resolved, Event: ev}, nil
+	transitions = append(transitions, Transition{Alert: resolved, Event: ev, Suppressed: suppressed})
+	return StateResolved, transitions, nil
+}
+
+// effectiveSuppression projects the suppression fields for an open alert:
+// an active window/silence always wins; otherwise a time-based suppression is
+// cleared and a storm suppression is retained (storm has no time-based expiry
+// and is ended by recovery or an operator resolve).
+func effectiveSuppression(plan suppressionPlan, currentState, currentReason string, currentRef *uuid.UUID) (string, *uuid.UUID) {
+	if plan.active() {
+		return plan.Reason, plan.Ref
+	}
+	if currentState == StateSuppressed && currentReason == SuppressionStorm {
+		return SuppressionStorm, currentRef
+	}
+	return "", nil
+}
+
+// suppressionTimeBased reports whether a suppression reason ends by time
+// (as opposed to the storm limiter).
+func suppressionTimeBased(reason string) bool {
+	return reason == SuppressionMaintenance || reason == SuppressionSilence
+}
+
+// suppressedTransition records the alert entering the Suppressed state and
+// returns the stream-only transition (never dispatched to channels).
+func (e *Evaluator) suppressedTransition(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, open Alert, tg target, plan suppressionPlan, from string, now time.Time) (Transition, error) {
+	data := map[string]any{"from": from, "to": StateSuppressed, "reason": plan.Reason}
+	if plan.Ref != nil {
+		data["ref_id"] = plan.Ref.String()
+	}
+	ev, err := appendEvent(ctx, tx, orgID, open.ID, EventSuppressed, nil, data, now)
+	if err != nil {
+		return Transition{}, err
+	}
+	s := open
+	s.State = StateSuppressed
+	s.SiteID = tg.SiteID
+	s.SuppressionReason = plan.Reason
+	s.SuppressionRef = plan.Ref
+	s.LastEvaluatedAt = now
+	return Transition{Alert: s, Event: ev, Suppressed: true}, nil
+}
+
+// activatePending completes the Pending -> (Active|Suppressed) edge.
+func (e *Evaluator) activatePending(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, open Alert, tg target, now time.Time, value map[string]any, plan suppressionPlan) (string, []Transition, error) {
+	if plan.active() {
+		if _, err := tx.Exec(ctx, `
+			UPDATE alerts SET state = 'suppressed', suppression_reason = $2, suppression_ref = $3,
+				value = $4::jsonb, last_evaluated_at = $5
+			WHERE id = $1`,
+			open.ID, plan.Reason, plan.Ref, mustMarshal(value), now); err != nil {
+			return "", nil, err
+		}
+		tr, err := e.suppressedTransition(ctx, tx, orgID, open, tg, plan, StatePending, now)
+		if err != nil {
+			return "", nil, err
+		}
+		alertsSuppressionTotal.WithLabelValues(plan.Reason).Inc()
+		return StateSuppressed, []Transition{tr}, nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE alerts SET state = 'active', suppression_reason = '', suppression_ref = NULL,
+			value = $2::jsonb, last_evaluated_at = $3
+		WHERE id = $1`,
+		open.ID, mustMarshal(value), now); err != nil {
+		return "", nil, err
+	}
+	ev, err := appendEvent(ctx, tx, orgID, open.ID, EventActivated, nil, map[string]any{
+		"from": StatePending, "to": StateActive, "value": value,
+	}, now)
+	if err != nil {
+		return "", nil, err
+	}
+	activated := open
+	activated.State = StateActive
+	activated.SiteID = tg.SiteID
+	activated.Value = mustMarshal(value)
+	activated.LastEvaluatedAt = now
+	activated.SuppressionReason = ""
+	activated.SuppressionRef = nil
+	return StateActive, []Transition{{Alert: activated, Event: ev}}, nil
+}
+
+// unsuppress ends a time-based suppression while the condition is still true:
+// Suppressed -> Active (reactivated, re-notified) when the for_duration
+// continuity holds, otherwise the onset restarts as Pending so a subsequent
+// activation satisfies the canonical for_duration semantics.
+func (e *Evaluator) unsuppress(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, rule Rule, open Alert, tg target, now time.Time, value map[string]any) (string, []Transition, error) {
+	activate := rule.Condition.ForDuration <= 0
+	if !activate {
+		cont, err := e.continuousTrigger(ctx, tx, rule, tg, open.StartedAt, now)
+		if err != nil {
+			return "", nil, err
+		}
+		activate = cont
+	}
+	priorReason := open.SuppressionReason
+	if !activate {
+		if _, err := tx.Exec(ctx, `
+			UPDATE alerts SET state = 'pending', started_at = $2, suppression_reason = '',
+				suppression_ref = NULL, value = $3::jsonb, last_evaluated_at = $2
+			WHERE id = $1`,
+			open.ID, now, mustMarshal(value)); err != nil {
+			return "", nil, err
+		}
+		ev, err := appendEvent(ctx, tx, orgID, open.ID, EventUnsuppressed, nil, map[string]any{
+			"from": StateSuppressed, "to": StatePending, "reason": priorReason,
+			"note": "suppression ended before for_duration continuity",
+		}, now)
+		if err != nil {
+			return "", nil, err
+		}
+		pending := open
+		pending.State = StatePending
+		pending.SiteID = tg.SiteID
+		pending.StartedAt = now
+		pending.SuppressionReason = ""
+		pending.SuppressionRef = nil
+		pending.Value = mustMarshal(value)
+		pending.LastEvaluatedAt = now
+		return StatePending, []Transition{{Alert: pending, Event: ev}}, nil
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE alerts SET state = 'active', suppression_reason = '', suppression_ref = NULL,
+			value = $2::jsonb, last_evaluated_at = $3
+		WHERE id = $1`,
+		open.ID, mustMarshal(value), now); err != nil {
+		return "", nil, err
+	}
+	ev, err := appendEvent(ctx, tx, orgID, open.ID, EventReactivated, nil, map[string]any{
+		"from": StateSuppressed, "to": StateActive, "value": value,
+		"suppression_cleared": true, "prior_reason": priorReason,
+	}, now)
+	if err != nil {
+		return "", nil, err
+	}
+	activated := open
+	activated.State = StateActive
+	activated.SiteID = tg.SiteID
+	activated.SuppressionReason = ""
+	activated.SuppressionRef = nil
+	activated.Value = mustMarshal(value)
+	activated.LastEvaluatedAt = now
+	return StateActive, []Transition{{Alert: activated, Event: ev}}, nil
 }
 
 // openAlert inserts a new alert row (Pending, or Active when for_duration is
-// zero, or Suppressed(storm) when the device is over the storm threshold) and
-// its onset events. It returns the transition name for metrics plus the
-// notify-worthy transition when the alert opens Active.
-func (e *Evaluator) openAlert(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, rule Rule, tg target, fp string, now time.Time, value map[string]any) (string, *Transition, error) {
+// zero, or Suppressed when the device is over the storm threshold or an active
+// maintenance window/silence matches) and its onset events. It returns the
+// transition name for metrics plus every committed event for the sinks.
+func (e *Evaluator) openAlert(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, rule Rule, tg target, fp string, now time.Time, value map[string]any) (string, []Transition, error) {
 	// Manual-resolve cooldown: a re-fire within the cooldown reopens the same
 	// row (canonical docs/10 §17.5: no duplicate).
-	reopened, reopenedTr, err := e.tryReopen(ctx, tx, orgID, rule, tg, fp, now, value)
+	reopened, reopenedTrs, err := e.tryReopen(ctx, tx, orgID, rule, tg, fp, now, value)
 	if err != nil {
 		return "", nil, err
 	}
 	if reopened {
-		return EventReopened, reopenedTr, nil
+		return EventReopened, reopenedTrs, nil
 	}
 
 	storm, count, err := e.stormExceeds(ctx, tx, orgID, tg.DeviceID, now)
 	if err != nil {
 		return "", nil, err
 	}
+	// Suppression first: a planned window/silence explains the mute better
+	// than the storm limiter (documented precedence).
+	plan, err := e.activeSuppression(ctx, tx, orgID, tg, nil, fp, now)
+	if err != nil {
+		return "", nil, err
+	}
 	state := StatePending
 	suppression := ""
+	var suppressionRef *uuid.UUID
 	switch {
+	case plan.active():
+		state = StateSuppressed
+		suppression = plan.Reason
+		suppressionRef = plan.Ref
+		alertsSuppressionTotal.WithLabelValues(plan.Reason).Inc()
 	case storm:
 		state = StateSuppressed
 		suppression = SuppressionStorm
@@ -520,10 +767,10 @@ func (e *Evaluator) openAlert(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, r
 		INSERT INTO alerts
 			(id, org_id, rule_id, rule_version, fingerprint, resource_type, resource_id,
 			 dimension_subset, state, severity, value, started_at, last_evaluated_at,
-			 suppression_reason, created_at)
-		VALUES ($1, $2, $3, $4, $5, 'device', $6, $7::jsonb, $8, $9, $10::jsonb, $11, $11, $12, $11)`,
+			 suppression_reason, suppression_ref, created_at)
+		VALUES ($1, $2, $3, $4, $5, 'device', $6, $7::jsonb, $8, $9, $10::jsonb, $11, $11, $12, $13, $11)`,
 		id, orgID, rule.RuleID, rule.Version, fp, tg.DeviceID, string(tg.Dims),
-		state, rule.Severity, mustMarshal(value), now, suppression)
+		state, rule.Severity, mustMarshal(value), now, suppression, suppressionRef)
 	if err != nil {
 		return "", nil, err
 	}
@@ -532,13 +779,15 @@ func (e *Evaluator) openAlert(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, r
 		Fingerprint: fp, ResourceType: "device", ResourceID: tg.DeviceID,
 		DimensionSubset: tg.Dims, State: state, Severity: rule.Severity,
 		Value: mustMarshal(value), StartedAt: now, LastEvaluatedAt: now,
-		SuppressionReason: suppression, CreatedAt: now, SiteID: tg.SiteID,
+		SuppressionReason: suppression, SuppressionRef: suppressionRef,
+		CreatedAt: now, SiteID: tg.SiteID,
 	}
 	if _, err := appendEvent(ctx, tx, orgID, id, EventPending, nil, map[string]any{
 		"value": value, "for_duration": rule.Condition.ForDuration.String(),
 	}, now); err != nil {
 		return "", nil, err
 	}
+	var transitions []Transition
 	switch state {
 	case StateActive:
 		ev, err := appendEvent(ctx, tx, orgID, id, EventActivated, nil, map[string]any{
@@ -547,22 +796,29 @@ func (e *Evaluator) openAlert(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, r
 		if err != nil {
 			return "", nil, err
 		}
-		return StateActive, &Transition{Alert: alert, Event: ev}, nil
+		transitions = append(transitions, Transition{Alert: alert, Event: ev})
 	case StateSuppressed:
-		if _, err := appendEvent(ctx, tx, orgID, id, EventSuppressed, nil, map[string]any{
-			"from": StatePending, "to": StateSuppressed,
-			"reason": SuppressionStorm, "recent_device_alerts": count,
-		}, now); err != nil {
+		tr, err := e.suppressedTransition(ctx, tx, orgID, alert, tg, suppressionPlan{Reason: suppression, Ref: suppressionRef}, StatePending, now)
+		if err != nil {
 			return "", nil, err
 		}
+		if suppression == SuppressionStorm {
+			// Keep the storm evidence on the event (M11-S1 shape).
+			tr.Event.Data = mustMarshal(map[string]any{
+				"from": StatePending, "to": StateSuppressed,
+				"reason": SuppressionStorm, "recent_device_alerts": count,
+			})
+		}
+		transitions = append(transitions, tr)
 	}
-	return state, nil, nil
+	return state, transitions, nil
 }
 
 // tryReopen reopens a manually resolved alert when the condition re-fires
-// inside the reopen cooldown. Returns true when the same row was reopened and
-// the notify-worthy activated transition when for_duration is zero.
-func (e *Evaluator) tryReopen(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, rule Rule, tg target, fp string, now time.Time, value map[string]any) (bool, *Transition, error) {
+// inside the reopen cooldown. Returns true when the same row was reopened plus
+// every committed event (reopened and, when for_duration is zero, the
+// activated/suppressed edge).
+func (e *Evaluator) tryReopen(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, rule Rule, tg target, fp string, now time.Time, value map[string]any) (bool, []Transition, error) {
 	var (
 		alertID uuid.UUID
 		from    time.Time
@@ -587,23 +843,34 @@ func (e *Evaluator) tryReopen(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, r
 	if err != nil {
 		return false, nil, err
 	}
+	plan, err := e.activeSuppression(ctx, tx, orgID, tg, &alertID, fp, now)
+	if err != nil {
+		return false, nil, err
+	}
 	state := StateActive
 	if rule.Condition.ForDuration > 0 {
 		state = StatePending
 	}
+	suppression, suppressionRef := "", (*uuid.UUID)(nil)
+	if plan.active() {
+		state = StateSuppressed
+		suppression, suppressionRef = plan.Reason, plan.Ref
+	}
 	_, err = tx.Exec(ctx, `
 		UPDATE alerts
 		SET state = $2, started_at = $3, resolved_at = NULL, ack_by = NULL, ack_at = NULL,
-		    snooze_until = NULL, suppression_reason = '', value = $4::jsonb, last_evaluated_at = $3
+		    snooze_until = NULL, suppression_reason = $5, suppression_ref = $6,
+		    value = $4::jsonb, last_evaluated_at = $3
 		WHERE id = $1`,
-		alertID, state, now, mustMarshal(value))
+		alertID, state, now, mustMarshal(value), suppression, suppressionRef)
 	if err != nil {
 		return false, nil, err
 	}
-	if _, err := appendEvent(ctx, tx, orgID, alertID, EventReopened, nil, map[string]any{
+	reopenedEv, err := appendEvent(ctx, tx, orgID, alertID, EventReopened, nil, map[string]any{
 		"manual_resolved_at": from.Format(time.RFC3339),
 		"value":              value,
-	}, now); err != nil {
+	}, now)
+	if err != nil {
 		return false, nil, err
 	}
 	alert := Alert{
@@ -611,25 +878,26 @@ func (e *Evaluator) tryReopen(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, r
 		Fingerprint: fp, ResourceType: "device", ResourceID: tg.DeviceID,
 		DimensionSubset: tg.Dims, State: state, Severity: rule.Severity,
 		Value: mustMarshal(value), StartedAt: now, LastEvaluatedAt: now, CreatedAt: now,
-		SiteID: tg.SiteID,
+		SiteID: tg.SiteID, SuppressionReason: suppression, SuppressionRef: suppressionRef,
 	}
-	tr, err := e.activateIfInstant(ctx, tx, orgID, alert, value, now, state)
-	return true, tr, err
-}
-
-// activateIfInstant activates a reopened Pending alert when for_duration is
-// zero (keeps the Inactive -> Pending -> Active event shape consistent).
-func (e *Evaluator) activateIfInstant(ctx context.Context, tx pgx.Tx, orgID uuid.UUID, alert Alert, value map[string]any, now time.Time, state string) (*Transition, error) {
-	if state != StateActive {
-		return nil, nil
+	transitions := []Transition{{Alert: alert, Event: reopenedEv, Suppressed: plan.active()}}
+	switch state {
+	case StateActive:
+		ev, err := appendEvent(ctx, tx, orgID, alertID, EventActivated, nil, map[string]any{
+			"from": StatePending, "to": StateActive, "value": value,
+		}, now)
+		if err != nil {
+			return false, nil, err
+		}
+		transitions = append(transitions, Transition{Alert: alert, Event: ev})
+	case StateSuppressed:
+		tr, err := e.suppressedTransition(ctx, tx, orgID, alert, tg, plan, StateResolved, now)
+		if err != nil {
+			return false, nil, err
+		}
+		transitions = append(transitions, tr)
 	}
-	ev, err := appendEvent(ctx, tx, orgID, alert.ID, EventActivated, nil, map[string]any{
-		"from": StatePending, "to": StateActive, "value": value,
-	}, now)
-	if err != nil {
-		return nil, err
-	}
-	return &Transition{Alert: alert, Event: ev}, nil
+	return true, transitions, nil
 }
 
 // findOpenAlert loads the fingerprint's open alert with a row lock.

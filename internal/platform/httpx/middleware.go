@@ -16,6 +16,10 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap exposes the underlying writer so http.ResponseController (SSE
+// flushing, write deadlines) can reach it through the logging wrapper.
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+
 // AccessLog emits one structured line per request with method, path, status,
 // duration and the correlation ID.
 func AccessLog(l *slog.Logger, next http.Handler) http.Handler {

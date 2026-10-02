@@ -67,6 +67,7 @@ const (
 	EventUnsnoozed      = "unsnoozed"
 	EventReactivated    = "reactivated"
 	EventSuppressed     = "suppressed"
+	EventUnsuppressed   = "unsuppressed"
 	EventResolved       = "resolved"
 	EventManualResolved = "manual_resolved"
 	EventComment        = "comment"
@@ -81,7 +82,9 @@ const (
 
 // Suppression reasons (alerts.suppression_reason).
 const (
-	SuppressionStorm = "storm"
+	SuppressionStorm       = "storm"
+	SuppressionMaintenance = "maintenance"
+	SuppressionSilence     = "silence"
 )
 
 // Condition operators.
@@ -136,6 +139,13 @@ const (
 	DefaultReopenCooldown = 10 * time.Minute
 	// MaxSnooze bounds a snooze expiry (mirrors the canonical silence bound).
 	MaxSnooze = 30 * 24 * time.Hour
+	// MaxSilence is the canonical mandatory silence expiry bound (docs/10
+	// §17.6: "mandatory expiry (max 30 d)"). It equals MaxSnooze.
+	MaxSilence = MaxSnooze
+	// MaxMaintenanceWindow bounds a maintenance window period (single
+	// interval; the canonical docs give no bound, this is the documented
+	// judgement call).
+	MaxMaintenanceWindow = 365 * 24 * time.Hour
 	// MaxNameLen / MaxCommentLen bound operator-supplied text.
 	MaxNameLen    = 200
 	MaxCommentLen = 2000
@@ -176,6 +186,9 @@ var (
 	ErrScopeRequired    = errors.New("alerts: org-wide rule requires org-wide scope")
 	ErrScopeForbidden   = errors.New("alerts: rule target is outside the caller's scope")
 	ErrAlertSiteUnknown = errors.New("alerts: alert resource has no resolvable site")
+	// M11-S3a suppression objects.
+	ErrWindowNotFound  = errors.New("alerts: maintenance window not found")
+	ErrSilenceNotFound = errors.New("alerts: silence not found")
 )
 
 // ScopeSelector targets the resources a rule evaluates. It mirrors the
@@ -257,7 +270,10 @@ type Alert struct {
 	AckAt             *time.Time
 	SnoozeUntil       *time.Time
 	SuppressionReason string
-	CreatedAt         time.Time
+	// SuppressionRef is the maintenance window or silence id that produced the
+	// current suppression (uuid.Nil when none; the column is nullable).
+	SuppressionRef *uuid.UUID
+	CreatedAt      time.Time
 	// SiteID is the resolved device site for scope enforcement (device
 	// resources only; uuid.Nil for future non-device resources).
 	SiteID uuid.UUID
@@ -292,20 +308,111 @@ type Actor struct {
 	UserID uuid.UUID
 }
 
+// MaintenanceWindow is one maintenance_windows row: a single [starts_at,
+// ends_at) interval that suppresses matching alerts (docs/10 §17.6).
+// Recurrence is V2, so there is no rrule column/field.
+type MaintenanceWindow struct {
+	ID        uuid.UUID
+	OrgID     uuid.UUID
+	Name      string
+	Scope     TargetScope
+	ScopeJSON []byte
+	Enabled   bool
+	StartsAt  time.Time
+	EndsAt    time.Time
+	CreatedBy *uuid.UUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// WindowCreateInput is the validated POST /v1/maintenance-windows body.
+type WindowCreateInput struct {
+	Name      string
+	ScopeJSON []byte
+	Enabled   *bool
+	StartsAt  time.Time
+	EndsAt    time.Time
+}
+
+// WindowPatchInput is the PATCH /v1/maintenance-windows/{id} body: omitted
+// fields keep the current value.
+type WindowPatchInput struct {
+	Name      *string
+	ScopeJSON []byte
+	Enabled   *bool
+	StartsAt  *time.Time
+	EndsAt    *time.Time
+}
+
+// SilenceMatch is the parsed silences.match JSON: an exact alert id, an alert
+// fingerprint, and/or a resource scope. At least one matcher is non-empty.
+type SilenceMatch struct {
+	AlertID     *uuid.UUID
+	Fingerprint string
+	Scope       TargetScope
+}
+
+// Any reports whether at least one matcher is present.
+func (m SilenceMatch) Any() bool {
+	return m.AlertID != nil || m.Fingerprint != "" || !m.Scope.IsEmpty()
+}
+
+// Silence is one silences row.
+type Silence struct {
+	ID        uuid.UUID
+	OrgID     uuid.UUID
+	Match     SilenceMatch
+	MatchJSON []byte
+	Reason    string
+	StartsAt  time.Time
+	EndsAt    time.Time
+	CreatedBy *uuid.UUID
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// SilenceCreateInput is the validated POST /v1/silences body.
+type SilenceCreateInput struct {
+	MatchJSON []byte
+	Reason    string
+	StartsAt  time.Time
+	EndsAt    time.Time
+}
+
+// WindowPage is one cursor page of maintenance windows.
+type WindowPage struct {
+	Windows    []MaintenanceWindow
+	NextCursor string
+	HasMore    bool
+}
+
+// SilencePage is one cursor page of silences.
+type SilencePage struct {
+	Silences   []Silence
+	NextCursor string
+	HasMore    bool
+}
+
 // Transition is one committed alert state transition: the alert snapshot after
 // the transition plus the alert_events row that recorded it (docs/10 §17.7:
 // the notification pipeline consumes transitions). The alerts module emits
 // every state transition to the configured TransitionSink AFTER the tenant
 // transaction commits; it never blocks or rolls back the state machine on a
 // sink error (the sink is best-effort at-least-once enqueue).
+//
+// Suppressed marks a transition that must never reach a notification channel
+// because the alert was suppressed by a maintenance window or silence at the
+// transition instant (M11-S3a, docs/10 §17.6): the notify engine drops it and
+// the SSE stream still delivers it as a timeline update.
 type Transition struct {
-	Alert Alert
-	Event AlertEvent
+	Alert      Alert
+	Event      AlertEvent
+	Suppressed bool
 }
 
 // TransitionSink consumes committed alert transitions. Implemented by the
-// notify engine (internal/modules/notify); an interface here keeps the alerts
-// module free of a notify import.
+// notify engine (internal/modules/notify) and the SSE stream hub; an interface
+// here keeps the alerts module free of those imports.
 type TransitionSink interface {
 	Transitioned(ctx context.Context, t Transition)
 }

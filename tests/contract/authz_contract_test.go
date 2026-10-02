@@ -63,6 +63,25 @@ func isAlertPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/alerts")
 }
 
+// M11-S3a suppression + stream surfaces: /v1/silences,
+// /v1/maintenance-windows (both alert.silence) and /v1/streams/events
+// (alert.read).
+func isSilencePath(path string) bool {
+	return strings.HasPrefix(path, "/v1/silences")
+}
+
+func isMaintenanceWindowPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/maintenance-windows")
+}
+
+func isAlertStreamPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/streams")
+}
+
+func isSuppressionPath(path string) bool {
+	return isSilencePath(path) || isMaintenanceWindowPath(path) || isAlertStreamPath(path)
+}
+
 // M11-S2 notification surface: channels (integration.write), routes
 // (alertrule.write) and the delivery log (alert.read) per docs/12 §22.14.
 func isNotificationChannelPath(path string) bool {
@@ -100,6 +119,9 @@ func capabilityInVocabulary(path, capability string) bool {
 		return authz.IsAlertRuleCapability(capability)
 	}
 	if isAlertPath(path) {
+		return authz.IsAlertCapability(capability)
+	}
+	if isSuppressionPath(path) {
 		return authz.IsAlertCapability(capability)
 	}
 	if isNotificationChannelPath(path) {
@@ -143,10 +165,11 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	inventoryCount, credentialCount, checkCount, pollHealthCount := 0, 0, 0, 0
 	alertRuleCount, alertCount := 0, 0
 	channelCount, routeCount, deliveryCount := 0, 0, 0
+	silenceCount, windowCount, streamCount := 0, 0, 0
 	for _, rt := range api.Routes() {
 		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) && !isCheckPath(rt.Path) &&
 			!isPollHealthPath(rt.Path) && !isAlertRulePath(rt.Path) && !isAlertPath(rt.Path) &&
-			!isNotificationPath(rt.Path) {
+			!isNotificationPath(rt.Path) && !isSuppressionPath(rt.Path) {
 			continue
 		}
 		switch {
@@ -162,6 +185,12 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 			routeCount++
 		case isNotificationDeliveryPath(rt.Path):
 			deliveryCount++
+		case isSilencePath(rt.Path):
+			silenceCount++
+		case isMaintenanceWindowPath(rt.Path):
+			windowCount++
+		case isAlertStreamPath(rt.Path):
+			streamCount++
 		case isAlertRulePath(rt.Path):
 			alertRuleCount++
 		case isAlertPath(rt.Path):
@@ -198,6 +227,15 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	if deliveryCount != 1 {
 		t.Fatalf("notification delivery routes in registry = %d, want 1 (GET /v1/notification/deliveries)", deliveryCount)
 	}
+	if silenceCount != 3 {
+		t.Fatalf("silence routes in registry = %d, want the 3 M11-S3a routes (POST/GET /v1/silences, DELETE /v1/silences/{id})", silenceCount)
+	}
+	if windowCount != 5 {
+		t.Fatalf("maintenance-window routes in registry = %d, want the 5 M11-S3a CRUD routes", windowCount)
+	}
+	if streamCount != 1 {
+		t.Fatalf("stream routes in registry = %d, want 1 (GET /v1/streams/events)", streamCount)
+	}
 	for key, meta := range enforced {
 		if meta.Capability == "" {
 			t.Errorf("route %s %s: missing enforced capability metadata", key.method, key.path)
@@ -221,7 +259,7 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 		path := pair.Key()
 		if !isInventoryPath(path) && !isCredentialPath(path) && !isCheckPath(path) &&
 			!isPollHealthPath(path) && !isAlertRulePath(path) && !isAlertPath(path) &&
-			!isNotificationPath(path) {
+			!isNotificationPath(path) && !isSuppressionPath(path) {
 			continue
 		}
 		item := pair.Value()
@@ -317,6 +355,8 @@ func vocabularyName(path string) string {
 		return "alert-rule"
 	case isAlertPath(path):
 		return "alert"
+	case isSuppressionPath(path):
+		return "alert-suppression"
 	default:
 		return "inventory"
 	}

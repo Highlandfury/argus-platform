@@ -52,6 +52,8 @@ type Options struct {
 	PollHealth        *pollhealth.Service
 	Checks            *checks.Service
 	Alerts            *alerts.Service
+	// AlertsStream is the M11-S3a SSE hub (nil disables the stream route).
+	AlertsStream *alerts.StreamHub
 	// M11-S2 notification pipeline. Engines stay nil in degraded configs;
 	// channel test answers 503 then.
 	Notify       *notify.Service
@@ -128,7 +130,7 @@ func newHandlers(o Options) *handlers {
 		h.checksHTTP = &checks.HTTP{Svc: o.Checks, Devices: o.Inventory}
 	}
 	if o.Alerts != nil {
-		h.alertsHTTP = &alerts.HTTP{Svc: o.Alerts}
+		h.alertsHTTP = &alerts.HTTP{Svc: o.Alerts, Stream: o.AlertsStream}
 	}
 	if o.Notify != nil {
 		h.notifyHTTP = &notify.HTTP{
@@ -609,6 +611,61 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 				return
 			}
 			h.alertsHTTP.CommentAlert(w, r)
+		})
+	case "/v1/maintenance-windows":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.alertsHTTP.CreateWindow(w, r)
+				return
+			}
+			h.alertsHTTP.ListWindows(w, r)
+		})
+	case "/v1/maintenance-windows/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				h.alertsHTTP.UpdateWindow(w, r)
+			case http.MethodDelete:
+				h.alertsHTTP.DeleteWindow(w, r)
+			default:
+				h.alertsHTTP.GetWindow(w, r)
+			}
+		})
+	case "/v1/silences":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.alertsHTTP.CreateSilence(w, r)
+				return
+			}
+			h.alertsHTTP.ListSilences(w, r)
+		})
+	case "/v1/silences/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.DeleteSilence(w, r)
+		})
+	case "/v1/streams/events":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.StreamEvents(w, r)
 		})
 	case "/v1/credentials":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

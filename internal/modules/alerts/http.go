@@ -16,9 +16,11 @@ import (
 
 // HTTP exposes the M11-S1 rules/alerts surface. Session + CSRF + capability
 // are enforced by the router; scope is enforced here against server-side
-// bindings (P2-D5), exactly like the inventory/check surfaces.
+// bindings (P2-D5), exactly like the inventory/check surfaces. Stream is the
+// M11-S3a SSE hub (nil when the stream is not configured).
 type HTTP struct {
-	Svc *Service
+	Svc    *Service
+	Stream *StreamHub
 }
 
 type createRuleRequest struct {
@@ -616,7 +618,11 @@ func alertPayload(a Alert) map[string]any {
 		"ack_at":             nil,
 		"snooze_until":       nil,
 		"suppression_reason": a.SuppressionReason,
+		"suppression_ref":    nil,
 		"created_at":         a.CreatedAt.UTC().Format(time.RFC3339),
+	}
+	if a.SuppressionRef != nil {
+		payload["suppression_ref"] = a.SuppressionRef.String()
 	}
 	if a.ResolvedAt != nil {
 		payload["resolved_at"] = a.ResolvedAt.UTC().Format(time.RFC3339)

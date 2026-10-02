@@ -100,9 +100,20 @@ func DedupKey(channelID, alertID uuid.UUID, eventKind string) string {
 
 // Transitioned implements alerts.TransitionSink. It enqueues one pending
 // delivery per matching (route, channel); enqueue failures are logged and
-// never propagate back into the state machine.
+// never propagate back into the state machine. Transitions suppressed by an
+// active maintenance window or silence (M11-S3a, docs/10 §17.6) are dropped
+// before any route/delivery work: the alert timeline (and SSE stream) still
+// records them.
 func (e *Engine) Transitioned(ctx context.Context, t alerts.Transition) {
 	if !alerts.NotifyKinds[t.Event.Kind] {
+		return
+	}
+	if t.Suppressed {
+		reason := t.Alert.SuppressionReason
+		if reason == "" {
+			reason = "suppressed"
+		}
+		notifySuppressed.WithLabelValues(reason).Inc()
 		return
 	}
 	notifyTransitions.WithLabelValues(t.Event.Kind).Inc()

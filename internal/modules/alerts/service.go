@@ -32,9 +32,9 @@ type Service struct {
 	az  Authorizer
 	// Now is the clock seam for deterministic tests.
 	Now func() time.Time
-	// sink consumes committed transitions (M11-S2 notify engine). Nil means
-	// notifications are disabled; the state machine is unaffected.
-	sink TransitionSink
+	// sinks consume committed transitions (M11-S2 notify engine, M11-S3a SSE
+	// stream hub). Empty means no consumers; the state machine is unaffected.
+	sinks []TransitionSink
 }
 
 // New wires the service.
@@ -42,8 +42,13 @@ func New(app *pgxpool.Pool, az Authorizer) *Service {
 	return &Service{app: app, az: az, Now: time.Now}
 }
 
-// SetSink installs the committed-transition consumer (notify engine).
-func (s *Service) SetSink(sink TransitionSink) { s.sink = sink }
+// SetSink installs the committed-transition consumer (notify engine),
+// replacing any previously installed sinks.
+func (s *Service) SetSink(sink TransitionSink) { s.sinks = []TransitionSink{sink} }
+
+// AddSink appends a committed-transition consumer (SSE stream hub) without
+// replacing the installed sinks.
+func (s *Service) AddSink(sink TransitionSink) { s.sinks = append(s.sinks, sink) }
 
 // ScopeFor resolves the caller's bindings (fails closed when the authorizer is
 // not configured).
@@ -423,7 +428,7 @@ func (s *Service) ResolveDeviceSite(ctx context.Context, orgID, deviceID uuid.UU
 
 const alertColumns = `a.id, a.org_id, a.rule_id, a.rule_version, a.fingerprint, a.resource_type, a.resource_id,
 	a.dimension_subset, a.state, a.severity, a.value, a.started_at, a.last_evaluated_at, a.resolved_at,
-	a.ack_by, a.ack_at, a.snooze_until, a.suppression_reason, a.created_at`
+	a.ack_by, a.ack_at, a.snooze_until, a.suppression_reason, a.suppression_ref, a.created_at`
 
 func scanAlertWithSite(row pgx.Row) (Alert, error) {
 	var (
@@ -432,7 +437,7 @@ func scanAlertWithSite(row pgx.Row) (Alert, error) {
 	)
 	err := row.Scan(&a.ID, &a.OrgID, &a.RuleID, &a.RuleVersion, &a.Fingerprint, &a.ResourceType, &a.ResourceID,
 		&a.DimensionSubset, &a.State, &a.Severity, &a.Value, &a.StartedAt, &a.LastEvaluatedAt, &a.ResolvedAt,
-		&a.AckBy, &a.AckAt, &a.SnoozeUntil, &a.SuppressionReason, &a.CreatedAt, &siteID)
+		&a.AckBy, &a.AckAt, &a.SnoozeUntil, &a.SuppressionReason, &a.SuppressionRef, &a.CreatedAt, &siteID)
 	if siteID != nil {
 		a.SiteID = *siteID
 	}
@@ -587,13 +592,18 @@ func (s *Service) CommentAlert(ctx context.Context, orgID, alertID uuid.UUID, ac
 
 // transitionAlert locks the alert, enforces scope, applies fn, and reloads the
 // site projection. After the transaction commits, the transition is handed to
-// the configured sink (M11-S2); a sink failure never rolls back or fails the
-// state machine (best-effort enqueue is documented in M11_EVIDENCE §S2).
+// every configured sink (M11-S2 notify engine, M11-S3a SSE hub); a sink
+// failure never rolls back or fails the state machine (best-effort enqueue is
+// documented in M11_EVIDENCE §S2). A transition out of a
+// maintenance/silence-suppressed alert is marked Transition.Suppressed so the
+// notify engine never dispatches it.
 func (s *Service) transitionAlert(ctx context.Context, orgID, alertID uuid.UUID, sc authz.Scope,
 	fn func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, *AlertEvent, error)) (Alert, error) {
 	var (
-		out Alert
-		ev  *AlertEvent
+		out         Alert
+		ev          *AlertEvent
+		priorState  string
+		priorReason string
 	)
 	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
 		a, err := lockAlert(ctx, tx, alertID)
@@ -603,6 +613,7 @@ func (s *Service) transitionAlert(ctx context.Context, orgID, alertID uuid.UUID,
 		if err := requireAlertScope(a, sc); err != nil {
 			return err
 		}
+		priorState, priorReason = a.State, a.SuppressionReason
 		updated, event, err := fn(ctx, tx, a)
 		if err != nil {
 			return err
@@ -615,8 +626,15 @@ func (s *Service) transitionAlert(ctx context.Context, orgID, alertID uuid.UUID,
 	if err != nil {
 		return Alert{}, err
 	}
-	if s.sink != nil && ev != nil && NotifyKinds[ev.Kind] {
-		s.sink.Transitioned(ctx, Transition{Alert: out, Event: *ev})
+	if ev != nil {
+		suppressed := out.State == StateSuppressed ||
+			(out.State == StateResolved && (priorState == StateSuppressed || suppressionTimeBased(priorReason)))
+		tr := Transition{Alert: out, Event: *ev, Suppressed: suppressed}
+		for _, sink := range s.sinks {
+			if sink != nil {
+				sink.Transitioned(ctx, tr)
+			}
+		}
 	}
 	return out, nil
 }

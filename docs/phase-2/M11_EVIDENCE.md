@@ -573,3 +573,208 @@ full gate.
 - `tests/integration/`: `m11s2_helpers_test.go`, `m11s2_notify_test.go`;
   `migrations_test.go` (policy counts).
 - This file.
+
+## S3a. Maintenance windows, silences, and the SSE alert stream (backend)
+
+### S3a.1 Scope and shape
+
+Implements the canonical suppression ownership surface and the realtime alert
+event feed, backend only:
+
+- **Maintenance windows** (docs/10 §17.6, P2-AC-30): scoped single
+  `[starts_at, ends_at)` intervals. While active, matching alerts are
+  `Suppressed (maintenance)` — still recorded, still evaluated, never
+  notified; health/UI can mark resources "in maintenance" from the API's
+  computed `active` flag.
+- **Operator silences** (docs/10 §17.6): ad-hoc exact matchers
+  (`alert_id` and/or `fingerprint` and/or resource scope), mandatory reason,
+  mandatory expiry bounded to 30 days, visible in API; they expire cleanly.
+- **Suppression semantics** in the M11-S1 engine: the effective suppression at
+  each evaluation instant is projected onto the alert
+  (`suppression_reason` + `suppression_ref`) and gates the M11-S2 notify
+  engine — suppressed transitions never create delivery rows.
+- **SSE `GET /v1/streams/events`** (docs/12 §22.16, P2-AC-33): session-cookie
+  auth, site-scope filtered, canonical `alert.fired`/`alert.resolved`/
+  `alert.updated` event names, `id:` = the `alert_events` UUID, 20 s
+  heartbeats, Last-Event-ID resume from a retained 10-minute buffer with a
+  PostgreSQL keyset fallback, bounded per-connection buffers with a documented
+  drop policy. In-process pub/sub only (P2-D3: no NATS).
+
+Out of scope by plan: the alert UI (M11-S3b), incidents/composite rules,
+digests/quiet hours, notification grouping and escalation (V2).
+
+### S3a.2 Migration 000020
+
+`maintenance_windows` (`name`, `scope` jsonb `{sites, device_ids,
+device_kinds}`, `enabled`, `starts_at`/`ends_at` with `ends_at > starts_at`,
+`created_by`, timestamps) and `silences` (`match` jsonb
+`{alert_id|fingerprint|scope}`, `reason`, `starts_at`/`ends_at` with the
+30-day bound as a DB CHECK, `created_by`, timestamps). `alerts` gains
+`suppression_ref uuid` (no FK: it points at either suppression table; the
+alert timeline remains the durable audit). Indexes: `maintenance_windows`
+list + partial active scan (`WHERE enabled`), `silences` list + active scan.
+Both tables are RLS ENABLE + FORCE with the standard `app.current_org`
+predicate; `migrations.Latest = 20` and the policy/RLS counts move 26 → 28.
+
+### S3a.3 Suppression semantics as built
+
+- **Effective suppression** (`suppressionPlan`) is computed at every
+  evaluation inside the rule transaction: active silences first (the more
+  specific operator action), then enabled maintenance windows. A silence
+  matches when **all present matchers match** (AND: alert id, fingerprint,
+  scope); a window matches by site/device id/kind (OR across present lists;
+  empty scope = org-wide). Windows use `starts_at <= now < ends_at`.
+- **Alert lifecycle**: a firing alert with an active suppression is held in
+  `suppressed` with `suppression_reason` ∈ {maintenance, silence} and
+  `suppression_ref` = the window/silence id:
+  - new alerts open directly as Suppressed (or Pending — then Suppressed at
+    the Pending → Active instant for `for_duration > 0` rules);
+  - `active` alerts entering a window/silence move to suppressed (an
+    acknowledged alert keeps its state but projects the reason);
+  - a snooze expiring into an active suppression enters suppressed;
+  - repeat firings update value/time and append `updated` events;
+  - **recovery during suppression** resolves the alert normally
+    (`resolved_at`, `resolved` event) with the reason retained as the audit
+    answer, and the resolution transition is marked suppressed;
+  - **when the suppression ends while still firing**, the alert reactivates
+    (`suppressed → active`, `reactivated` event) and is re-notified
+    (canonical Suppressed → Active). If the condition was not continuously
+    true for `for_duration`, the onset restarts as Pending (new
+    `unsuppressed` timeline event) instead of fabricating a firing.
+- **Notify gate**: `alerts.Transition` gains `Suppressed bool`; the evaluator
+  and service set it for every transition produced under a suppression, and
+  `notify.Engine.Transitioned` drops such transitions before any route work
+  (incrementing `argus_notify_suppressed_total{reason}`). Resolutions of
+  alerts that never activated outside a suppression (storm-born or
+  window-born) are also not notified.
+- **Storm precedence**: a planned window/silence wins over the storm limiter
+  when both apply (documented judgement call; both mute).
+- The alert API payload exposes `suppression_reason` (M11-S1 field, now
+  maintenance|silence|storm) and `suppression_ref`.
+
+### S3a.4 API surface and authorization
+
+- `POST/GET /v1/maintenance-windows`, `GET/PATCH/DELETE
+  /v1/maintenance-windows/{id}` and `POST/GET /v1/silences`, `DELETE
+  /v1/silences/{id}`: capability `alert.silence` (canonical docs/12 §22.9),
+  org-scoped like alert rules. Restricted callers may only target in-scope
+  resources (same P2-D5 rule as `scope_selector`): out-of-scope targets are a
+  deterministic 403, org-wide windows and fingerprint-only silences require
+  org-wide scope, out-of-scope item access is a 404, and lists are
+  scope-filtered.
+- `GET /v1/streams/events`: capability `alert.read`, scope `site` (the same
+  metadata as the alert collection read); the session cookie authenticates,
+  and the caller's server-side bindings filter the feed (stronger than the
+  canonical client-supplied `?filter[site]=`).
+- Validation: `recurrence` is not part of the window schema (V2), unknown
+  fields are rejected, windows are bounded to 365 days (judgement call),
+  silences require `reason` and exactly one of `ends_at`/`duration_seconds`
+  within 30 days.
+
+### S3a.5 SSE design
+
+- `alerts.StreamHub` implements `TransitionSink`; both the alerts service and
+  evaluator fan out to installed sinks (`AddSink`), so the notify engine and
+  the hub consume the same committed transitions without touching the state
+  machine.
+- **Event mapping**: `activated`/`reactivated`/`reopened` → `alert.fired`;
+  `resolved`/`manual_resolved` → `alert.resolved`; every other kind (pending,
+  updated, acknowledged, snoozed, unsnoozed, suppressed, unsuppressed,
+  comment) → `alert.updated`.
+- **Envelope**: `id: <alert_events uuid>` (UUIDv7, time-ordered),
+  `event: <canonical name>`, `data: {alert_id, event_id, event_kind, state,
+  severity, rule_id, fingerprint, resource_type, resource_id, site_id,
+  device_id, suppressed, suppression_reason, suppression_ref?, incident_id:
+  null, occurred_at, event_data?}`. `incident_id` is forward-compat null
+  (incidents are V2); no `summary` field is fabricated.
+- **Replay**: an in-memory retained buffer (10 min, 4096 events, TTL+count
+  bounded) serves Last-Event-ID resume; when the id is not retained (restart
+  or older gap) the handler falls back to a PostgreSQL keyset replay over
+  `alert_events JOIN alerts` (`id > last`, ordered, bounded to 1000), with
+  the same scope filter.
+- **Flow control**: 128-event per-connection buffer; on overflow the event is
+  dropped (`argus_alerts_stream_dropped_total{reason="buffer_full"}`) and
+  remains recoverable via Last-Event-ID. Metrics:
+  `argus_alerts_stream_clients`, `argus_alerts_stream_dropped_total`,
+  `argus_alerts_stream_events_total`.
+- `httpx.statusRecorder` gained `Unwrap()` so `http.ResponseController` can
+  flush through the access-log wrapper.
+
+### S3a.6 Decisions and judgement calls (canonical-silent points)
+
+1. Silence matchers combine with **AND**; matching is recomputed per
+   evaluation (silences take effect at the next evaluation, not
+   retroactively).
+2. Silence precedence over maintenance; plan precedence over storm.
+3. An acknowledged alert is **not** forced into `suppressed` (the canonical
+   state diagram has no Acknowledged → Suppressed edge); it carries the
+   suppression projection while the window applies, and resolutions are still
+   notification-gated.
+4. Window end with broken `for_duration` continuity restarts the onset as
+   Pending instead of notifying a firing that was never continuously true.
+5. DELETE hard-deletes a window/silence; suppression history stays on
+   alerts/alert_events (docs/10 §17.6 audit).
+6. Per-connection buffer bound 128, retained buffer 4096 events / 10 min,
+   PG replay page 1000, window duration bound 365 days: documented where the
+   canonical docs are silent.
+7. The canonical `?filter[site]=` stream query is replaced by server-side
+   bindings (a client filter cannot widen scope).
+
+### S3a.7 Test evidence
+
+| Command | Result |
+|---|---|
+| `go build ./...` (windows) | pass |
+| `GOOS=linux GOARCH=amd64 go build ./...` | pass |
+| `gofmt -l internal cmd tests` | empty |
+| `go test ./internal/... -count=1` | pass (incl. new `alerts` suppression matching + stream buffer/replay unit tests) |
+| `go test ./tests/integration/ -run '^TestM11' -count=1 -v` | pass (S1 + S2 + S3a) |
+| `go test ./tests/integration/ -count=1 -timeout 30m` | pass (full suite) |
+| `go test ./tests/contract/... -count=1` | pass (silences 3 / windows 5 / stream 1 routes pinned) |
+| `golangci-lint run --timeout 10m ./...` | 0 issues |
+| `scripts/ci-local.ps1 -WithIntegration` (authoritative gate) | **PASS**: fmt/vet/build/test/lint/proto + full integration (799 s) |
+
+S3a integration tests (7): maintenance-window lifecycle (trigger during,
+enter from active, resolve during, reactivate + re-notify on window end,
+recovery after); silence by alert id (suppressed, resolve-while-silent,
+reason retained); silence by scope (clean time expiry → reactivate); 
+suppression API + capability/scope/cross-tenant/RLS invariants; SSE lifecycle
+envelope + Last-Event-ID buffer resume + PostgreSQL replay; SSE site-scope
+filtering; migration RLS counts.
+
+### S3a.8 Limitations and deferrals
+
+- The web UI (M11-S3b) is the next slice; this backend exposes everything it
+  needs (payload fields, CRUD, SSE).
+- Window recurrence (RFC 5545 subset), building/floor/device-group targets,
+  digests/quiet hours and notification grouping remain V2; windows are single
+  intervals over the site/device/kind vocabulary.
+- The SSE stream carries alert events only; incident.*/device.*/config.*
+  events arrive with their owning slices (incidents are V2).
+- Stream buffer and per-connection state are process-local: a restart drops
+  the retained buffer, and Last-Event-ID then replays from PostgreSQL (the
+  documented fallback). Multi-process fan-out is out of Phase-2 scope (P2-D3).
+- The suppression audit is on the alert rows/events; there is no separate
+  audit-log surface yet (M13 provides retention enforcement: past suppression
+  objects 13 months per docs/17 §35.1).
+- `?filter[site]=` is intentionally not implemented; scoping is server-side.
+
+### S3a.9 Files changed
+
+- `migrations/000020_suppression_stream.{up,down}.sql`;
+  `migrations/embed.go` (`Latest = 20`).
+- `internal/modules/alerts/`: `suppression.go`, `suppression_http.go`,
+  `stream.go`, `metrics.go`, `models.go`, `evaluator.go`, `service.go`,
+  `http.go`; unit tests `suppression_test.go`, `stream_test.go`.
+- `internal/modules/notify/engine.go` (+`metrics.go`): suppressed-transition
+  gate and reason labels.
+- `internal/api/{router,routes}.go` (`AlertsStream` option, 9 routes);
+  `internal/platform/httpx/middleware.go` (`Unwrap`);
+  `cmd/argus-server/main.go` (hub wired into both sinks and the router).
+- `openapi/argus.v1.yaml` (windows/silences/stream paths, schemas,
+  `Last-Event-ID` parameter, alert suppression fields);
+  `tests/contract/authz_contract_test.go` (new surfaces + counts).
+- `tests/integration/`: `m11s3a_helpers_test.go`,
+  `m11s3a_suppression_test.go`, `m11s3a_api_test.go`,
+  `m11s3a_stream_test.go`; `migrations_test.go` (28 policies).
+- This file.

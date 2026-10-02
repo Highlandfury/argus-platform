@@ -21,7 +21,7 @@ var (
 
 	notifySuppressed = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "argus", Subsystem: "notify", Name: "suppressed_total",
-		Help: "Notifications suppressed before delivery by reason (dedup|throttle).",
+		Help: "Notifications suppressed before delivery by reason (dedup|throttle|maintenance|silence).",
 	}, []string{"reason"})
 
 	notifyBreaker = prometheus.NewCounterVec(prometheus.CounterOpts{

@@ -279,13 +279,17 @@ func cmdServe(args []string) int {
 	// (P2-D3, no NATS). The evaluator runs on its own goroutine below; the
 	// scheduler is a no-op until both DB pools are configured.
 	var (
-		alertsSvc  *alerts.Service
-		alertEval  *alerts.Evaluator
-		alertSched *alerts.Scheduler
+		alertsSvc    *alerts.Service
+		alertEval    *alerts.Evaluator
+		alertSched   *alerts.Scheduler
+		alertsStream *alerts.StreamHub
 	)
 	if appPool != nil {
 		alertsSvc = alerts.New(appPool, authz.New(appPool))
 		alertEval = alerts.NewEvaluator(appPool, alerts.EvaluatorOptions{Logger: logger})
+		alertsStream = alerts.NewStreamHub(alerts.StreamOptions{Logger: logger})
+		alertsSvc.AddSink(alertsStream)
+		alertEval.AddSink(alertsStream)
 	}
 	if appPool != nil && authPool != nil {
 		alertSched = alerts.NewScheduler(appPool, authPool, alertEval, logger)
@@ -307,10 +311,10 @@ func cmdServe(args []string) int {
 			Auth:   authPool,
 		})
 		if alertsSvc != nil {
-			alertsSvc.SetSink(notifyEngine)
+			alertsSvc.AddSink(notifyEngine)
 		}
 		if alertEval != nil {
-			alertEval.SetSink(notifyEngine)
+			alertEval.AddSink(notifyEngine)
 		}
 		if alertSched != nil && alertsSvc != nil {
 			alertSched.SetDefaultsSeeder(alertsSvc)
@@ -335,6 +339,7 @@ func cmdServe(args []string) int {
 		PollHealth:        pollHealthSvc,
 		Checks:            checksSvc,
 		Alerts:            alertsSvc,
+		AlertsStream:      alertsStream,
 		Notify:            notifySvc,
 		NotifyEngine:      notifyEngine,
 	}

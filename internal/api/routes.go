@@ -86,6 +86,20 @@ var routeTable = []Route{
 	{Method: "POST", Path: "/v1/alerts/{id}/snooze", Protected: true, CSRF: true, Capability: authz.CapAlertSnooze, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/alerts/{id}/resolve", Protected: true, CSRF: true, Capability: authz.CapAlertAck, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/alerts/{id}/comment", Protected: true, CSRF: true, Capability: authz.CapAlertAck, Scope: authz.ScopeDevice},
+	// M11-S3a suppression objects and the SSE alert stream. Canonical
+	// docs/12 §22.9 places CRUD /silences and /maintenance-windows under
+	// alert.silence, org-scoped like alert rules (restricted callers may only
+	// target in-scope resources). The stream is a collection read under
+	// alert.read with site scope (docs/12 §22.16; P2-AC-33).
+	{Method: "POST", Path: "/v1/maintenance-windows", Protected: true, CSRF: true, Capability: authz.CapAlertSilence, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/maintenance-windows", Protected: true, Capability: authz.CapAlertSilence, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/maintenance-windows/{id}", Protected: true, Capability: authz.CapAlertSilence, Scope: authz.ScopeOrg},
+	{Method: "PATCH", Path: "/v1/maintenance-windows/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertSilence, Scope: authz.ScopeOrg},
+	{Method: "DELETE", Path: "/v1/maintenance-windows/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertSilence, Scope: authz.ScopeOrg},
+	{Method: "POST", Path: "/v1/silences", Protected: true, CSRF: true, Capability: authz.CapAlertSilence, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/silences", Protected: true, Capability: authz.CapAlertSilence, Scope: authz.ScopeOrg},
+	{Method: "DELETE", Path: "/v1/silences/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertSilence, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/streams/events", Protected: true, Capability: authz.CapAlertRead, Scope: authz.ScopeSite},
 	// M11-S2 notification pipeline. Canonical docs/12 §22.14: channels are
 	// enforced under integration.write (CRUD, including reads — the channel
 	// payload is integration configuration, and secrets are write-only);
