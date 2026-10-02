@@ -325,8 +325,16 @@ TimescaleDB 2.30.1):
 | `golangci-lint v2.14.0 run --timeout 10m ./...` | **0 issues** |
 | `go test ./internal/... -count=1` | pass (all packages) |
 | `go test ./tests/integration/ -run '^TestM11S1' -count=1 -timeout 20m` | pass (8 tests: 5 evaluator + 3 API/authz) |
-| `go test ./tests/integration/ -count=1 -timeout 30m` (full) | see §S1.7 |
+| `go test ./tests/integration/ -count=1 -timeout 30m` (full) | **pass, 958 s** (all T1-T10 + S-suites + M11-S1) |
 | `go test ./tests/contract/... -count=1` | pass (OpenAPI + authz contract, alert surfaces included) |
+
+Test-robustness fix found during this verification (test-only, no
+production/security change): `TestLoginRateLimitS09` issued its 10-token burst
+sequentially; on this host each failed login pays an Argon2 verification, so
+the burst could exceed the limiter's 6 s refill interval and turn the 11th
+attempt into a 401. The test now issues all 11 rapid attempts concurrently and
+asserts exactly 10 x 401 + 1 x 429 (with `Retry-After`), which is the same
+security property without the wall-clock dependency (verified `-count=3`).
 
 ### S1.7 Limitations and deferrals
 

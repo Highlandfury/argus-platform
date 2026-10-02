@@ -942,6 +942,10 @@ paths:
       parameters:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: cursor, in: query, schema: { type: string } }
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: asc }
+          description: "`desc` returns newest first (UUIDv7 id order) and the cursor walks backwards; the default `asc` preserves the historical cursor contract."
       responses:
         '200':
           description: OK (metadata only)

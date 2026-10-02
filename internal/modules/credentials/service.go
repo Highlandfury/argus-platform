@@ -183,8 +183,8 @@ func (s *Service) Get(ctx context.Context, orgID, id uuid.UUID) (CredentialMetad
 }
 
 // List returns one cursor page of credential metadata ordered by id (UUIDv7,
-// time-sortable), each with its binding summaries.
-func (s *Service) List(ctx context.Context, orgID uuid.UUID, limit int, cursor string) ([]CredentialMetadata, string, bool, error) {
+// time-sortable), each with its binding summaries. desc = newest first.
+func (s *Service) List(ctx context.Context, orgID uuid.UUID, limit int, cursor string, desc bool) ([]CredentialMetadata, string, bool, error) {
 	if s == nil || s.app == nil {
 		return nil, "", false, errors.New("credentials: service not configured")
 	}
@@ -204,7 +204,7 @@ func (s *Service) List(ctx context.Context, orgID uuid.UUID, limit int, cursor s
 	)
 	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		rows, err = listCredentials(ctx, tx, limit+1, after)
+		rows, err = listCredentials(ctx, tx, limit+1, after, desc)
 		if err != nil {
 			return err
 		}

@@ -65,7 +65,7 @@ export default function CredentialBindings({
   const load = useCallback(async () => {
     const [credsRes, sitesRes, groupsRes] = await Promise.all([
       fetchJSON<{ data?: CredentialMetadata[] }>(
-        "/api/v1/credentials?limit=100",
+        "/api/v1/credentials?limit=100&order=desc",
       ),
       fetchJSON<{ data?: Site[] }>("/api/v1/sites?limit=100"),
       fetchJSON<{ data?: Group[] }>("/api/v1/device-groups?limit=100"),

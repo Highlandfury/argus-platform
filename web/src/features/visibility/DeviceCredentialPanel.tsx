@@ -71,7 +71,7 @@ export default function DeviceCredentialPanel({
   const load = useCallback(async () => {
     if (!canManage) return;
     const res = await fetchJSON<{ data?: CredentialMetadata[] }>(
-      "/api/v1/credentials?limit=100",
+      "/api/v1/credentials?limit=100&order=desc",
     );
     if (res.ok) {
       setCredentials(res.data.data ?? []);

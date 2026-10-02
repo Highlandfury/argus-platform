@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { fetchJSON } from "@/lib/api";
 
@@ -94,6 +94,9 @@ export default function ChecksView() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  // Last URL applied through setParam (intent), so rapid filter changes compose
+  // even while router.replace has not committed the previous one.
+  const appliedSearchRef = useRef<string | null>(null);
   const statusFilter = searchParams.get("status") ?? "";
   const pollTypeFilter = searchParams.get("poll_type") ?? "";
   const sinceParam = searchParams.get("since") ?? "1h";
@@ -113,15 +116,24 @@ export default function ChecksView() {
     // Read the live URL rather than the hook snapshot so rapid filter changes
     // do not re-apply a stale parameter from the previous render.
     const base =
-      typeof window !== "undefined"
-        ? window.location.search
-        : `?${searchParams.toString()}`;
+      appliedSearchRef.current !== null
+        ? `?${appliedSearchRef.current}`
+        : typeof window !== "undefined"
+          ? window.location.search
+          : `?${searchParams.toString()}`;
     const params = new URLSearchParams(base);
     if (value === fallback) params.delete(key);
     else params.set(key, value);
     const qs = params.toString();
+    appliedSearchRef.current = qs;
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   }
+
+  useEffect(() => {
+    // Re-sync the intent ref whenever the committed URL changes (external
+    // navigation, back/forward); setParam keeps it ahead of the router.
+    appliedSearchRef.current = searchParams.toString();
+  }, [searchParams]);
 
   useEffect(() => {
     let cancelled = false;

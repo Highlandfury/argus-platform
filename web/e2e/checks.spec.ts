@@ -138,8 +138,10 @@ test("checks page: nav link, real ledger data and URL filters", async () => {
 
   // URL-driven status filter: a terminal check disappears on pending.
   await page.getByTestId("checks-filter-poll-type").selectOption("");
+  await expect(page).not.toHaveURL(/poll_type=/);
   await page.getByTestId("checks-filter-status").selectOption("pending");
   await expect(page).toHaveURL(/status=pending/);
+  await expect(page).not.toHaveURL(/poll_type=/);
   await expect(page.getByTestId(`checks-row-${seededCheckID}`)).toHaveCount(0);
 
   // Selecting the terminal status brings it back (status=completed or failed
@@ -147,6 +149,8 @@ test("checks page: nav link, real ledger data and URL filters", async () => {
   await page
     .getByTestId("checks-filter-status")
     .selectOption(seededCheckStatus);
+  await expect(page).toHaveURL(new RegExp(`status=${seededCheckStatus}`));
+  await expect(page).not.toHaveURL(/poll_type=/);
   await expect(page.getByTestId(`checks-row-${seededCheckID}`)).toBeVisible({
     timeout: 15_000,
   });

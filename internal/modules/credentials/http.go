@@ -165,7 +165,13 @@ func (h *HTTP) ListCredentials(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "limit must be an integer between 1 and 100")
 		return
 	}
-	items, nextCursor, hasMore, err := h.Svc.List(r.Context(), p.OrgID, limit, r.URL.Query().Get("cursor"))
+	order := r.URL.Query().Get("order")
+	if order != "" && order != "asc" && order != "desc" {
+		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid order",
+			httpx.FieldError{Field: "order", Code: "invalid", Message: "allowed: asc, desc"})
+		return
+	}
+	items, nextCursor, hasMore, err := h.Svc.List(r.Context(), p.OrgID, limit, r.URL.Query().Get("cursor"), order == "desc")
 	if err != nil {
 		writeServiceError(w, r, err, "credentials lookup failed")
 		return

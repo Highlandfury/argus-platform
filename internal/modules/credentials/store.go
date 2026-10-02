@@ -102,10 +102,16 @@ func findCredentialMeta(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Credentia
 	return c, err
 }
 
-func listCredentials(ctx context.Context, tx pgx.Tx, limit int, after *uuid.UUID) ([]Credential, error) {
+func listCredentials(ctx context.Context, tx pgx.Tx, limit int, after *uuid.UUID, desc bool) ([]Credential, error) {
+	// Newest-first walks descending ids (UUIDv7 is time-sorted); the cursor
+	// comparison flips with the direction so pages stay stable.
+	cmp, dir := ">", ""
+	if desc {
+		cmp, dir = "<", " DESC"
+	}
 	rows, err := tx.Query(ctx, `SELECT `+credentialMetaColumns+` FROM device_credentials c
-		WHERE ($1::uuid IS NULL OR c.id > $1)
-		ORDER BY c.id
+		WHERE ($1::uuid IS NULL OR c.id `+cmp+` $1)
+		ORDER BY c.id`+dir+`
 		LIMIT $2`, after, limit)
 	if err != nil {
 		return nil, err
