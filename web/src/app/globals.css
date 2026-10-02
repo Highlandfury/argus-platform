@@ -1765,6 +1765,115 @@ a.ui-metric-card:hover {
 }
 
 /* ------------------------------------------------------------------ */
+/* M11-S3b alert surfaces                                              */
+/* ------------------------------------------------------------------ */
+
+.alert-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.alert-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--status-unknown);
+  flex: none;
+}
+
+.alert-live[data-live="live"] {
+  color: var(--text);
+}
+
+.alert-live[data-live="live"] .alert-live-dot {
+  background: var(--status-healthy);
+}
+
+.alert-live[data-live="connecting"] .alert-live-dot {
+  background: var(--status-pending);
+}
+
+.alert-live[data-live="unavailable"] {
+  color: var(--danger);
+}
+
+.alert-live[data-live="unavailable"] .alert-live-dot {
+  background: var(--status-down);
+}
+
+.alert-row {
+  cursor: pointer;
+}
+
+.alert-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.alert-summary {
+  font-weight: 500;
+}
+
+.alert-subtext {
+  font-size: var(--fs-sm);
+  margin-top: 2px;
+}
+
+.alert-note {
+  font-size: var(--fs-sm);
+  margin: 0 0 var(--sp-3);
+}
+
+.alert-state-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.alert-table-wrap {
+  overflow-x: auto;
+}
+
+.alert-result {
+  margin: 0 0 var(--sp-3);
+}
+
+.alert-block {
+  margin-top: var(--sp-3);
+}
+
+.alert-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.alert-evidence th[scope="row"] {
+  width: 180px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.alert-delivery-response {
+  max-width: 360px;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.alert-multiselect {
+  min-height: 72px;
+}
+
+/* ------------------------------------------------------------------ */
 /* Responsive: desktop-first NOC shell                                 */
 /* ------------------------------------------------------------------ */
 

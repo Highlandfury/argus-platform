@@ -728,8 +728,8 @@ predicate; `migrations.Latest = 20` and the policy/RLS counts move 26 → 28.
 | `GOOS=linux GOARCH=amd64 go build ./...` | pass |
 | `gofmt -l internal cmd tests` | empty |
 | `go test ./internal/... -count=1` | pass (incl. new `alerts` suppression matching + stream buffer/replay unit tests) |
-| `go test ./tests/integration/ -run '^TestM11' -count=1 -v` | pass (S1 + S2 + S3a) |
-| `go test ./tests/integration/ -count=1 -timeout 30m` | pass (full suite) |
+| `go test ./tests/integration/ -run '^TestM11' -count=1 -v` | pass (22 tests: 8 S1 + 7 S2 + 7 S3a) |
+| `go test ./tests/integration/ -count=1 -timeout 30m` | pass (full suite, 778 s) |
 | `go test ./tests/contract/... -count=1` | pass (silences 3 / windows 5 / stream 1 routes pinned) |
 | `golangci-lint run --timeout 10m ./...` | 0 issues |
 | `scripts/ci-local.ps1 -WithIntegration` (authoritative gate) | **PASS**: fmt/vet/build/test/lint/proto + full integration (799 s) |
@@ -777,4 +777,215 @@ filtering; migration RLS counts.
 - `tests/integration/`: `m11s3a_helpers_test.go`,
   `m11s3a_suppression_test.go`, `m11s3a_api_test.go`,
   `m11s3a_stream_test.go`; `migrations_test.go` (28 policies).
+- This file.
+
+## S3b. Alerts + suppression web UI (queue, detail, maintenance windows, silences)
+
+### S3b.1 Scope and shape
+
+M11-S3b is the web-only operator surface for the M11 backend (S1 lifecycle API,
+S2 deliveries, S3a suppression objects + SSE stream). Delivered:
+
+- **`/alerts` queue** (`?tab=queue`, the default): real rows from
+  `GET /v1/alerts` with server-side filters (`filter[state]`,
+  `filter[severity]`, `filter[rule_id]`, `filter[device_id]` — the exact
+  OpenAPI parameters), cursor "Load more", state/severity/suppression chips,
+  resource (device + site) and rule links, evidence summary, started/age, ack
+  state, and explicit loading/empty/error states.
+- **`/alerts/{id}` detail**: state/severity/rule/resource/site context,
+  suppression reason and ref rendered human-readably and linked to the owning
+  tab, full evidence object, `alert_events` timeline (max 50 per the API),
+  notification deliveries for the alert (`filter[alert_id]`, with a clear
+  empty state), and capability-gated actions: Acknowledge, Snooze (duration
+  picker), Resolve (mandatory reason), Comment, Silence this alert.
+- **`/alerts?tab=maintenance`**: maintenance-window list (Active/Scheduled/
+  Expired/Disabled badge, scope summary, interval, enabled) + create dialog
+  (name, sites/device-kinds/devices scope pickers, start/end, enabled) +
+  delete with a confirm dialog.
+- **`/alerts?tab=silences`**: silence list (Active/Expired, mandatory reason,
+  target summary, interval) + delete with a confirm dialog.
+- **Live updates**: every queue/detail view subscribes to
+  `GET /v1/streams/events` via `EventSource` (session cookie, same-origin
+  rewrite). `alert.fired`/`alert.resolved`/`alert.updated` patch visible rows
+  in place; rows that leave the active state filter are removed; a new
+  matching alert refreshes the first page (debounced) or offers an explicit
+  "N new updates — Refresh" chip when extra pages are loaded. The connection
+  state is always visible ("Live" / "Connecting…" / "Live updates
+  unavailable") and the unavailable state keeps manual Refresh working.
+
+No fake data: empty/error/unavailable states are explicit, capped pages are
+labeled, and features the API does not expose (text search, time-range filter,
+site filter, rule management UI) are stated in the surface rather than
+invented.
+
+### S3b.2 Routes and files
+
+| Route | Surface | Test ids (highlights) |
+|---|---|---|
+| `/alerts` | `AlertsView` queue | `alerts-view`, `alerts-table`, `alerts-row-{id}`, `alerts-filter-{state,severity,rule,device}`, `alerts-sse-status`, `alerts-refresh` |
+| `/alerts/{id}` | `AlertDetailView` | `alert-detail`, `alert-detail-state`, `alert-timeline`, `alert-deliveries`, `alert-action-{ack,snooze,resolve,comment,silence}`, `alert-{snooze,resolve,comment,silence}-dialog` |
+| `/alerts?tab=maintenance` | `MaintenanceWindowsView` | `maintenance-table`, `maintenance-create-dialog`, `maintenance-delete-confirm` |
+| `/alerts?tab=silences` | `SilencesView` | `silences-table`, `silences-row-{id}`, `silence-delete-confirm` |
+
+Web files:
+
+- `web/src/features/alerts/`: `types.ts`, `format.ts`, `stream.ts`,
+  `LiveIndicator.tsx`, `AlertsView.tsx` (queue + `AlertStateBadge` /
+  `SeverityBadge`), `AlertDetailView.tsx`, `MaintenanceWindowsView.tsx`,
+  `SilencesView.tsx`.
+- `web/src/app/(app)/alerts/page.tsx` (replaces the Phase-1 `ComingSoon`
+  placeholder), `web/src/app/(app)/alerts/[id]/page.tsx`.
+- `web/src/components/shell/nav.ts` (Alerts is real, no planned marker),
+  `web/src/app/globals.css` (alert-surface classes on the design tokens).
+- `web/next.config.ts` (`compress: false`, see S3b.6).
+- `web/e2e/alerts.spec.ts` (new); `web/e2e/shell.spec.ts` (the one
+  alerts-placeholder assertion replaced with the real queue, see S3b.7).
+
+### S3b.3 UX behaviors as built
+
+- **URL-driven filters.** State/severity/rule/device live in the query string
+  (`state`, `severity`, `rule`, `device`) and map 1:1 to the API filters; the
+  intent-ref pattern from `ChecksView` prevents stale-parameter races. The
+  rule picker loads `/v1/alert-rules`; the device picker loads
+  `/v1/devices` + `/v1/sites` and groups options by site (`<optgroup>`). If a
+  picker fetch is forbidden/unavailable, it degrades to a UUID text input
+  (Enter/blur) instead of a dead end; while loading it is a disabled select.
+- **Standard vocabulary.** Alert lifecycle words (Pending/Active/Acknowledged/
+  Snoozed/Suppressed/Resolved) are text-first `Badge`s; severity uses
+  Info/Warning/Critical with the canonical degraded/down tones; suppression
+  adds a Maintenance/Silence/Storm qualifier. The resource-health
+  `StatusIndicator` mapping is deliberately not reused for the alert state
+  (an active alert must not render as "Healthy").
+- **Actions.** Ack is one click; Snooze/Resolve/Comment/Silence use the
+  `Dialog` primitive with bounded durations (≤ 30 d), mandatory reason on
+  resolve/silence, server `problem+json` details on failure, and a visible
+  result line. Actions are hidden for read-only roles (viewer) while the API
+  still enforces every capability.
+- **Silence semantics.** Creating a silence does not retroactively rewrite an
+  open alert; the UI says suppression takes effect at the next rule
+  evaluation, and the e2e proves it end to end (S3b.7).
+
+### S3b.4 IA placement decision
+
+The shell's established IA has no planned maintenance/suppression route. The
+alerts workspace is therefore one surface with URL-driven tabs (`Queue`,
+`Maintenance Windows`, `Silences`) under the existing Observability → Alerts
+nav item (test id `nav-alerts` kept, `planned` marker removed). Rationale:
+alert suppression objects are owned by the alerting domain (canonical
+docs/10 §17.6), the detail dialog must be discoverable from the queue
+workspace, and inventing a parallel Admin nav entry would split one domain
+across two groups. No `nav.ts` entry was added; the tab is deep-linkable
+(`/alerts?tab=silences`) and linked from the detail suppression line.
+
+### S3b.5 Decisions and judgement calls
+
+1. **Site filtering.** The alerts API has no `filter[site]` (site scope is
+   enforced server-side by the caller's bindings). The queue renders the
+   device picker grouped by site instead of faking a site filter; the UI note
+   states which filters the API exposes.
+2. **No text search / time range.** `GET /v1/alerts` supports neither; both
+   are explicitly listed as not exposed rather than simulated client-side
+   (a client-side filter over a cursor-paged list would lie about the result
+   set).
+3. **Live patching.** SSE events only carry transition metadata, so the queue
+   patches the fields it can trust (state/severity/suppression/last-evaluated)
+   and refreshes the head for new alerts; the detail view schedules a bounded
+   refetch (it needs evidence/timeline/deliveries).
+4. **Multi-page live refresh.** When more than one page is loaded, a new
+   matching event shows a "Refresh" chip instead of silently collapsing the
+   paged list.
+5. **E2E fixtures.** Devices/rules/silences/windows are created through the
+   real APIs. The evaluator has no HTTP sample-ingest path, so deterministic
+   alert rows/events (and the one poll-health failure for the evaluator-driven
+   suppression test) are seeded through the dev database with the same shape
+   as the Go integration helpers (`docker exec psql`, RLS context set,
+   container overridable via `ARGUS_E2E_DB_CONTAINER`).
+6. **Role gate = admin/viewer.** The current authz vocabulary has exactly two
+   roles; write actions gate on `admin` for the UI and remain
+   capability-enforced server-side.
+
+### S3b.6 Defects found and fixed during verification (minimal, documented)
+
+1. **SSE closed immediately in the real server.** `GET /v1/streams/events`
+   returned the `retry:` line and closed in ~4 ms on the running stack
+   (browser never received events). Root cause: `telemetry.statusWriter` (the
+   innermost `http.ResponseWriter` wrapper, applied by `Argus.HTTPMiddleware`)
+   had no `Unwrap()`, so `http.ResponseController.Flush()` was unsupported and
+   the handler returned. The S3a fix added `Unwrap()` to
+   `httpx.statusRecorder` only; the telemetry wrapper was missed, and the
+   integration harness does not wire telemetry, which is why S3a tests were
+   green. Fix: `statusWriter.Unwrap()` plus
+   `TestStatusWriterSupportsFlush` (one method + one regression test; no
+   contract change).
+2. **Next same-origin rewrite buffered the SSE stream.** Even with Flush
+   working, the browser EventSource opened but received no frames through
+   `/api/v1/streams/events`: Next's compression layer added
+   `content-encoding: gzip` and buffered `text/event-stream`. Fix:
+   `compress: false` in `web/next.config.ts` (web-only; payloads are small and
+   same-LAN in this deployment). Verified with a browser frame probe
+   (`alert.updated` received ~50 ms after the API transition).
+
+### S3b.7 Verification
+
+| Check | Command | Result |
+|---|---|---|
+| Web build | `npm.cmd run build` (web/) | pass — 27 routes compiled, strict TypeScript clean |
+| Web lint | `npm run lint` | not configured (no eslint config/script in `web/package.json`) |
+| Go gofmt | `gofmt -l internal/platform/telemetry` | empty |
+| Go build | `go build ./...` | pass |
+| Go telemetry tests | `go test ./internal/platform/telemetry/... -count=1` | pass (incl. new flush regression test) |
+| Go vet | `go vet ./internal/platform/telemetry/` | pass |
+| Alerts e2e (focused) | `npx playwright test e2e/alerts.spec.ts --workers=1` | **7 passed** (1.3 m) |
+| Full web e2e | `npx playwright test --workers=1` | **45 passed (3.9 m)** — 38 pre-existing + 7 new; the 3 dev-stack flakes recorded in the Phase-1 evidence (checks/metrics/visibility) did not reproduce on this run |
+| Final artifact re-check (after the last source cleanup + web image rebuild) | `npx playwright test e2e/alerts.spec.ts e2e/shell.spec.ts --workers=1` | **9 passed** (1.8 m) |
+| API smoke | login → `POST /v1/silences` → list → `DELETE` against the running stack | pass (200 / 201 `active:true` / listed / 204 / absent) |
+
+The Go tree is touched only by the one-method telemetry fix and its test. The
+authoritative `scripts/ci-local.ps1 -WithIntegration` gate was run on the final
+snapshot and reports **PASS** (fmt/vet/build/test/lint/proto + full integration,
+500 s), covering all M11-S1/S2/S3a suites plus the new P2-AC-34 lifecycle test
+(`tests/integration/m11_gate_lifecycle_test.go`: unreachable device -> exactly
+one fired notification -> 2-poll recovery -> resolved, exactly one delivery per
+transition with distinct dedup identities).
+
+`shell.spec.ts` keeps its structure and every test id; only the assertion that
+`/alerts` renders the ComingSoon placeholder changed to assert the real queue
+(`alerts-view`, `alerts-tabs`, no `data-planned` marker) — the planned-page
+test still covers `/topology`.
+
+### S3b.8 Limitations and deferrals
+
+- **Redesign Phase 8** owns visual polish and investigation views; this slice
+  uses the Phase-1 tokens/primitives and the shell but is intentionally
+  utilitarian (dense table, plain panels).
+- **No alert-rule management UI.** The rule cell links to the queue filtered
+  by that rule (`/alerts?rule=...`); rule CRUD remains API-only.
+- **SSE patch scope.** Queue rows patch transition fields only; evidence/
+  timeline/deliveries reload on navigation or event-triggered refetch.
+- **Deliveries are read-only**; retry/dead-letter operations are not exposed
+  by the API.
+- **Window recurrence** (RFC 5545 subset), building/device-group targets and
+  digests remain V2 per FEATURE_HORIZONS; the dialog creates single intervals.
+- **Fingerprint-only silences** require org-wide scope server-side; the UI
+  creates alert-id silences from the detail dialog and lists the rest.
+- `compress: false` applies to the whole web app; this dev/standalone
+  deployment serves small same-LAN payloads and accepts the trade-off, which
+  can be revisited with a dedicated streaming route if bandwidth matters.
+- The e2e DB-seeding helper depends on the dev compose container name
+  (`argus-dev-db-1`, overridable) — the same environment every existing spec
+  already requires.
+
+### S3b.9 Files changed
+
+- `web/src/features/alerts/` (new): `types.ts`, `format.ts`, `stream.ts`,
+  `LiveIndicator.tsx`, `AlertsView.tsx`, `AlertDetailView.tsx`,
+  `MaintenanceWindowsView.tsx`, `SilencesView.tsx`.
+- `web/src/app/(app)/alerts/page.tsx` (placeholder → real workspace),
+  `web/src/app/(app)/alerts/[id]/page.tsx` (new).
+- `web/src/components/shell/nav.ts`, `web/src/app/globals.css`,
+  `web/next.config.ts`.
+- `web/e2e/alerts.spec.ts` (new, 7 tests), `web/e2e/shell.spec.ts`.
+- `internal/platform/telemetry/argus_metrics.go` +
+  `argus_metrics_test.go` (SSE flush regression fix).
+- `tests/integration/m11_gate_lifecycle_test.go` (P2-AC-34 lifecycle).
 - This file.

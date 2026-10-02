@@ -36,7 +36,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { href: "/flows", label: "Flows", glyph: "⇶", testId: "nav-flows", planned: true },
       { href: "/logs", label: "Logs", glyph: "≡", testId: "nav-logs", planned: true },
       { href: "/incidents", label: "Incidents", glyph: "⚠", testId: "nav-incidents", planned: true },
-      { href: "/alerts", label: "Alerts", glyph: "◔", testId: "nav-alerts", planned: true },
+      { href: "/alerts", label: "Alerts", glyph: "◔", testId: "nav-alerts" },
     ],
   },
   {

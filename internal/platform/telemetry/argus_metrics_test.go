@@ -56,6 +56,20 @@ func TestCollectorGaugesRegistered(t *testing.T) {
 	}
 }
 
+// TestStatusWriterSupportsFlush guards the SSE path: http.ResponseController
+// must reach the underlying writer through the metrics wrapper, otherwise
+// streaming handlers (the M11-S3a alert stream) close after the first flush.
+func TestStatusWriterSupportsFlush(t *testing.T) {
+	rec := httptest.NewRecorder()
+	sw := &statusWriter{ResponseWriter: rec, status: http.StatusOK}
+	if err := http.NewResponseController(sw).Flush(); err != nil {
+		t.Fatalf("flush through statusWriter: %v", err)
+	}
+	if !rec.Flushed {
+		t.Fatal("underlying writer was not flushed")
+	}
+}
+
 // TestHTTPMiddlewareBoundedRoute is the cardinality guarantee: the route label
 // is the matched pattern, never the raw request path (no ID/tenant leakage).
 func TestHTTPMiddlewareBoundedRoute(t *testing.T) {

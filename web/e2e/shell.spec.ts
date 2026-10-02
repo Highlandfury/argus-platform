@@ -76,9 +76,15 @@ test("shell: planned routes render an explicit ComingSoon state", async () => {
   );
   await expect(page.getByTestId("nav-topology")).toBeVisible();
 
-  // Alerts page names the real backend slice and the phase that owns the UI.
+  // Alerts is a real M11-S3b workspace now (queue + suppression tabs): the
+  // nav marker is gone and the queue renders its own loading/empty state.
   await page.goto("/alerts");
-  await expect(page.getByTestId("coming-soon")).toContainText("M11");
+  await expect(page.getByTestId("alerts-view")).toBeVisible();
+  await expect(page.getByTestId("alerts-tabs")).toBeVisible();
+  await expect(page.getByTestId("nav-alerts")).not.toHaveAttribute(
+    "data-planned",
+    "true",
+  );
 
   // Metrics points at the real collector chart surface.
   await page.goto("/metrics");

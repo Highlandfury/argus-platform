@@ -90,6 +90,12 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap exposes the underlying writer so http.ResponseController can reach it
+// through the metrics wrapper. Without this, Flush() is "not supported" and
+// streaming handlers (the M11-S3a alert SSE endpoint) close right after their
+// first flush; mirrors httpx.statusRecorder.Unwrap.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // CollectorGauges refreshes the DB-derived collector gauges (SPEC §15,
 // 30 s cadence):
 //
