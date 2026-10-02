@@ -989,3 +989,121 @@ test still covers `/topology`.
   `argus_metrics_test.go` (SSE flush regression fix).
 - `tests/integration/m11_gate_lifecycle_test.go` (P2-AC-34 lifecycle).
 - This file.
+
+## S3c. `no_data` max lifetime (24 h -> resolved as unknown state)
+
+### S3c.1 Scope and canonical shape
+
+Closes the last explicit P2-AC-28 clause: `no_data` alerts have "a
+max-lifetime policy: if no data for 24 h, auto-resolve with reason
+`unknown state` (prevents stale alarms)" (docs/10 §17.5; the optional
+follow-up "monitoring gap" task is deferred, see S3c.4).
+
+As built:
+
+- `alerts.NoDataMaxLifetime = 24h` and
+  `alerts.ReasonUnknownState = "unknown state"`.
+- `Evaluator.SweepNoDataAlerts(org, now)` selects open (`state <> 'resolved'`)
+  alerts of **samples-absence** rules that are at least 24 h old and whose
+  series has produced no samples in the last 24 h (`metric_series.dimensions
+  @> alert.dimension_subset`, so an empty dimension subset stays alive while
+  any sibling series of that device+metric reports). Poll-health absence rules
+  are excluded: their failures are data, and a device that keeps failing polls
+  is still a valid alarm.
+- A stale alarm resolves with `resolved_at = now`, state `resolved`, and an
+  `alert_events` row `resolved` carrying
+  `{reason: "unknown state", auto: true, no_data_for: "24h0m0s", suppressed}`.
+  The resolution takes the normal transition path (sinks -> SSE and the
+  notification engine), gated by any active maintenance/silence on the
+  resource. The sweep is idempotent.
+- **Monitoring-gap guard**: the absence trigger path returns false once the
+  stream has been silent for the full max lifetime, so a resolved alarm cannot
+  re-fire from the gap alone (no resolve/re-fire loop); data resumption puts
+  the target back under the normal rule semantics. This mirrors the canonical
+  intent that the alarm, not the gap, is stale.
+- Wiring: `EvaluateOnce` runs the sweep for the organization and the scheduler
+  runs it once per org tick.
+- Metric: `argus_alerts_no_data_auto_resolved_total`.
+
+### S3c.2 Decisions and judgement calls
+
+1. Both conditions must hold: the alert is at least 24 h old **and** no data
+   exists in the trailing 24 h window; ageing an alert without an aged stream
+   (or vice versa) changes nothing.
+2. Dimension-subset matching is superset-based (`series.dimensions @> alert
+   subset`): with an empty subset any live series of the device+metric keeps
+   the alarm alive; with a specific subset only that series does.
+3. The auto-resolve is notification-worthy like any recovery (canonical
+   requires suppression to gate it; it does not exempt resolves).
+4. The optional follow-up "monitoring gap" task is deferred: the platform has
+   no task object yet (M13 self-observability owns platform-visible gap
+   tracking).
+
+### S3c.3 Test evidence
+
+`TestM11S3cNoDataMaxLifetimeAutoResolve` (tests/integration/m11s3c_nodata_test
+.go): a 2 h-stale series fires normally and its activation is dispatched; 25 h
+of silence auto-resolves it with reason `unknown state` and dispatches exactly
+one resolved message (2 deliveries total, each delivered on attempt 1); a
+second sweep is a no-op; a stream silent for the full lifetime does not
+re-fire; a fresh sample inside the window keeps an aged alarm active.
+
+| Command | Result |
+|---|---|
+| `go build ./...` (windows) | pass |
+| `go test ./internal/... -count=1` | pass |
+| `go test ./tests/integration/ -run '^TestM11S3c' -count=1` | pass (1.6 s) |
+| `scripts/ci-local.ps1 -WithIntegration` | **PASS**: fmt/vet/build/test/lint/proto + full integration (623 s) |
+
+Test-robustness fix found during this verification (test-only, no
+production/security change): `TestM9S3BindingRemovalDropsCredentialRAMOnly`
+asserted the signed-bundle cache directory immediately after the credential
+landed in the collector's RAM set, racing the asynchronous bundle write on a
+loaded host. The test now waits (bounded 5 s, 50 ms poll) for the first bundle
+entry before running its unchanged security assertions (no credential-named
+files, no plaintext on disk or in collector/server logs). Verified `-count=2`
+plus the full gate.
+
+### S3c.4 Limitations
+
+- The follow-up monitoring-gap task is deferred (no task object yet).
+- The sweep runs per organization in-process (the scheduler's existing
+  cadence); a durable sweep heartbeat is M12.
+- No_data applies to samples-absence rules only; poll-health absence is
+  intentionally exempt (see S3c.1).
+
+### S3c.5 Files changed
+
+- `internal/modules/alerts/evaluator.go` (`NoDataMaxLifetime`,
+  `ReasonUnknownState`, `SweepNoDataAlerts`, `EvaluateOnce` wiring, trigger
+  monitoring-gap guard); `scheduler.go` (per-tick sweep); `metrics.go`
+  (auto-resolve counter).
+- `tests/integration/m11s3c_nodata_test.go`.
+- This file.
+
+## M11 gate readiness (P2-AC-27..34)
+
+Recorded after M11-S1, S2, S3a, S3b and S3c. Authoritative regression:
+`scripts/ci-local.ps1 -WithIntegration` - **PASS** (fmt/vet/build/test/lint/
+proto + full integration, 623 s) - plus the web suite
+`npx playwright test --workers=1` (45 tests).
+
+| AC | Status | Evidence and notes |
+|---|---|---|
+| P2-AC-27 rule types (`threshold`/`absence`/`rate_of_change`) with `for_duration`, immutable versioning, `scope_selector`, 5 s query timeout, >= 5 m windows via CAGGs, no partial bucket unless `allow_partial` | **PASS** | S1.3/S1.5; evaluator unit + integration suites |
+| P2-AC-28 state machine with timeline, recovery `for_duration`, device-down recovery after 2 successful polls, manual resolve capability+reason, `no_data` 24 h -> `unknown state` | **PASS** (p95 measurement deferred) | S1.3/S1.4, S3c; metric->state <= 60 s p95 is bounded by design (rule cadence + 15 s scheduler tick) but not load-measured - the load harness is M12 |
+| P2-AC-29 one open alert per fingerprint, repeats update value/time, storm > 20/5 min | **PASS with deferrals** | S1.4; per-site 30/h notify budget with digest coalescing and topology parent/child suppression depend on the pending P2-D6 decision and the V2 topology model |
+| P2-AC-30 ack/snooze/comment/resolve audited; snooze reactivates; windows and silences suppress while still recording/evaluating | **PASS with deferrals** | S1.4, S3a, S3b; recurring windows (RFC 5545 subset) are V2 - single scoped intervals shipped; the alerts workspace marks suppression, per-resource dashboard markers land with redesign Phases 3-4 |
+| P2-AC-31 SMTP/webhook(HMAC)/Slack/Teams, at-least-once + dedup header, canonical backoff, breaker, severity buckets, duplicate suppression, delivery logs | **PASS with deferral** | S2; the > 5 % failures/15 min channel-failure watch emits a metric + log - the ops *self-alert* is M12's self-observability goal |
+| P2-AC-32 curated default rule templates, sane out of the box | **PASS** | S2.6 (5-rule pack, install API, scheduler seeding for new orgs) |
+| P2-AC-33 SSE `alert.*` stream, 20 s heartbeats, `Last-Event-ID` resume (10 min buffer + PG replay), site scoping; alert queue updates live; charts pull-based | **PASS** | S3a/S3b; path is `/v1/streams/events` (repo `/v1` convention); scoping is enforced from server-side bindings instead of a query filter |
+| P2-AC-34 lifecycle e2e: unreachable -> Active -> one notification -> recovery -> Resolved, exactly one per fingerprint per transition | **PASS** | `m11_gate_lifecycle_test.go` (backend), `alerts.spec.ts` (UI) |
+
+### Gate decisions requested
+
+1. Accept the four documented deferrals above (P2-D6-dependent budget and
+   child suppression; recurring windows; M12 self-alert; p95 load
+   measurement), or schedule any of them back into M11 before sign-off.
+2. Per-resource "maintenance" markers on device/site dashboards: currently
+   only the alerts workspace renders them; recommend folding the dashboard
+   marker into redesign Phases 3-4 rather than reopening M11.

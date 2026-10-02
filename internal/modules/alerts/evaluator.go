@@ -136,7 +136,161 @@ func (e *Evaluator) EvaluateOnce(ctx context.Context, orgID uuid.UUID, now time.
 			}
 		}
 	}
+	resolved, serr := e.SweepNoDataAlerts(ctx, orgID, now)
+	if serr != nil {
+		sum.Errors++
+		if e.logger != nil {
+			e.logger.Warn("no-data max-lifetime sweep failed",
+				"component", "alerts", "org_id", orgID, "error", serr)
+		}
+	}
+	sum.Transitions += resolved
 	return sum, nil
+}
+
+// NoDataMaxLifetime is the canonical max lifetime of a samples-absence alert:
+// when its evidence stream produces no data for this long, the alert
+// auto-resolves with ReasonUnknownState instead of going stale
+// (docs/10 §17.5, P2-AC-28).
+const NoDataMaxLifetime = 24 * time.Hour
+
+// ReasonUnknownState is the canonical auto-resolution reason for the no-data
+// max-lifetime policy.
+const ReasonUnknownState = "unknown state"
+
+// SweepNoDataAlerts auto-resolves open alerts of samples-absence rules whose
+// series has produced no samples for NoDataMaxLifetime. The sweep is
+// idempotent; resolutions take the normal transition path (sinks and
+// notifications, gated by any active suppression). Returns the number of
+// alerts auto-resolved.
+func (e *Evaluator) SweepNoDataAlerts(ctx context.Context, orgID uuid.UUID, now time.Time) (int, error) {
+	now = now.UTC()
+	cutoff := now.Add(-NoDataMaxLifetime)
+	var (
+		transitions []Transition
+		resolved    int
+	)
+	err := database.WithTenant(ctx, e.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT a.id, a.rule_id, a.rule_version, a.severity, a.fingerprint, a.state,
+			       a.resource_id, a.dimension_subset, a.started_at,
+			       coalesce(d.site_id, '00000000-0000-0000-0000-000000000000'::uuid),
+			       coalesce(d.kind, ''), r.scope_selector
+			FROM alerts a
+			JOIN alert_rules r
+			  ON r.org_id = a.org_id AND r.rule_id = a.rule_id AND r.version = a.rule_version
+			LEFT JOIN devices d ON d.id = a.resource_id AND d.org_id = a.org_id
+			WHERE a.org_id = $1
+			  AND a.state <> 'resolved'
+			  AND r.type = 'absence'
+			  AND coalesce(nullif(r.condition->>'source', ''), 'samples') = 'samples'
+			  AND a.started_at <= $2
+			ORDER BY a.id`, orgID, cutoff)
+		if err != nil {
+			return err
+		}
+		type staleAlert struct {
+			id          uuid.UUID
+			ruleID      uuid.UUID
+			ruleVersion int
+			severity    string
+			fingerprint string
+			state       string
+			resourceID  uuid.UUID
+			dims        []byte
+			startedAt   time.Time
+			siteID      uuid.UUID
+			deviceKind  string
+			selector    []byte
+		}
+		var stale []staleAlert
+		for rows.Next() {
+			var s staleAlert
+			if err := rows.Scan(&s.id, &s.ruleID, &s.ruleVersion, &s.severity, &s.fingerprint,
+				&s.state, &s.resourceID, &s.dims, &s.startedAt, &s.siteID, &s.deviceKind,
+				&s.selector); err != nil {
+				rows.Close()
+				return err
+			}
+			stale = append(stale, s)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+
+		for _, s := range stale {
+			var sel struct {
+				MetricKey string `json:"metric_key"`
+			}
+			if err := json.Unmarshal(s.selector, &sel); err != nil || sel.MetricKey == "" {
+				continue // cannot prove no-data without a metric selector
+			}
+			var fresh bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM metric_series ms
+					JOIN metric_samples msp ON msp.series_id = ms.id
+					WHERE ms.org_id = $1 AND ms.device_id = $2 AND ms.metric_key = $3
+					  AND ms.dimensions @> $4::jsonb
+					  AND msp.ts > $5
+				)`, orgID, s.resourceID, sel.MetricKey, s.dims, cutoff).Scan(&fresh); err != nil {
+				return err
+			}
+			if fresh {
+				continue // data resumed: the rule evaluator owns that resolve
+			}
+			tg := target{DeviceID: s.resourceID, SiteID: s.siteID, DeviceKind: s.deviceKind, Dims: s.dims}
+			plan, err := e.activeSuppression(ctx, tx, orgID, tg, &s.id, s.fingerprint, now)
+			if err != nil {
+				return err
+			}
+			value := mustMarshal(map[string]any{
+				"reason": ReasonUnknownState, "resolution": "max_lifetime",
+				"started_at": s.startedAt.UTC().Format(time.RFC3339),
+			})
+			if _, err := tx.Exec(ctx, `
+				UPDATE alerts SET state = 'resolved', resolved_at = $2, snooze_until = NULL,
+					last_evaluated_at = $2, value = $3::jsonb
+				WHERE id = $1`, s.id, now, value); err != nil {
+				return err
+			}
+			suppressed := plan.active()
+			ev, err := appendEvent(ctx, tx, orgID, s.id, EventResolved, nil, map[string]any{
+				"from": s.state, "to": StateResolved, "reason": ReasonUnknownState,
+				"auto": true, "no_data_for": NoDataMaxLifetime.String(), "suppressed": suppressed,
+			}, now)
+			if err != nil {
+				return err
+			}
+			alert := Alert{
+				ID: s.id, OrgID: orgID, RuleID: s.ruleID, RuleVersion: s.ruleVersion,
+				Fingerprint: s.fingerprint, ResourceType: "device", ResourceID: s.resourceID,
+				DimensionSubset: s.dims, State: StateResolved, Severity: s.severity,
+				Value: value, StartedAt: s.startedAt, LastEvaluatedAt: now,
+				ResolvedAt: &now, SiteID: s.siteID,
+			}
+			transitions = append(transitions, Transition{Alert: alert, Event: ev, Suppressed: suppressed})
+			resolved++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	for _, sink := range e.sinks {
+		if sink == nil {
+			continue
+		}
+		for _, tr := range transitions {
+			sink.Transitioned(ctx, tr)
+		}
+	}
+	if resolved > 0 {
+		alertsNoDataResolved.Add(float64(resolved))
+	}
+	return resolved, nil
 }
 
 // EvaluateRule evaluates one rule's targets at `now` in a single tenant
@@ -1027,6 +1181,19 @@ func (e *Evaluator) triggerAt(ctx context.Context, tx pgx.Tx, rule Rule, tg targ
 			return false, map[string]any{"phase": "trigger", "missing": true}, nil
 		}
 		age := at.Sub(*last)
+		if age >= NoDataMaxLifetime {
+			// Canonical no-data max lifetime (docs/10 §17.5): a stream silent
+			// for 24 h is a monitoring gap, not a fresh absence. The sweep
+			// auto-resolves any open alarm as unknown state and no new alarm
+			// may fire from the gap alone.
+			return false, map[string]any{
+				"phase":          "trigger",
+				"monitoring_gap": true,
+				"last_sample_at": last.UTC().Format(time.RFC3339),
+				"age_seconds":    age.Seconds(),
+				"window":         rule.Condition.Window.String(),
+			}, nil
+		}
 		return age > rule.Condition.Window, map[string]any{
 			"phase":          "trigger",
 			"last_sample_at": last.Format(time.RFC3339),

@@ -147,6 +147,17 @@ func (s *Scheduler) tickOrg(ctx context.Context, orgID uuid.UUID, now time.Time)
 		s.last[r.RuleID] = now
 		s.mu.Unlock()
 	}
+	// No-data max-lifetime (M11-S3c, P2-AC-28): samples-absence alarms whose
+	// evidence stream stayed silent for 24 h auto-resolve as unknown state.
+	if n, err := s.eval.SweepNoDataAlerts(ctx, orgID, now); err != nil {
+		if ctx.Err() == nil && s.logger != nil {
+			s.logger.Warn("alert scheduler: no-data max-lifetime sweep failed",
+				"component", "alerts", "org_id", orgID, "error", err)
+		}
+	} else if n > 0 && s.logger != nil {
+		s.logger.Info("alert scheduler: no-data max-lifetime auto-resolved alerts",
+			"component", "alerts", "org_id", orgID, "alerts", n)
+	}
 }
 
 func (s *Scheduler) due(r Rule, now time.Time) bool {

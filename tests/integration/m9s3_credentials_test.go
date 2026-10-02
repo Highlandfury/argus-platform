@@ -418,9 +418,19 @@ func TestM9S3BindingRemovalDropsCredentialRAMOnly(t *testing.T) {
 
 	// RAM-only: the only file the collector wrote is the signed bundle, whose
 	// credentials are per-session ciphertext; the sentinel never hits disk or
-	// logs (collector or server side).
-	entries, err := os.ReadDir(policyDir)
-	must(t, err)
+	// logs (collector or server side). The bundle is persisted asynchronously
+	// with the applied policy, so wait for it under load instead of racing the
+	// writer.
+	var entries []os.DirEntry
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, err = os.ReadDir(policyDir)
+		must(t, err)
+		if len(entries) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	if len(entries) == 0 {
 		t.Fatal("expected the applied signed bundle cache")
 	}

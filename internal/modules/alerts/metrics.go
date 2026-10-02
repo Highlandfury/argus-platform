@@ -48,6 +48,13 @@ var (
 		Namespace: "argus", Subsystem: "alerts", Name: "stream_events_total",
 		Help: "SSE alert events delivered by canonical event name.",
 	}, []string{"event"})
+
+	// M11-S3c: samples-absence alerts auto-resolved by the canonical 24 h
+	// no-data max lifetime policy (docs/10 §17.5, P2-AC-28).
+	alertsNoDataResolved = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "argus", Subsystem: "alerts", Name: "no_data_auto_resolved_total",
+		Help: "Samples-absence alerts auto-resolved after 24 h without data (unknown state).",
+	})
 )
 
 // RegisterMetrics registers the evaluator instruments on the ops registry.
@@ -59,5 +66,6 @@ func RegisterMetrics(tel *telemetry.Registry) {
 		alertsEvaluations, alertsTransitions, alertsStormSuppressed,
 		alertsSuppressionTotal,
 		alertsStreamClients, alertsStreamDropped, alertsStreamEvents,
+		alertsNoDataResolved,
 	)
 }
