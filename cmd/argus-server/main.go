@@ -22,6 +22,7 @@ import (
 
 	collectorv1 "github.com/argus-platform/argus/gen/go/argus/collector/v1"
 	"github.com/argus-platform/argus/internal/api"
+	"github.com/argus-platform/argus/internal/modules/alerts"
 	"github.com/argus-platform/argus/internal/modules/checks"
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/credentials"
@@ -31,6 +32,7 @@ import (
 	"github.com/argus-platform/argus/internal/modules/metrics"
 	"github.com/argus-platform/argus/internal/modules/pollhealth"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
+	"github.com/argus-platform/argus/internal/platform/authz"
 	"github.com/argus-platform/argus/internal/platform/buildinfo"
 	"github.com/argus-platform/argus/internal/platform/config"
 	"github.com/argus-platform/argus/internal/platform/database"
@@ -102,6 +104,7 @@ func cmdServe(args []string) int {
 	argus := telemetry.NewArgus(tel)
 	metrics.RegisterSeriesMetrics(tel)
 	metrics.RegisterGuardMetrics(tel)
+	alerts.RegisterMetrics(tel)
 
 	// Pools + readiness (SPEC §17): readyz reflects DB reachability, auth-role
 	// reachability, and schema state.
@@ -268,6 +271,22 @@ func cmdServe(args []string) int {
 		pollHealthSvc = pollhealth.New(appPool)
 	}
 
+	// Alert engine (M11-S1): rules/alerts API plus the in-process evaluator
+	// (P2-D3, no NATS). The evaluator runs on its own goroutine below; the
+	// scheduler is a no-op until both DB pools are configured.
+	var (
+		alertsSvc  *alerts.Service
+		alertEval  *alerts.Evaluator
+		alertSched *alerts.Scheduler
+	)
+	if appPool != nil {
+		alertsSvc = alerts.New(appPool, authz.New(appPool))
+		alertEval = alerts.NewEvaluator(appPool, alerts.EvaluatorOptions{Logger: logger})
+	}
+	if appPool != nil && authPool != nil {
+		alertSched = alerts.NewScheduler(appPool, authPool, alertEval, logger)
+	}
+
 	opts := api.Options{
 		Logger:            logger,
 		Telemetry:         tel,
@@ -285,6 +304,7 @@ func cmdServe(args []string) int {
 		Credentials:       credentialsSvc,
 		PollHealth:        pollHealthSvc,
 		Checks:            checksSvc,
+		Alerts:            alertsSvc,
 	}
 
 	httpSrv := &http.Server{
@@ -315,6 +335,10 @@ func cmdServe(args []string) int {
 	if appPool != nil && authPool != nil {
 		gauges := telemetry.NewCollectorGauges(appPool, authPool, tel)
 		go gauges.Run(ctx, 30*time.Second)
+	}
+	// Alert evaluator (M11-S1): in-process scheduler, per-rule cadence.
+	if alertSched != nil {
+		go alertSched.Run(ctx, 15*time.Second)
 	}
 
 	errCh := make(chan error, 4)

@@ -67,6 +67,25 @@ const (
 // admin only.
 const CapDiagnosticRun = "diagnostic.run"
 
+// Alert capability vocabulary (M11-S1). All six names are canonical
+// (docs/04 §6.5: alert.read, alert.ack, alert.snooze, alert.silence,
+// alertrule.read, alertrule.write). The canonical permission matrix
+// (docs/04 §6.4) grants "Alerts (view)" to every role including Read-only,
+// while ack/snooze/silence and rule management are operator/admin actions;
+// under the Phase-1 admin/viewer model the viewer holds alert.read only and
+// every other alert capability is admin-only. alert.silence is declared now
+// (the catalog is the contract) but has no implemented route until M11-S3.
+const (
+	CapAlertRead     = "alert.read"
+	CapAlertAck      = "alert.ack"
+	CapAlertSnooze   = "alert.snooze"
+	CapAlertSilence  = "alert.silence"
+	CapAlertRuleRead = "alertrule.read"
+	// CapAlertRuleWrite is the canonical CRUD capability for /alert-rules
+	// (docs/12 §22.9; docs/04 §6.5).
+	CapAlertRuleWrite = "alertrule.write"
+)
+
 // Scope types: nodes of the resource tree the authorizer resolves at. Device
 // scope resolves through the device's site binding (device-level bindings are
 // not representable in migration 000010).
@@ -97,6 +116,18 @@ var CredentialCapabilities = []string{
 // diagnostics to read-only principals).
 var DiagnosticCapabilities = []string{CapDiagnosticRun}
 
+// AlertCapabilities is the alert lifecycle vocabulary (M11-S1). Admin holds
+// all of them; viewer holds alert.read only (docs/04 §6.4: ack/snooze/silence
+// are operator actions, never read-only).
+var AlertCapabilities = []string{
+	CapAlertRead, CapAlertAck, CapAlertSnooze, CapAlertSilence,
+}
+
+// AlertRuleCapabilities is the rule-management vocabulary. Admin holds both;
+// the canonical matrix grants Read-only nothing on Alert rules, so the viewer
+// gets neither (not even alertrule.read).
+var AlertRuleCapabilities = []string{CapAlertRuleRead, CapAlertRuleWrite}
+
 // ReadCapabilities are granted to the viewer role (all read-class inventory
 // capabilities).
 var ReadCapabilities = []string{
@@ -123,9 +154,22 @@ func capabilitySet(caps ...string) map[string]bool {
 // which is the least privilege the canonical docs allow (credentials are
 // write-only and "never revealable" per docs/04 §6.2).
 var roleCapabilities = map[string]map[string]bool{
-	"admin": capabilitySet(append(append(append([]string{},
-		InventoryCapabilities...), CredentialCapabilities...), DiagnosticCapabilities...)...),
-	"viewer": capabilitySet(ReadCapabilities...), // deliberately no credential or diagnostic capabilities
+	"admin": capabilitySet(adminCapabilities()...),
+	// viewer: read-only inventory + alert view (docs/04 §6.4); deliberately no
+	// credential, diagnostic, alert-lifecycle, or rule capabilities.
+	"viewer": capabilitySet(append(append([]string{}, ReadCapabilities...), CapAlertRead)...),
+}
+
+// adminCapabilities is the union of every vocabulary the admin role holds.
+func adminCapabilities() []string {
+	var out []string
+	for _, set := range [][]string{
+		InventoryCapabilities, CredentialCapabilities, DiagnosticCapabilities,
+		AlertCapabilities, AlertRuleCapabilities,
+	} {
+		out = append(out, set...)
+	}
+	return out
 }
 
 // Allowed reports whether the role holds the capability under the current role
@@ -163,6 +207,28 @@ func IsCredentialCapability(name string) bool {
 // trigger vocabulary.
 func IsDiagnosticCapability(name string) bool {
 	for _, c := range DiagnosticCapabilities {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAlertCapability reports whether name is part of the M11 alert lifecycle
+// vocabulary.
+func IsAlertCapability(name string) bool {
+	for _, c := range AlertCapabilities {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAlertRuleCapability reports whether name is part of the M11 alert-rule
+// vocabulary.
+func IsAlertRuleCapability(name string) bool {
+	for _, c := range AlertRuleCapabilities {
 		if c == name {
 			return true
 		}

@@ -30,6 +30,35 @@ func TestRoleCapabilityDerivation(t *testing.T) {
 	}
 }
 
+func TestAlertCapabilityDerivation(t *testing.T) {
+	for _, cap := range append(append([]string{}, AlertCapabilities...), AlertRuleCapabilities...) {
+		if !Allowed("admin", cap) {
+			t.Errorf("admin lacks alert capability %q", cap)
+		}
+	}
+	if !Allowed("viewer", CapAlertRead) {
+		t.Error("viewer must hold alert.read (docs/04 §6.4: alerts view is granted to read-only)")
+	}
+	for _, cap := range []string{CapAlertAck, CapAlertSnooze, CapAlertSilence, CapAlertRuleRead, CapAlertRuleWrite} {
+		if Allowed("viewer", cap) {
+			t.Errorf("viewer unexpectedly holds %q (canonical matrix denies it to read-only)", cap)
+		}
+	}
+	for _, cap := range AlertCapabilities {
+		if !IsAlertCapability(cap) {
+			t.Errorf("IsAlertCapability(%q) = false", cap)
+		}
+	}
+	for _, cap := range AlertRuleCapabilities {
+		if !IsAlertRuleCapability(cap) {
+			t.Errorf("IsAlertRuleCapability(%q) = false", cap)
+		}
+	}
+	if IsAlertCapability(CapAlertRuleWrite) || IsAlertRuleCapability(CapAlertAck) {
+		t.Error("alert and alert-rule vocabularies must not cross")
+	}
+}
+
 func TestCapabilityAndScopeVocabulary(t *testing.T) {
 	for _, cap := range InventoryCapabilities {
 		if !IsInventoryCapability(cap) {

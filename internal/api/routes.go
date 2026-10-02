@@ -65,6 +65,24 @@ var routeTable = []Route{
 	{Method: "GET", Path: "/v1/device-groups/{id}", Protected: true, Capability: authz.CapDeviceGroupRead, Scope: authz.ScopeDeviceGroup},
 	{Method: "PATCH", Path: "/v1/device-groups/{id}", Protected: true, CSRF: true, Capability: authz.CapDeviceGroupWrite, Scope: authz.ScopeDeviceGroup},
 	{Method: "DELETE", Path: "/v1/device-groups/{id}", Protected: true, CSRF: true, Capability: authz.CapDeviceGroupWrite, Scope: authz.ScopeDeviceGroup},
+	// M11-S1 alert engine. Rules are org-scoped objects (the scope_selector
+	// narrows targets; restricted callers may only reference in-scope targets
+	// and org-wide selectors require org-wide scope). Alerts are resource
+	// scoped: the collection read is a site-scoped read (site filter like the
+	// device list), item/lifecycle operations resolve the alert's resource
+	// device scope. Canonical capability names from docs/04 §6.5.
+	{Method: "POST", Path: "/v1/alert-rules", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/alert-rules", Protected: true, Capability: authz.CapAlertRuleRead, Scope: authz.ScopeOrg},
+	{Method: "POST", Path: "/v1/alert-rules:validate", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/alert-rules/{id}", Protected: true, Capability: authz.CapAlertRuleRead, Scope: authz.ScopeOrg},
+	{Method: "PATCH", Path: "/v1/alert-rules/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "DELETE", Path: "/v1/alert-rules/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/alerts", Protected: true, Capability: authz.CapAlertRead, Scope: authz.ScopeSite},
+	{Method: "GET", Path: "/v1/alerts/{id}", Protected: true, Capability: authz.CapAlertRead, Scope: authz.ScopeDevice},
+	{Method: "POST", Path: "/v1/alerts/{id}/ack", Protected: true, CSRF: true, Capability: authz.CapAlertAck, Scope: authz.ScopeDevice},
+	{Method: "POST", Path: "/v1/alerts/{id}/snooze", Protected: true, CSRF: true, Capability: authz.CapAlertSnooze, Scope: authz.ScopeDevice},
+	{Method: "POST", Path: "/v1/alerts/{id}/resolve", Protected: true, CSRF: true, Capability: authz.CapAlertAck, Scope: authz.ScopeDevice},
+	{Method: "POST", Path: "/v1/alerts/{id}/comment", Protected: true, CSRF: true, Capability: authz.CapAlertAck, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/credentials", Protected: true, Capability: authz.CapCredentialReadMetadata, Scope: authz.ScopeOrg},
 	{Method: "POST", Path: "/v1/credentials", Protected: true, CSRF: true, Capability: authz.CapCredentialWrite, Scope: authz.ScopeOrg},
 	{Method: "GET", Path: "/v1/credentials/{id}", Protected: true, Capability: authz.CapCredentialReadMetadata, Scope: authz.ScopeOrg},

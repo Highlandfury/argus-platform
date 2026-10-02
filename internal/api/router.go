@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/argus-platform/argus/internal/modules/alerts"
 	"github.com/argus-platform/argus/internal/modules/checks"
 	"github.com/argus-platform/argus/internal/modules/collectors"
 	"github.com/argus-platform/argus/internal/modules/credentials"
@@ -49,6 +50,7 @@ type Options struct {
 	Credentials       *credentials.Service
 	PollHealth        *pollhealth.Service
 	Checks            *checks.Service
+	Alerts            *alerts.Service
 }
 
 type handlers struct {
@@ -62,6 +64,7 @@ type handlers struct {
 	credentialsHTTP *credentials.HTTP
 	pollHealthHTTP  *pollhealth.HTTP
 	checksHTTP      *checks.HTTP
+	alertsHTTP      *alerts.HTTP
 }
 
 func newHandlers(o Options) *handlers {
@@ -117,6 +120,9 @@ func newHandlers(o Options) *handlers {
 	}
 	if o.Checks != nil && o.Inventory != nil {
 		h.checksHTTP = &checks.HTTP{Svc: o.Checks, Devices: o.Inventory}
+	}
+	if o.Alerts != nil {
+		h.alertsHTTP = &alerts.HTTP{Svc: o.Alerts}
 	}
 	return h
 }
@@ -429,6 +435,89 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 			default:
 				h.inventoryHTTP.GetDeviceGroup(w, r)
 			}
+		})
+	case "/v1/alert-rules":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.alertsHTTP.CreateRule(w, r)
+				return
+			}
+			h.alertsHTTP.ListRules(w, r)
+		})
+	case "/v1/alert-rules:validate":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.ValidateRule(w, r)
+		})
+	case "/v1/alert-rules/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				h.alertsHTTP.UpdateRule(w, r)
+			case http.MethodDelete:
+				h.alertsHTTP.DeleteRule(w, r)
+			default:
+				h.alertsHTTP.GetRule(w, r)
+			}
+		})
+	case "/v1/alerts":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.ListAlerts(w, r)
+		})
+	case "/v1/alerts/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.GetAlert(w, r)
+		})
+	case "/v1/alerts/{id}/ack":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.AckAlert(w, r)
+		})
+	case "/v1/alerts/{id}/snooze":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.SnoozeAlert(w, r)
+		})
+	case "/v1/alerts/{id}/resolve":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.ResolveAlert(w, r)
+		})
+	case "/v1/alerts/{id}/comment":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.CommentAlert(w, r)
 		})
 	case "/v1/credentials":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -1083,6 +1083,300 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /v1/alert-rules:
+    post:
+      tags: [alerts]
+      summary: Create an alert rule (version 1). Every edit is a new immutable version
+      description: >
+        M11-S1. Structured, validated, versioned rule JSON (docs/10 §17.2).
+        Types threshold/absence/rate_of_change; composite/baseline are V2.
+        A restricted caller (site bindings) may only target in-scope
+        sites/devices; org-wide selectors require org-wide scope.
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertRuleCreate' }
+      responses:
+        '201':
+          description: Created (version 1)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertRule' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    get:
+      tags: [alerts]
+      summary: List the latest version of every alert rule (cursor-paged, scope-filtered)
+      x-argus-capability: alertrule.read
+      x-argus-scope: org
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string }, description: rule_id from next_cursor }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/AlertRule' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+
+  /v1/alert-rules:validate:
+    post:
+      tags: [alerts]
+      summary: 'Dry-run validation of a rule definition (no persistence): returns {valid, errors[]}'
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertRuleCreate' }
+      responses:
+        '200':
+          description: Validation result (valid=false carries the field errors; malformed JSON is 400)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertRuleValidateResult' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/alert-rules/{id}:
+    get:
+      tags: [alerts]
+      summary: Get the latest rule version (or ?version=N for a pinned immutable version)
+      x-argus-capability: alertrule.read
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: version, in: query, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertRule' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [alerts]
+      summary: Edit a rule by writing a new immutable version N+1 (omitted fields are copied)
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertRuleUpdate' }
+      responses:
+        '200':
+          description: New version written
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertRule' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Concurrent edit (alert_rule.version_conflict); reload and retry
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [alerts]
+      summary: Disable a rule (writes a new immutable version with enabled=false; history preserved)
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '200':
+          description: Disabled (new version)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertRule' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/alerts:
+    get:
+      tags: [alerts]
+      summary: Alert queue/list (newest onset first; cursor-paged; scope-filtered by resource device site)
+      x-argus-capability: alert.read
+      x-argus-scope: site
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: 'filter[state]', in: query, schema: { type: string, enum: [pending, active, acknowledged, snoozed, suppressed, resolved] } }
+        - { name: 'filter[severity]', in: query, schema: { type: string, enum: [info, warning, critical] } }
+        - { name: 'filter[rule_id]', in: query, schema: { type: string, format: uuid } }
+        - { name: 'filter[device_id]', in: query, schema: { type: string, format: uuid }, description: Out-of-scope device ids are a deterministic 403 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Alert' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/alerts/{id}:
+    get:
+      tags: [alerts]
+      summary: Alert detail plus the recent alert_events timeline (newest first)
+      x-argus-capability: alert.read
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertDetail' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/alerts/{id}/ack:
+    post:
+      tags: [alerts]
+      summary: Acknowledge an open alert (audited timeline event)
+      x-argus-capability: alert.ack
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '200':
+          description: Acknowledged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Operation not allowed in the alert's current state
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/alerts/{id}/snooze:
+    post:
+      tags: [alerts]
+      summary: Snooze an alert until a bounded expiry (<= 30 d); evaluation continues and reactivates if still true
+      x-argus-capability: alert.snooze
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertSnoozeRequest' }
+      responses:
+        '200':
+          description: Snoozed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Operation not allowed in the alert's current state
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/alerts/{id}/resolve:
+    post:
+      tags: [alerts]
+      summary: Manually resolve an open alert; a reason is required (capability alert.ack)
+      description: >
+        A re-fire of the same fingerprint within the documented reopen cooldown
+        reopens this same row (no duplicate), per docs/10 §17.5.
+      x-argus-capability: alert.ack
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertResolveRequest' }
+      responses:
+        '200':
+          description: Resolved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Operation not allowed in the alert's current state
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /v1/alerts/{id}/comment:
+    post:
+      tags: [alerts]
+      summary: Append a comment to the alert timeline (any state; capability alert.ack)
+      x-argus-capability: alert.ack
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AlertCommentRequest' }
+      responses:
+        '200':
+          description: Comment appended
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alert' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /v1/healthz:
     get:
       tags: [ops]
@@ -1733,6 +2027,125 @@ components:
           properties:
             gaps: { type: integer, description: "Expected buckets with no observed sample, before fill" }
             dropped_samples: { type: integer, description: "Always 0: samples are never dropped by the query path" }
+    AlertRuleCondition:
+      type: object
+      description: >
+        Structured condition (docs/10 §17.2). threshold/rate_of_change:
+        {agg, op, value, window, for_duration, allow_partial?, recovery?}.
+        absence samples: {window, for_duration, recovery?}; absence
+        poll_health: {source, consecutive_failures?, recovery_successes?,
+        check_interval?, recovery?}. Durations are Go duration strings
+        (e.g. 30s, 1m, 5m). recovery defaults to the logical inverse with a
+        longer for_duration.
+      additionalProperties: true
+    AlertRule:
+      type: object
+      required: [rule_id, version, name, type, severity, scope_selector, condition, enabled, created_at]
+      properties:
+        rule_id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1, description: Immutable version number; the latest version is the active rule }
+        name: { type: string, maxLength: 200 }
+        type: { type: string, enum: [threshold, absence, rate_of_change] }
+        severity: { type: string, enum: [info, warning, critical] }
+        scope_selector:
+          type: object
+          additionalProperties: true
+          description: "Target selector: {sites?, device_ids?, device_kinds?, metric_key, dimensions?}; metric_key is required for series rules"
+        condition: { $ref: '#/components/schemas/AlertRuleCondition' }
+        enabled: { type: boolean, description: 'DELETE writes a new version with enabled=false' }
+        created_by: { type: [string, 'null'], format: uuid }
+        created_at: { type: string, format: date-time }
+    AlertRuleCreate:
+      type: object
+      required: [name, type, severity, condition, scope_selector]
+      properties:
+        name: { type: string, maxLength: 200 }
+        type: { type: string, enum: [threshold, absence, rate_of_change] }
+        severity: { type: string, enum: [info, warning, critical] }
+        scope_selector: { type: object, additionalProperties: true }
+        condition: { $ref: '#/components/schemas/AlertRuleCondition' }
+    AlertRuleUpdate:
+      type: object
+      description: Partial patch; omitted fields are copied into the new immutable version.
+      properties:
+        name: { type: string, maxLength: 200 }
+        type: { type: string, enum: [threshold, absence, rate_of_change] }
+        severity: { type: string, enum: [info, warning, critical] }
+        scope_selector: { type: object, additionalProperties: true }
+        condition: { $ref: '#/components/schemas/AlertRuleCondition' }
+        enabled: { type: boolean }
+    AlertRuleValidateResult:
+      type: object
+      required: [valid]
+      properties:
+        valid: { type: boolean }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              code: { type: string }
+              message: { type: string }
+    Alert:
+      type: object
+      required: [id, rule_id, rule_version, fingerprint, resource_type, resource_id, dimension_subset, state, severity, value, started_at, last_evaluated_at, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        rule_id: { type: string, format: uuid }
+        rule_version: { type: integer, description: The immutable rule version that fired this alert }
+        fingerprint: { type: string, description: 'hash(rule_id, resource_type, resource_id, dimension_subset); one open alert per fingerprint' }
+        resource_type: { type: string, enum: [device] }
+        resource_id: { type: string, format: uuid, description: The resource (device) id }
+        site_id: { type: string, format: uuid, description: Resolved device site (scope key) }
+        dimension_subset: { type: object, additionalProperties: true, description: The matched series' canonical dimensions }
+        state: { type: string, enum: [pending, active, acknowledged, snoozed, suppressed, resolved] }
+        severity: { type: string, enum: [info, warning, critical] }
+        value: { type: object, additionalProperties: true, description: 'Latest evidence: observed value/threshold/phase or absence/poll evidence' }
+        started_at: { type: string, format: date-time, description: 'When the condition first became true (Pending onset)' }
+        last_evaluated_at: { type: string, format: date-time }
+        resolved_at: { type: [string, 'null'], format: date-time }
+        ack_by: { type: [string, 'null'], format: uuid }
+        ack_at: { type: [string, 'null'], format: date-time }
+        snooze_until: { type: [string, 'null'], format: date-time }
+        suppression_reason: { type: string, description: 'storm when the per-device burst limiter suppressed the alert (maintenance/silence arrive in M11-S3)' }
+        created_at: { type: string, format: date-time }
+    AlertDetail:
+      allOf:
+        - $ref: '#/components/schemas/Alert'
+        - type: object
+          properties:
+            events:
+              type: array
+              description: Recent timeline, newest first (max 50)
+              items: { $ref: '#/components/schemas/AlertEvent' }
+    AlertEvent:
+      type: object
+      required: [id, alert_id, kind, ts]
+      properties:
+        id: { type: string, format: uuid }
+        alert_id: { type: string, format: uuid }
+        kind: { type: string, description: 'pending | activated | updated | acknowledged | snoozed | unsnoozed | reactivated | suppressed | resolved | manual_resolved | comment | reopened' }
+        actor_id: { type: [string, 'null'], format: uuid }
+        data: { type: object, additionalProperties: true }
+        ts: { type: string, format: date-time }
+    AlertSnoozeRequest:
+      type: object
+      description: Exactly one of until/duration_seconds; expiry must be <= 30 days out.
+      properties:
+        until: { type: string, format: date-time }
+        duration_seconds: { type: integer, minimum: 1, maximum: 2592000 }
+        reason: { type: string, maxLength: 2000 }
+    AlertResolveRequest:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 2000 }
+    AlertCommentRequest:
+      type: object
+      required: [comment]
+      properties:
+        comment: { type: string, minLength: 1, maxLength: 2000 }
 
 security:
   - sessionCookie: []

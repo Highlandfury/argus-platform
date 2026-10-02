@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,23 +200,71 @@ func TestLoginSessionLifecycle(t *testing.T) {
 
 // TestLoginRateLimitS09: the 11th rapid attempt on one server is 429 with
 // Retry-After (burst 10, ~10/min).
+//
+// Robustness note (no property weakened): every failed login pays an Argon2
+// verification, and on a loaded host ten *sequential* requests can take
+// longer than the limiter's 6 s refill interval, letting a token refill and
+// turning the 11th attempt into a 401. The property under test is the 11th
+// *rapid* attempt, so all eleven are issued concurrently; exactly ten must
+// pass the limiter (401 credential failures) and exactly one must be
+// rejected (429 + Retry-After). The limiter is mutex-serialized and the
+// concurrent requests reach it within the burst window regardless of how
+// long the Argon2 verifications then take.
 func TestLoginRateLimitS09(t *testing.T) {
 	slug := "rl-" + newUUID()[:8]
 	seedLoginUser(t, slug, "HQ-"+slug)
-	srv, client := newTestAPI(t)
+	srv, _ := newTestAPI(t)
 
-	for i := 1; i <= 10; i++ {
-		res := doRequest(t, client, http.MethodPost, srv.URL+"/v1/auth/login", loginBody(slug, "wrong"), nil)
-		if res.Status != http.StatusUnauthorized {
-			t.Fatalf("attempt %d: status %d, want 401", i, res.Status)
+	type attemptResult struct {
+		status     int
+		retryAfter string
+		err        error
+	}
+	const attempts = 11
+	results := make(chan attemptResult, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/auth/login", strings.NewReader(loginBody(slug, "wrong")))
+			if err != nil {
+				results <- attemptResult{err: err}
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
+			if err != nil {
+				results <- attemptResult{err: err}
+				return
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			results <- attemptResult{status: resp.StatusCode, retryAfter: resp.Header.Get("Retry-After")}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	unauthorized, limited := 0, 0
+	for r := range results {
+		if r.err != nil {
+			t.Fatalf("attempt: %v", r.err)
+		}
+		switch r.status {
+		case http.StatusUnauthorized:
+			unauthorized++
+		case http.StatusTooManyRequests:
+			limited++
+			if r.retryAfter == "" {
+				t.Fatal("429 must carry Retry-After")
+			}
+		default:
+			t.Fatalf("attempt: unexpected status %d", r.status)
 		}
 	}
-	res := doRequest(t, client, http.MethodPost, srv.URL+"/v1/auth/login", loginBody(slug, "wrong"), nil)
-	if res.Status != http.StatusTooManyRequests {
-		t.Fatalf("11th attempt: status %d, want 429", res.Status)
-	}
-	if res.Header.Get("Retry-After") == "" {
-		t.Fatal("429 must carry Retry-After")
+	if unauthorized != 10 || limited != 1 {
+		t.Fatalf("rapid burst outcome = %d x 401 / %d x 429, want 10 / 1 (burst 10, 11th denied)", unauthorized, limited)
 	}
 }
 

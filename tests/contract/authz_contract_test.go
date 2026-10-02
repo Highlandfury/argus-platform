@@ -50,6 +50,19 @@ func isCredentialPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/credentials")
 }
 
+// isAlertRulePath reports whether a path belongs to the M11-S1 alert-rule
+// surface (/v1/alert-rules and /v1/alert-rules:validate).
+func isAlertRulePath(path string) bool {
+	return strings.HasPrefix(path, "/v1/alert-rules")
+}
+
+// isAlertPath reports whether a path belongs to the M11-S1 alert lifecycle
+// surface (/v1/alerts...). Checked after isAlertRulePath because the
+// /v1/alert-rules prefix must not be captured by /v1/alerts.
+func isAlertPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/alerts")
+}
+
 type authzMeta struct {
 	Capability string
 	Scope      string
@@ -64,6 +77,12 @@ func capabilityInVocabulary(path, capability string) bool {
 	}
 	if isCredentialPath(path) {
 		return authz.IsCredentialCapability(capability)
+	}
+	if isAlertRulePath(path) {
+		return authz.IsAlertRuleCapability(capability)
+	}
+	if isAlertPath(path) {
+		return authz.IsAlertCapability(capability)
 	}
 	return authz.IsInventoryCapability(capability)
 }
@@ -95,8 +114,10 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	// Enforced metadata from the route registry.
 	enforced := map[routeKey]authzMeta{}
 	inventoryCount, credentialCount, checkCount, pollHealthCount := 0, 0, 0, 0
+	alertRuleCount, alertCount := 0, 0
 	for _, rt := range api.Routes() {
-		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) && !isCheckPath(rt.Path) && !isPollHealthPath(rt.Path) {
+		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) && !isCheckPath(rt.Path) &&
+			!isPollHealthPath(rt.Path) && !isAlertRulePath(rt.Path) && !isAlertPath(rt.Path) {
 			continue
 		}
 		switch {
@@ -106,6 +127,10 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 			pollHealthCount++
 		case isCredentialPath(rt.Path):
 			credentialCount++
+		case isAlertRulePath(rt.Path):
+			alertRuleCount++
+		case isAlertPath(rt.Path):
+			alertCount++
 		default:
 			inventoryCount++
 		}
@@ -122,6 +147,12 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	}
 	if pollHealthCount != 1 {
 		t.Fatalf("poll-health list routes in registry = %d, want 1 (GET /v1/poll-health)", pollHealthCount)
+	}
+	if alertRuleCount != 6 {
+		t.Fatalf("alert-rule routes in registry = %d, want the 6 M11-S1 routes", alertRuleCount)
+	}
+	if alertCount != 6 {
+		t.Fatalf("alert routes in registry = %d, want the 6 M11-S1 routes", alertCount)
 	}
 	for key, meta := range enforced {
 		if meta.Capability == "" {
@@ -144,7 +175,8 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	documented := map[routeKey]authzMeta{}
 	for pair := model.Model.Paths.PathItems.First(); pair != nil; pair = pair.Next() {
 		path := pair.Key()
-		if !isInventoryPath(path) && !isCredentialPath(path) && !isCheckPath(path) && !isPollHealthPath(path) {
+		if !isInventoryPath(path) && !isCredentialPath(path) && !isCheckPath(path) &&
+			!isPollHealthPath(path) && !isAlertRulePath(path) && !isAlertPath(path) {
 			continue
 		}
 		item := pair.Value()
@@ -230,6 +262,10 @@ func vocabularyName(path string) string {
 		return "poll-health"
 	case isCredentialPath(path):
 		return "credential"
+	case isAlertRulePath(path):
+		return "alert-rule"
+	case isAlertPath(path):
+		return "alert"
 	default:
 		return "inventory"
 	}
