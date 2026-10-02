@@ -102,6 +102,10 @@ export default function SiteDashboard({
         "filter[site_id]": siteID,
         include: "status",
         limit: "100",
+        // Newest-first, mirroring DevicesList: the inventory cursor default is
+        // ascending, which hides devices created after the site passed 100
+        // live rows (the API's order=asc|desc was added in M10-S3b-1).
+        order: "desc",
       });
       const res = await fetchJSON<{ data?: SiteDevice[]; has_more?: boolean }>(
         `/api/v1/devices?${params.toString()}`,

@@ -42,6 +42,20 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <div className="shell">
       <header className="shell-header">
         <span className="brand">ARGUS</span>
+        <nav className="shell-nav">
+          <a href="/devices" data-testid="nav-devices">
+            Devices
+          </a>
+          <a href="/device-groups" data-testid="nav-device-groups">
+            Device groups
+          </a>
+          <a href="/credentials" data-testid="nav-credentials">
+            Credentials
+          </a>
+          <a href="/collectors" data-testid="nav-collectors">
+            Collectors
+          </a>
+        </nav>
         <span className="who" data-testid="org-name">
           {me.org.name}
         </span>

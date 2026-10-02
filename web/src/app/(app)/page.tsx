@@ -51,11 +51,13 @@ export default async function DashboardPage() {
       <p className="muted" style={{ marginTop: 16 }}>
         <a href="/devices">Devices</a> — inventory list with sites, status, and
         management addresses; each device opens its visibility page (status,
-        interfaces, ICMP charts, on-demand checks). <a href="/credentials">Credentials</a>{" "}
-        — write-only secret metadata and bindings.{" "}
-        <a href="/collectors">Collectors</a> — enrollment, identity, and the
-        secure control stream. Sites open the site dashboard; alerting arrives
-        in M11.
+        interfaces, ICMP charts, on-demand checks).{" "}
+        <a href="/device-groups">Device groups</a> — dynamic group CRUD with a
+        JSON selector (membership resolution is deferred).{" "}
+        <a href="/credentials">Credentials</a> — write-only secret metadata and
+        bindings. <a href="/collectors">Collectors</a> — enrollment, identity,
+        and the secure control stream. Sites open the site dashboard; alerting
+        arrives in M11.
       </p>
     </section>
   );

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { fetchJSON, problemDetail, readCSRF } from "@/lib/api";
@@ -9,12 +10,14 @@ import AvailabilityRibbon from "./AvailabilityRibbon";
 import CheckRunner from "./CheckRunner";
 import DeviceAdminPanel from "./DeviceAdminPanel";
 import DeviceCredentialPanel from "./DeviceCredentialPanel";
+import DeviceInterfacePanel from "./DeviceInterfacePanel";
+import DeviceMergePanel from "./DeviceMergePanel";
 import StatusChip from "./StatusChip";
 import TimeSeriesChart, {
   type ChartMeta,
   type ChartSeries,
 } from "./TimeSeriesChart";
-import { formatLatency, formatSpeedBps, shortTime } from "./format";
+import { formatLatency, shortTime } from "./format";
 
 // DeviceDetail is the M10-S3 device visibility page: live poll-health status,
 // identity + identity history, live interfaces, ICMP availability/RTT/loss
@@ -77,22 +80,6 @@ const IDENTITY_TYPES = [
   "hostname",
   "mgmt_ip",
 ];
-
-interface InterfaceRow {
-  id: string;
-  if_index: number;
-  if_name: string;
-  if_alias: string | null;
-  admin_status: string | null;
-  oper_status: string | null;
-  speed_bps: number | null;
-  mtu: number | null;
-  mac: string | null;
-  role: string;
-  monitored: boolean;
-  last_seen_at: string | null;
-  status: "up" | "down" | "unknown";
-}
 
 interface PollHealthRecord {
   id: string;
@@ -189,17 +176,25 @@ export default function DeviceDetail({
   const [closingIdentityID, setClosingIdentityID] = useState<string | null>(
     null,
   );
-  const [interfaces, setInterfaces] = useState<InterfaceRow[] | null>(null);
-  const [interfacesError, setInterfacesError] = useState("");
+  // Bumped after a merge so the interface panel refetches the re-pointed rows.
+  const [interfacesKey, setInterfacesKey] = useState(0);
+  // M10-S3b-2 split: open identity rows selected for detachment + new name.
+  const [splitSelectedIDs, setSplitSelectedIDs] = useState<string[]>([]);
+  const [splitName, setSplitName] = useState("");
+  const [splitBusy, setSplitBusy] = useState(false);
+  const [splitError, setSplitError] = useState("");
+  const [splitFieldErrors, setSplitFieldErrors] = useState<
+    ProblemFieldError[]
+  >([]);
+  const [splitMessage, setSplitMessage] = useState("");
+  const [splitCreatedID, setSplitCreatedID] = useState<string | null>(null);
   const [health, setHealth] = useState<PollHealthRecord[] | null>(null);
   const [healthError, setHealthError] = useState("");
   const [rangeKey, setRangeKey] = useState<RangeKey>("6h");
   const [matrix, setMatrix] = useState<MatrixResponse | null>(null);
   const [chartsLoading, setChartsLoading] = useState(true);
   const [chartsError, setChartsError] = useState("");
-  const [utilization, setUtilization] = useState<Map<string, number> | null>(
-    null,
-  );
+  const router = useRouter();
 
   const loadStatus = useCallback(async () => {
     const res = await fetchJSON<DeviceStatus>(
@@ -214,12 +209,9 @@ export default function DeviceDetail({
   }, [device.id]);
 
   const loadTables = useCallback(async () => {
-    const [identityRes, interfacesRes, healthRes] = await Promise.all([
+    const [identityRes, healthRes] = await Promise.all([
       fetchJSON<{ data?: IdentityRecord[] }>(
         `/api/v1/devices/${device.id}/identity-history?limit=50`,
-      ),
-      fetchJSON<{ data?: InterfaceRow[] }>(
-        `/api/v1/devices/${device.id}/interfaces?limit=100`,
       ),
       fetchJSON<{ data?: PollHealthRecord[] }>(
         `/api/v1/devices/${device.id}/poll-health?limit=25`,
@@ -230,12 +222,6 @@ export default function DeviceDetail({
       setIdentityError("");
     } else {
       setIdentityError(identityRes.error);
-    }
-    if (interfacesRes.ok) {
-      setInterfaces(interfacesRes.data.data ?? []);
-      setInterfacesError("");
-    } else {
-      setInterfacesError(interfacesRes.error);
     }
     if (healthRes.ok) {
       setHealth(healthRes.data.data ?? []);
@@ -365,57 +351,8 @@ export default function DeviceDetail({
   }, [loadTables]);
 
   useEffect(() => {
-    setUtilization(null);
     void loadCharts(rangeKey);
   }, [loadCharts, rangeKey]);
-
-  // Bounded utilization lookup: one query for all interface rate series of
-  // this device (selector without a dimension matches every port).
-  useEffect(() => {
-    if (!interfaces || interfaces.length === 0) return;
-    let cancelled = false;
-    async function load() {
-      const range = RANGES.find((r) => r.key === rangeKey) ?? RANGES[1];
-      const to = new Date();
-      const from = new Date(to.getTime() - range.windowMs);
-      const res = await fetchJSON<MatrixResponse>("/api/v1/metrics/query", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          series: [
-            { device_id: device.id, metric_key: "net.if.in_octets" },
-            { device_id: device.id, metric_key: "net.if.out_octets" },
-          ],
-          from: from.toISOString(),
-          to: to.toISOString(),
-          step: "auto",
-          agg: "avg",
-          fill: "null",
-        }),
-      });
-      if (cancelled) return;
-      if (!res.ok) return; // the table keeps the honest "—" fallback
-      const latest = new Map<string, { t: number; v: number }>();
-      for (const s of res.data.series) {
-        const ifName = s.dimensions["if_name"];
-        if (!ifName) continue;
-        const last = [...s.points].reverse().find(([, v]) => v !== null);
-        if (last && last[1] !== null) {
-          const prev = latest.get(ifName);
-          if (prev === undefined || last[0] > prev.t) {
-            latest.set(ifName, { t: last[0], v: last[1] });
-          }
-        }
-      }
-      setUtilization(
-        new Map(Array.from(latest, ([name, point]) => [name, point.v])),
-      );
-    }
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [interfaces, rangeKey, device.id]);
 
   const chartMeta: ChartMeta | null = useMemo(() => {
     if (!matrix) return null;
@@ -459,12 +396,79 @@ export default function DeviceDetail({
     .filter((h) => h.origin === "on_demand")
     .slice(0, 5);
 
-  function utilizationPct(row: InterfaceRow): number | null {
-    const value = utilization?.get(row.if_name);
-    if (value === undefined) return null;
-    // in_octets is bytes/s; the link capacity is bits/s.
-    if (!row.speed_bps || row.speed_bps <= 0) return null;
-    return Math.round(((value * 8) / row.speed_bps) * 1000) / 10;
+  // M10-S3b-2 split: only open identity windows can be detached; the API
+  // re-points the selected rows to a newly created device and derives its
+  // serial/sysObjectID/mgmt IP from the open windows (splitRequest).
+  function toggleSplitRow(rowID: string, checked: boolean) {
+    setSplitError("");
+    setSplitMessage("");
+    setSplitCreatedID(null);
+    setSplitSelectedIDs((ids) =>
+      checked ? [...ids, rowID] : ids.filter((id) => id !== rowID),
+    );
+  }
+
+  async function splitDevice(e: React.FormEvent) {
+    e.preventDefault();
+    setSplitError("");
+    setSplitMessage("");
+    setSplitCreatedID(null);
+    setSplitFieldErrors([]);
+    if (splitSelectedIDs.length === 0) {
+      setSplitError("select at least one open identity window");
+      return;
+    }
+    if (splitName.trim() === "") {
+      setSplitError("new device name is required");
+      return;
+    }
+    setSplitBusy(true);
+    try {
+      const res = await fetch(`/api/v1/devices/${device.id}/split`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": readCSRF(),
+        },
+        body: JSON.stringify({
+          identity_history_ids: splitSelectedIDs,
+          name: splitName.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const problem = (await res.json().catch(() => null)) as {
+          detail?: string;
+          errors?: ProblemFieldError[];
+        } | null;
+        setSplitFieldErrors(
+          Array.isArray(problem?.errors) ? problem.errors : [],
+        );
+        setSplitError(problem?.detail ?? `split failed (status ${res.status})`);
+        return;
+      }
+      const created = (await res.json()) as Device;
+      setSplitMessage(
+        `Split ${splitSelectedIDs.length} identity window(s) into ${created.name}.`,
+      );
+      setSplitCreatedID(created.id);
+      setSplitSelectedIDs([]);
+      setSplitName("");
+      await loadTables();
+      router.refresh();
+    } catch {
+      setSplitError("network error");
+    } finally {
+      setSplitBusy(false);
+    }
+  }
+
+  // A merge re-points identity history and interfaces into this device and
+  // soft-deletes the sources: refresh both tables and the server-rendered
+  // shell, then drop the router cache for this route.
+  function handleMerged() {
+    void loadTables();
+    setInterfacesKey((k) => k + 1);
+    router.refresh();
   }
 
   return (
@@ -556,6 +560,7 @@ export default function DeviceDetail({
           <table data-testid="device-identity-table">
             <thead>
               <tr>
+                {role === "admin" && <th />}
                 <th>Type</th>
                 <th>Value</th>
                 <th>Source</th>
@@ -567,6 +572,22 @@ export default function DeviceDetail({
             <tbody>
               {identity.map((row) => (
                 <tr key={row.id}>
+                  {role === "admin" && (
+                    <td style={{ width: 36 }}>
+                      {row.last_seen_at === null && (
+                        <input
+                          type="checkbox"
+                          aria-label={`Select open identity ${row.identifier_type} ${row.identifier_value} for split`}
+                          checked={splitSelectedIDs.includes(row.id)}
+                          onChange={(e) =>
+                            toggleSplitRow(row.id, e.target.checked)
+                          }
+                          data-testid={`device-identity-split-select-${row.identifier_value}`}
+                          style={{ width: "auto" }}
+                        />
+                      )}
+                    </td>
+                  )}
                   <td>{row.identifier_type}</td>
                   <td className="muted">{row.identifier_value}</td>
                   <td>{row.source}</td>
@@ -635,6 +656,69 @@ export default function DeviceDetail({
             </button>
           </form>
         )}
+        {!identityError && identity !== null && role === "admin" && (
+          <form
+            onSubmit={splitDevice}
+            data-testid="device-split-form"
+            style={{ marginTop: 12 }}
+          >
+            <h3 className="vis-subhead">Split to a new device</h3>
+            <p className="muted">
+              Tick the open identity windows above and name the new device.
+              The selected windows move to the new device (which inherits the
+              site and derives its serial / sysObjectID / management IP from
+              them); closed history and interfaces stay here. The split is one
+              transaction and never clones rows.
+            </p>
+            <label htmlFor="device-split-name">New device name</label>
+            <input
+              id="device-split-name"
+              value={splitName}
+              onChange={(e) => setSplitName(e.target.value)}
+              placeholder="new device name"
+              data-testid="device-split-name"
+              maxLength={200}
+            />
+            <button
+              type="submit"
+              className="btn-sm"
+              disabled={splitBusy}
+              data-testid="device-split-submit"
+            >
+              {splitBusy
+                ? "Splitting…"
+                : `Split selected window(s) into a new device`}
+            </button>
+            {splitError && (
+              <p className="error" data-testid="device-split-error">
+                {splitError}
+              </p>
+            )}
+            {splitFieldErrors.length > 0 && (
+              <ul className="error" data-testid="device-split-field-errors">
+                {splitFieldErrors.map((fe, i) => (
+                  <li key={`${fe.field ?? "field"}-${i}`}>
+                    {fe.field ? `${fe.field}: ` : ""}
+                    {fe.message ?? "invalid value"}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {splitMessage && (
+              <p className="muted" data-testid="device-split-result">
+                {splitMessage}{" "}
+                {splitCreatedID && (
+                  <Link
+                    href={`/devices/${splitCreatedID}`}
+                    data-testid="device-split-new-link"
+                  >
+                    Open the new device
+                  </Link>
+                )}
+              </p>
+            )}
+          </form>
+        )}
         {!identityError && identity !== null && role !== "admin" && (
           <p className="muted" data-testid="device-identity-readonly">
             Adding or closing identity windows requires the admin role (
@@ -663,75 +747,19 @@ export default function DeviceDetail({
         )}
       </section>
 
-      <section className="panel" style={{ marginTop: 16 }}>
-        <h2 style={{ marginTop: 0 }}>Interfaces</h2>
-        {interfacesError && (
-          <p className="error" data-testid="device-interfaces-error">
-            {interfacesError}
-          </p>
-        )}
-        {!interfacesError && interfaces === null && (
-          <p className="muted">Loading interfaces…</p>
-        )}
-        {!interfacesError && interfaces?.length === 0 && (
-          <p className="muted" data-testid="device-interfaces-empty">
-            No interfaces discovered yet. SNMP polls auto-create interface rows.
-          </p>
-        )}
-        {!interfacesError && interfaces && interfaces.length > 0 && (
-          <table data-testid="device-interfaces-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Alias</th>
-                <th>Speed</th>
-                <th>Utilization (in)</th>
-                <th>MAC</th>
-                <th>Last seen</th>
-              </tr>
-            </thead>
-            <tbody>
-              {interfaces.map((row) => {
-                const pct = utilizationPct(row);
-                return (
-                  <tr key={row.id}>
-                    <td>
-                      <Link href={`/interfaces/${row.id}`}>{row.if_name}</Link>
-                    </td>
-                    <td>
-                      <StatusChip status={row.status} />
-                    </td>
-                    <td className="muted">{row.if_alias ?? "—"}</td>
-                    <td className="muted">{formatSpeedBps(row.speed_bps)}</td>
-                    <td>
-                      {pct === null ? (
-                        <span
-                          className="muted"
-                          data-testid={`if-util-${row.if_name}`}
-                          title="No rate samples in this range"
-                        >
-                          —
-                        </span>
-                      ) : (
-                        <span className="util" data-testid={`if-util-${row.if_name}`}>
-                          <span
-                            className="util-bar"
-                            style={{ width: `${Math.min(100, pct)}%` }}
-                          />
-                          <span className="util-text">{pct}%</span>
-                        </span>
-                      )}
-                    </td>
-                    <td className="muted">{row.mac ?? "—"}</td>
-                    <td className="muted">{shortTime(row.last_seen_at)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
-      </section>
+      <DeviceInterfacePanel
+        deviceID={current.id}
+        canWrite={role === "admin"}
+        rangeKey={rangeKey}
+        refreshKey={interfacesKey}
+      />
+
+      <DeviceMergePanel
+        deviceID={current.id}
+        deviceName={current.name}
+        canWrite={role === "admin"}
+        onMerged={handleMerged}
+      />
 
       <DeviceCredentialPanel
         deviceID={device.id}

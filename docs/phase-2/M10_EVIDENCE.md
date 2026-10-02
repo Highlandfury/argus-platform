@@ -1251,3 +1251,150 @@ single-worker run is fully green and all assertions are unchanged.
   `web/src/app/(app)/credentials/page.tsx`.
 - Playwright: `web/e2e/{devices,device-admin,credentials}.spec.ts`.
 - Docs: this section.
+
+
+## 12. M10-S3b-2 (device-management UIs)
+
+Scope: the remaining device-management surfaces after S3b-1. **No backend or
+OpenAPI change was needed**: every operation already existed with the exact
+shapes and error codes the UI consumes (verified against
+`openapi/argus.v1.yaml` and `internal/modules/inventory/http.go`). The slice is
+web-only.
+
+### 12.1 UI surfaces
+
+| Surface | Where | API |
+|---|---|---|
+| Interface add/edit/delete | device detail, `DeviceInterfacePanel` | `POST /v1/devices/{id}/interfaces`, `PATCH /v1/interfaces/{id}`, `DELETE /v1/interfaces/{id}` |
+| Device groups CRUD | `/device-groups`, `DeviceGroupsManager` | `GET/POST /v1/device-groups`, `PATCH/DELETE /v1/device-groups/{id}` |
+| Merge | device detail, `DeviceMergePanel` | `GET /v1/devices` (picker) + `POST /v1/devices/{id}/merge` |
+| Split | device detail identity section | `POST /v1/devices/{id}/split` |
+
+Nav: the app header now carries Devices / Device groups / Credentials /
+Collectors links (always visible in the shell) and the dashboard links the
+new page too; the device-groups test walks the nav link.
+
+### 12.2 Interface management
+
+- **Fields** are exactly the accepted create schema: `if_index` (required,
+  integer >= 1), `if_name` (required), `if_alias`, `if_type`, `admin_status`,
+  `oper_status`, `speed_bps` (>= 0), `mtu` (>= 0), `mac` (must parse),
+  `description`, `role` (`uplink|access|trunk|unused|unknown`), `monitored`.
+  The form exposes `if_index`, `if_name`, `if_alias`, `role`, `monitored`,
+  `speed_bps`, `mtu`, `mac` (the task's named set); edit hides `if_index`
+  because `decodeInterfacePatch` treats it as immutable, and poll-derived
+  columns (`if_type`, admin/oper status, `description`) stay server-owned.
+- **PATCH semantics:** `if_alias`/`mac` are sent as `null` when blank (the
+  decoder's `patchNullable` clears them); `speed_bps`/`mtu` are sent only when
+  non-blank because the raw PATCH decoder coerces JSON `null` to `0` for both,
+  so "blank leaves unchanged" is the honest behaviour.
+- Loading/empty/error states, per-field and detail problem+json rendering,
+  an add-form ifIndex prefill (`max+1`), a confirm step for delete, and a
+  refresh after every mutation. Non-admins see the table plus a read-only note
+  (`interface.write`); all mutations carry session + CSRF. Enumeration
+  resistance is unchanged: the panel reads through the scope-checked device
+  route, so foreign/out-of-scope ids remain a uniform 404.
+
+### 12.3 Device groups page
+
+- Full CRUD with a JSON selector textarea. Client-side validation mirrors the
+  one server rule (`validJSONObject`: selector must be a JSON object; arrays,
+  scalars and `null` are 400 field errors); blank means `{}`. The hint text
+  states the API rule, and server problems render verbatim (`409
+  device_group.name_conflict`, `403 auth.forbidden`, 400 field errors).
+- **Membership resolution is a documented deferral** (docs/11 §21, M7/M9
+  evidence): no engine evaluates the selector, so the page shows the stored
+  rule and says so explicitly (`device-groups-membership-note`). The page does
+  not pretend to list members and no membership engine was built.
+- Delete is a confirm step; create/edit/delete refresh the table. Non-admins
+  get a read-only view (the API additionally enforces org-wide scope for
+  create and admin + `device_group.write` for mutations).
+
+### 12.4 Merge / split
+
+- **Merge** excludes the target from the picker, searches the loaded first page
+  (100 devices, `order=desc`, name/mgmt-IP client-side because the list API has
+  no text query), and shows a confirmation that counts each source's identity
+  windows and interfaces (fetched from the real per-device list endpoints)
+  before posting `{source_device_ids}`. `device.merge_conflict` (ifIndex
+  collision), the defensive `device.identity_conflict`, 403 and the uniform
+  404 render from problem+json. On success the panel reloads, identity and
+  interfaces refetch, and `router.refresh()` re-syncs the shell.
+- **Split** renders checkboxes only on **open** identity rows, posts
+  `{identity_history_ids, name}` (kind/site/reason omitted so the server
+  inherits source kind + site), and renders 400 field errors and the 409
+  `device.identity_conflict` / `device.name_conflict` details. Success shows
+  the new device name with a link to it, reloads the identity table and
+  refreshes the route. No interfaces move on split (server contract).
+
+### 12.5 Tests and observed results
+
+Environment: Windows 11 dev host, Docker Desktop; Playwright against the
+rebuilt dev stack (`docker compose -f
+deployments/compose/docker-compose.dev.yml up -d --build web`) at
+`http://127.0.0.1:3000` with the real API. No Go files were touched, so the
+Go gates were not applicable (the previous green backend state is unchanged).
+
+| Command | Result |
+|---|---|
+| `npm run build` (web/) | **pass** (Next.js 16.3.7, TypeScript clean; `/device-groups` in the route table) |
+| `npx playwright test --workers=1` | **pass, 33/33** (46.2s): 27 pre-existing + 6 new |
+
+New Playwright coverage:
+- `device-admin.spec.ts` (4): interface add (invalid MAC -> indexed 400 field
+  error, then created with alias/speed), duplicate ifIndex -> 409, edit
+  (field error then save, ifIndex immutable), delete confirm/cancel/confirm;
+  merge moves identity + interfaces onto the target while the source becomes a
+  uniform 404 and disappears from inventory (target present, sources absent);
+  merge ifIndex collision -> 409 `device.merge_conflict` and the source stays
+  live (atomicity); split moves an open identity window onto a new device via
+  the result link, with a real `device.name_conflict` 409 first.
+- `device-groups.spec.ts` (2): nav link + create/edit/delete with the
+  duplicate-name 409 and confirm-step cancel; client selector validation
+  (malformed JSON, array) plus the intercepted 403 problem rendering.
+
+Fixture hygiene note: the dev DB now holds >100 live `e2e-*` devices from
+repeated suite runs, which surfaced a latent M10-S3 issue: the site dashboard
+loaded the site's devices with the inventory cursor default (ascending), so a
+device created after the site passed 100 rows was never rendered and the
+pre-existing site-dashboard spec failed. The minimal adjacent web fix (one
+line) makes `SiteDashboard` request the existing `order=desc` parameter, the
+same newest-first choice `DevicesList` already documents. No API shape change.
+
+### 12.6 Decisions and limitations
+
+1. **Web-only slice.** All three surfaces consume existing endpoints; no
+   backend, OpenAPI, migration or capability change.
+2. **Membership resolution stays deferred.** The groups page stores/validates
+   the selector and explicitly documents that nothing evaluates it yet; no
+   membership engine or member preview was built (brief + M7 deferral).
+3. **Merge identity_conflict is defensive.** Open-window uniqueness makes a
+   live duplicate unstageable from the UI, so end-to-end coverage exercises
+   the practical 409 (`device.merge_conflict`, ifIndex collision); the
+   identity_conflict branch renders the same problem path.
+4. **Merge picker is bounded to the newest 100 devices** with client-side
+   search, matching the inventory first-page convention; deeper pages are a
+   future enhancement, not a membership engine.
+5. **Interface form omits poll-derived fields** (`if_type`, `admin_status`,
+   `oper_status`, `description`) so operator edits cannot masquerade as SNMP
+   observations; `if_index` is immutable by contract.
+6. **Speed/MTU cannot be cleared to NULL through PATCH** (the raw decoder maps
+   JSON `null` to `0`), so the form leaves them unchanged when blank rather
+   than silently writing `0`.
+7. **Split exposes open rows only.** Closed windows are history; the server
+   requires rows to belong to the source device, which the UI enforces by
+   construction (it only offers rows from the loaded identity table).
+
+### 12.7 Files changed
+
+- Web components: `web/src/features/visibility/DeviceInterfacePanel.tsx`
+  (new), `web/src/features/visibility/DeviceMergePanel.tsx` (new),
+  `web/src/features/inventory/DeviceGroupsManager.tsx` (new),
+  `web/src/features/visibility/DeviceDetail.tsx` (panels + split UI),
+  `web/src/features/visibility/SiteDashboard.tsx` (order=desc hygiene fix).
+- Pages/shell: `web/src/app/(app)/device-groups/page.tsx` (new),
+  `web/src/app/(app)/layout.tsx` (nav), `web/src/app/(app)/page.tsx` (home
+  link), `web/src/app/globals.css` (`textarea`, `.shell-nav`).
+- Playwright: `web/e2e/device-admin.spec.ts` (4 new tests + helper),
+  `web/e2e/device-groups.spec.ts` (new, 2 tests).
+- Docs: this section.
