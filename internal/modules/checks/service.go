@@ -168,6 +168,42 @@ func (s *Service) CreateCheck(ctx context.Context, orgID, deviceID uuid.UUID, po
 	return out, replayed, nil
 }
 
+// ListChecks returns one cursor page of the org-wide check ledger.
+//
+// Ordering: newest first by default (desc) because the operator page reads the
+// ledger as a feed; UUIDv7 ids are time-ordered, so descending id order is
+// creation order reversed. Ascending (the devices-list historical default)
+// stays reachable via order=asc for symmetry, but desc is the default here
+// because this collection has no pre-existing consumers to preserve.
+//
+// Before the page is read, pending rows past PendingTTL are lazily failed as
+// expired across the org (the same honest rule GetCheck applies per item), so
+// the ledger never reports a check as pending beyond its bound.
+func (s *Service) ListChecks(ctx context.Context, orgID uuid.UUID, f ListFilter, limit int, cursor string, desc bool) (CheckPage, error) {
+	after, err := parseCursor(cursor)
+	if err != nil {
+		return CheckPage{}, err
+	}
+	var page CheckPage
+	err = database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := expireStalePending(ctx, tx); err != nil {
+			return err
+		}
+		rows, err := listChecks(ctx, tx, limit+1, after, f, desc)
+		if err != nil {
+			return err
+		}
+		if len(rows) > limit {
+			page.NextCursor = rows[limit-1].ID.String()
+			page.HasMore = true
+			rows = rows[:limit]
+		}
+		page.Checks = rows
+		return nil
+	})
+	return page, err
+}
+
 // GetCheck returns one check plus the device's site id (scope resolution).
 // A pending check that exceeded PendingTTL is lazily failed as expired before
 // it is returned.
@@ -304,4 +340,65 @@ func expirePending(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID) error {
 		  AND created_at < now() - make_interval(secs => $3)`,
 		deviceID, ClassExpired, PendingTTL.Seconds())
 	return err
+}
+
+// expireStalePending is the org-wide form used by the list read: every pending
+// row past PendingTTL is failed as expired in one bounded statement (the
+// per-device pending ceiling keeps the set small).
+func expireStalePending(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE device_checks SET status = 'failed', error_class = $1, completed_at = now()
+		WHERE status = 'pending'
+		  AND created_at < now() - make_interval(secs => $2)`,
+		ClassExpired, PendingTTL.Seconds())
+	return err
+}
+
+// parseCursor validates the opaque cursor (a check id; "" means first page).
+func parseCursor(cursor string) (*uuid.UUID, error) {
+	if cursor == "" {
+		return nil, nil
+	}
+	id, err := uuid.Parse(cursor)
+	if err != nil {
+		return nil, ErrInvalidCursor
+	}
+	return &id, nil
+}
+
+// listChecks walks one cursor page. The join gives the scope predicate its
+// resolution key (device site) exactly like the devices list; soft-deleted
+// devices stay joined so rows visible through GET /v1/checks/{id} are also
+// visible to the ledger (item/list parity; checks are operator history).
+func listChecks(ctx context.Context, tx pgx.Tx, limit int, after *uuid.UUID, f ListFilter, desc bool) ([]DeviceCheck, error) {
+	cmp, dir := ">", ""
+	if desc {
+		cmp, dir = "<", " DESC"
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT `+checkColumns+`
+		FROM device_checks c
+		JOIN devices d ON d.id = c.device_id
+		WHERE ($1::uuid IS NULL OR c.id `+cmp+` $1)
+		  AND ($2::text IS NULL OR c.status = $2)
+		  AND ($3::text IS NULL OR c.poll_type = $3)
+		  AND ($4::uuid IS NULL OR c.device_id = $4)
+		  AND ($6::boolean OR d.site_id = ANY($7::uuid[]))
+		ORDER BY c.id`+dir+`
+		LIMIT $5`,
+		after, f.Status, f.PollType, f.DeviceID, limit,
+		f.Scope.Unrestricted, f.Scope.SiteIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]DeviceCheck, 0, limit)
+	for rows.Next() {
+		c, err := scanCheck(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }

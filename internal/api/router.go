@@ -336,6 +336,22 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 			}
 			h.checksHTTP.CreateDeviceCheck(w, r)
 		})
+	case "/v1/checks":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.checksHTTP == nil {
+				serviceUnavailable(w, r, "checks service not configured")
+				return
+			}
+			h.checksHTTP.ListChecks(w, r)
+		})
+	case "/v1/poll-health":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.pollHealthHTTP == nil {
+				serviceUnavailable(w, r, "poll health service not configured")
+				return
+			}
+			h.pollHealthHTTP.ListPollHealth(w, r)
+		})
 	case "/v1/checks/{id}":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if h.checksHTTP == nil {

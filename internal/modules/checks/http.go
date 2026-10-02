@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -113,6 +114,125 @@ func (h *HTTP) CreateDeviceCheck(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Idempotent-Replayed", "true")
 	}
 	httpx.WriteJSON(w, http.StatusAccepted, checkPayload(check))
+}
+
+// ListChecks handles GET /v1/checks (session + device.read capability enforced
+// by the router; scope enforced here). The collection is org-wide, newest
+// first by default (order=asc opts into oldest-first), cursor-paged by check
+// id, and narrowed by filter[status], filter[poll_type] and filter[device_id].
+//
+// Scope mirrors the devices list: rows whose device site is outside the
+// caller's bindings are invisible. An explicit filter[device_id] outside the
+// caller's scope is a deterministic 403 (the M7 list-filter rule); unknown
+// device ids are not an existence oracle for unrestricted callers (200, empty
+// page) and are folded into the same 403 for restricted callers, exactly like
+// an unknown filter[site_id].
+func (h *HTTP) ListChecks(w http.ResponseWriter, r *http.Request) {
+	p, ok := httpx.PrincipalFrom(r.Context())
+	if !ok {
+		httpx.WriteProblem(w, r, http.StatusUnauthorized, "auth.unauthenticated", "authentication required")
+		return
+	}
+	sc, err := h.Devices.ScopeFor(r.Context(), p.OrgID, p.UserID)
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "authorization scope lookup failed")
+		return
+	}
+	query := r.URL.Query()
+	limit := 25
+	if raw := query.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 100 {
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "limit must be an integer between 1 and 100")
+			return
+		}
+		limit = n
+	}
+	filter := ListFilter{Scope: ScopeFilter{Unrestricted: sc.Unrestricted, SiteIDs: sc.Sites}}
+	if raw := query.Get("filter[status]"); raw != "" {
+		switch raw {
+		case StatusPending, StatusCompleted, StatusFailed:
+			filter.Status = &raw
+		default:
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid status filter",
+				httpx.FieldError{Field: "filter[status]", Code: "invalid", Message: "allowed: pending, completed, failed"})
+			return
+		}
+	}
+	if raw := query.Get("filter[poll_type]"); raw != "" {
+		switch raw {
+		case PollICMP, PollSNMP:
+			filter.PollType = &raw
+		default:
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid poll_type filter",
+				httpx.FieldError{Field: "filter[poll_type]", Code: "invalid", Message: "allowed: icmp, snmp"})
+			return
+		}
+	}
+	if raw := query.Get("filter[device_id]"); raw != "" {
+		deviceID, err := uuid.Parse(raw)
+		if err != nil {
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid device_id filter",
+				httpx.FieldError{Field: "filter[device_id]", Code: "invalid", Message: "must be a UUID"})
+			return
+		}
+		if !sc.Unrestricted {
+			// includeDeleted=true: a soft-deleted in-scope device is a valid
+			// filter (the ledger keeps its checks). Everything unresolvable or
+			// out of scope is the same deterministic 403.
+			dev, err := h.Devices.GetDevice(r.Context(), p.OrgID, deviceID, true)
+			if err != nil {
+				if errors.Is(err, inventory.ErrDeviceNotFound) {
+					writeScopeForbidden(w, r, "device filter is outside the caller's scope")
+					return
+				}
+				httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+				return
+			}
+			if !sc.AllowsDevice(dev.SiteID) {
+				writeScopeForbidden(w, r, "device filter is outside the caller's scope")
+				return
+			}
+		}
+		filter.DeviceID = &deviceID
+	}
+	order := query.Get("order")
+	if order != "" && order != "asc" && order != "desc" {
+		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid order",
+			httpx.FieldError{Field: "order", Code: "invalid", Message: "allowed: asc, desc"})
+		return
+	}
+	// Default newest first (documented M10-S3b-3 choice): the ledger has no
+	// pre-existing consumers, so desc is the collection's default, unlike the
+	// devices list whose asc default predates the operator UI.
+	page, err := h.Svc.ListChecks(r.Context(), p.OrgID, filter, limit, query.Get("cursor"), order != "asc")
+	if err != nil {
+		if errors.Is(err, ErrInvalidCursor) {
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid cursor")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "checks lookup failed")
+		return
+	}
+	data := make([]map[string]any, 0, len(page.Checks))
+	for _, c := range page.Checks {
+		data = append(data, checkPayload(c))
+	}
+	var nextCursor any
+	if page.NextCursor != "" {
+		nextCursor = page.NextCursor
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"data":        data,
+		"next_cursor": nextCursor,
+		"has_more":    page.HasMore,
+	})
+}
+
+// writeScopeForbidden is the deterministic 403 for out-of-scope collection
+// filters (mirrors the M7 device-list site filter).
+func writeScopeForbidden(w http.ResponseWriter, r *http.Request, detail string) {
+	httpx.WriteProblem(w, r, http.StatusForbidden, "auth.forbidden", detail)
 }
 
 // GetCheck handles GET /v1/checks/{id} (session + device.read capability

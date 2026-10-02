@@ -88,10 +88,12 @@ func TestMetricsQueryRoutesDeclareCapabilityAndScope(t *testing.T) {
 	}
 }
 
-// TestCheckRoutesDeclareCapabilityAndScope pins the M10-S0 on-demand check
-// surface: creation is an unsafe POST (CSRF + canonical diagnostic.run
-// capability, scope device); the read is a device.read GET. The viewer
-// derivation holds no diagnostic capability (docs/04 §6.4).
+// TestCheckRoutesDeclareCapabilityAndScope pins the on-demand check surface:
+// creation is an unsafe POST (CSRF + canonical diagnostic.run capability,
+// scope device), item reads are device.read GETs, and the M10-S3b-3 org-wide
+// collection read (GET /v1/checks) is a scope-filtered site read exactly like
+// GET /v1/devices. The viewer derivation holds no diagnostic capability
+// (docs/04 §6.4).
 func TestCheckRoutesDeclareCapabilityAndScope(t *testing.T) {
 	count := 0
 	for _, rt := range Routes() {
@@ -102,8 +104,12 @@ func TestCheckRoutesDeclareCapabilityAndScope(t *testing.T) {
 		if !rt.Protected {
 			t.Errorf("%s %s: check route must require a session", rt.Method, rt.Path)
 		}
-		if rt.Scope != authz.ScopeDevice {
-			t.Errorf("%s %s: scope %q, want device", rt.Method, rt.Path, rt.Scope)
+		wantScope := authz.ScopeDevice
+		if rt.Path == "/v1/checks" {
+			wantScope = authz.ScopeSite
+		}
+		if rt.Scope != wantScope {
+			t.Errorf("%s %s: scope %q, want %q", rt.Method, rt.Path, rt.Scope, wantScope)
 		}
 		switch rt.Method {
 		case "POST":
@@ -117,13 +123,44 @@ func TestCheckRoutesDeclareCapabilityAndScope(t *testing.T) {
 			if rt.Capability != authz.CapDeviceRead {
 				t.Errorf("%s %s: capability %q, want %q", rt.Method, rt.Path, rt.Capability, authz.CapDeviceRead)
 			}
+			if rt.CSRF {
+				t.Errorf("%s %s: reads must not require CSRF", rt.Method, rt.Path)
+			}
 		}
 	}
-	if count != 2 {
-		t.Fatalf("check routes = %d, want the 2 M10-S0 routes", count)
+	if count != 3 {
+		t.Fatalf("check routes = %d, want the 2 M10-S0 routes + the M10-S3b-3 org-wide collection read (GET /v1/checks)", count)
 	}
 	if authz.Allowed("viewer", authz.CapDiagnosticRun) {
 		t.Error("viewer derives diagnostic.run; read-only principals must not trigger diagnostics")
+	}
+}
+
+// TestPollHealthListRouteDeclaresCapabilityAndScope pins the M10-S3b-3
+// bounded recent poll-health feed: a session-protected, scope-filtered site
+// collection read on the canonical device.read capability (no CSRF).
+func TestPollHealthListRouteDeclaresCapabilityAndScope(t *testing.T) {
+	count := 0
+	for _, rt := range Routes() {
+		if rt.Path != "/v1/poll-health" {
+			continue
+		}
+		count++
+		if !rt.Protected {
+			t.Errorf("GET /v1/poll-health must require a session")
+		}
+		if rt.Capability != authz.CapDeviceRead {
+			t.Errorf("GET /v1/poll-health: capability %q, want %q", rt.Capability, authz.CapDeviceRead)
+		}
+		if rt.Scope != authz.ScopeSite {
+			t.Errorf("GET /v1/poll-health: scope %q, want site", rt.Scope)
+		}
+		if rt.CSRF {
+			t.Errorf("GET /v1/poll-health must not require CSRF")
+		}
+	}
+	if count != 1 {
+		t.Fatalf("poll-health list routes = %d, want 1", count)
 	}
 }
 

@@ -1398,3 +1398,188 @@ same newest-first choice `DevicesList` already documents. No API shape change.
 - Playwright: `web/e2e/device-admin.spec.ts` (4 new tests + helper),
   `web/e2e/device-groups.spec.ts` (new, 2 tests).
 - Docs: this section.
+
+## 13. M10-S3b-3 (checks / poll-health operator page)
+
+Scope: the final UI-completion slice — an operator-facing `/checks` page
+showing (a) the org-wide on-demand check ledger and (b) the bounded recent
+poll-failure feed, plus the two minimal additive read endpoints they need
+(`GET /v1/checks`, `GET /v1/poll-health`). M11 alerting, Step-12 diagnostics
+and global configuration stay out of scope.
+
+### 13.1 Backend endpoints
+
+**`GET /v1/checks`** — org-wide on-demand check ledger.
+
+- **Authz**: session + `device.read` (the capability `GET /v1/checks/{id}`
+  already uses). Scope is the same site-filtered collection read as
+  `GET /v1/devices`: the query joins `devices` and a caller bound to sites sees
+  only checks whose device site is in the bindings. An explicit
+  `filter[device_id]` outside the caller's scope is a deterministic
+  `403 auth.forbidden` (the M7 list-filter rule, mirroring `filter[site_id]`
+  on `/v1/devices`); for restricted callers an unknown id folds into the same
+  403, and for unrestricted callers it is a valid filter over an empty set
+  (no existence oracle). The join deliberately does not filter soft-deleted
+  devices: item/list parity — any row readable through `GET /v1/checks/{id}`
+  stays in the ledger (checks are operator history).
+- **Pagination**: keyset cursor = check id (UUIDv7). Response
+  `{data, next_cursor, has_more}`; `limit` 1..100 (default 25).
+- **Ordering**: newest first by default (`order=desc`, the operator feed
+  reading); `order=asc` mirrors the devices-list additive `order` parameter
+  and is reachable for symmetry. The default flips (desc instead of the
+  devices-list asc) because this collection has no pre-existing consumers whose
+  cursor contract would change.
+- **Filters**: `filter[status]` ∈ `pending|completed|failed`,
+  `filter[poll_type]` ∈ `icmp|snmp`, `filter[device_id]` (UUID); anything else
+  is a `400 validation.failed` problem+json with a field error.
+- **Lazy expiry**: pending rows past `PendingTTL` (10 min) are failed as
+  `expired` org-wide before the page is read, the same honest rule
+  `GET /v1/checks/{id}` applies per item.
+
+**`GET /v1/poll-health`** — bounded recent poll-health feed.
+
+- **Authz/scope**: session + `device.read`, scope-filtered exactly like the
+  checks ledger (join devices on site); the same deterministic 403 applies to
+  an explicit out-of-scope `device_id`.
+- **Window**: `since` (RFC3339) defaults to now-1h and must be within the last
+  24 h; a 60-second grace absorbs client/server clock and request-latency skew
+  at the exact 24 h boundary (a request for exactly 24 h must not be rejected
+  milliseconds later), while a 25 h bound is still a deterministic 400.
+- **Filters/limit**: `outcome` ∈ `success|failure`, `poll_type` ∈
+  `icmp|snmp`, `device_id` (UUID); `limit` 1..200 (default 50). Ordered
+  `ts DESC` (`id DESC` tie-break). **No cursor**: documented as a bounded feed
+  (the window and limit are the only continuation knobs), not a
+  deep-pagination collection; the response echoes the effective `since`.
+
+**Route metadata / contracts**: both are `Protected` `GET`s with capability
+`device.read` and scope `site` (collection reads, exactly like
+`GET /v1/devices`; no CSRF). Route counts re-pinned: inventory 22,
+credentials 6, check surface 3 (the 2 M10-S0 routes + `GET /v1/checks`),
+poll-health feed 1. `openapi/argus.v1.yaml` gained both paths with
+`x-argus-capability`/`x-argus-scope` and full parameter/response docs; the
+authz contract test now scans the poll-health surface in both directions
+(registry → spec, spec → registry).
+
+### 13.2 Decisions
+
+1. **Newest-first default plus `order`** (documented above): the feed is the
+   operator's primary reading order, and the additive `order=asc` keeps the
+   devices-list pattern available without changing the new default.
+2. **Cursor = raw check id**: UUIDv7 is time-ordered, so the id is the keyset
+   and the comparison direction flips with `order`; no opaque encoding is
+   needed for a UUIDv7 key (the M9 per-device health route's opaque
+   `(ts,id)` cursor stays as-is).
+3. **Bounded feed, not pagination**: poll-health volume is probe-cadence
+   driven and the operator question is "what failed recently"; a cursor would
+   encourage walking the 90-day hypertable through the API. The per-device
+   `GET /v1/devices/{id}/poll-health` route remains the deep-pagination path.
+4. **24 h max + 60 s grace** (documented above); future `since` values are a
+   400 rather than a silent empty page.
+5. **Scope and 403 rules mirror M7 exactly**, including the soft-deleted
+   device treatment on explicit filters (`includeDeleted=true`) so an in-scope
+   deleted device's ledger rows remain filterable.
+6. **Lazy expiry is duplicated on the list read** because the checks module has
+   no background expiry worker; the same statement shape as the item read uses
+   the database clock so create/read/list agree.
+
+### 13.3 Web page
+
+- Shell: a `Checks` nav link (`nav-checks`, between Device groups and
+  Credentials) and a dashboard link; the page is `/checks`
+  (`web/src/app/(app)/checks/page.tsx` → `ChecksView`). Reads only, so no role
+  resolution is needed client-side (the API enforces scope/capability).
+- **On-demand checks panel**: real `GET /v1/checks` table (device link, poll
+  type, status chip, outcome + error class, latency, created, completed),
+  newest first, with URL-driven `status` and `poll_type` filters and a
+  cursor-driven **Load more** (append; 25-row pages). Loading/empty/error
+  states are explicit (`checks-loading`, `checks-empty`, `checks-error`).
+- **Recent poll failures panel**: real `GET /v1/poll-health?outcome=failure`
+  table (time, device link, poll type, error class, latency, consecutive
+  failures) with a URL-driven window selector (1 h default / 6 h / 24 h). The
+  page sends a computed RFC3339 `since`, documents the 24-hour bound in
+  `poll-health-note`, and shows `poll-health-loading`/`-empty`/`-error`.
+- Device names come from the newest 100 `GET /v1/devices?order=desc` page (the
+  bounded convention the rest of the UI uses); unknown ids render a short id
+  prefix, and every row still links to `/devices/{id}`.
+
+### 13.4 Tests and observed results
+
+Environment: Windows 11 dev host, Docker Desktop; Go from `.tools/go`, pinned
+`golangci-lint` from `.tools/bin`; Playwright against the rebuilt dev stack
+(`docker compose -f deployments/compose/docker-compose.dev.yml up -d --build
+server web`) at `http://127.0.0.1:3000` with the real API and collector.
+
+| Command | Result |
+|---|---|
+| `go build ./...` (GOOS=linux GOARCH=amd64 and native windows) | **pass, both** |
+| `gofmt -l cmd internal tests` | **clean** (no files) |
+| `.tools/bin/golangci-lint run` | **0 issues** |
+| `go test ./tests/integration/ -run 'TestM10S3b3' -count=1 -v` | **pass, 2/2** (first targeted iteration; 105 s including testcontainer first-boot) |
+| `go test ./tests/integration/ -count=1 -timeout 30m` | **pass** — `ok ... 1253.867s` (exit 0; 139 top-level test functions listed) |
+| `go test ./tests/contract/... -count=1` | **pass** (`ok ... 0.272s`) |
+| `npm run build` (web/) | **pass** (Next.js 16.3.7, TypeScript clean; `/checks` in the route table) |
+| `npx playwright test --workers=1` | **pass, 36/36** (3.1 m) on the rerun; the first attempt was 35/36 with the documented login flake |
+
+New backend coverage (`tests/integration/m10s3b3_checks_health_test.go`):
+- checks ledger: newest-first page + cursor continuation, `order=asc`,
+  status/poll_type/device filters, 400 validations (status, poll_type,
+  device_id shape, order, cursor, limit), unknown-device filter for an
+  unrestricted caller (200 empty), a real API-created check becoming the
+  newest row, viewer read access, unauthenticated 401, site-scope narrowing,
+  deterministic 403 on out-of-scope and unknown device filters, cross-tenant
+  invisibility (list and explicit filter).
+- poll-health feed: default 1 h window and ts-desc ordering, `since=now-7h`
+  including the 6 h row, 25 h / future / malformed `since`, outcome/poll_type/
+  device filters, limit bounds, viewer/anon authz, site scope + 403 device
+  filters, cross-tenant emptiness.
+
+New Playwright coverage (`web/e2e/checks.spec.ts`, 2 tests): seeds a device +
+real on-demand check through the API in `beforeAll`, walks the `nav-checks`
+link, asserts the seeded terminal row (status, icmp, real device href),
+exercises the URL-driven poll-type/status filters (row disappears then comes
+back), and asserts the poll-failure panel against the API's own truth
+(table with a device link and error-class cell when failures exist, the
+honest empty state otherwise) across the 1 h → 24 h window selector.
+
+**Login flake note (documented):** on the first full Playwright attempt
+`collectors.spec.ts` failed only at its `toHaveURL(/\/$/)` after login: the
+server's login took 4.4 s under load and exceeded the 5 s assertion window;
+the rerun was fully green. This is the known serial-suite login flake (each
+spec logs in once; the login route is rate-limited per IP and password
+hashing is deliberately slow), not a checks-page regression.
+
+### 13.5 Limitations
+
+- The poll-health feed has **no cursor by design**; deeper history stays on
+  the per-device `GET /v1/devices/{id}/poll-health` route (M9-S1).
+- The ledger's device-name map is the newest 100 devices (the UI-wide bounded
+  convention); devices outside it render a short id prefix with a working
+  link. The id is always visible in the href.
+- `filter[device_id]` under a device-group-only binding is not expanded:
+  group bindings do not resolve to devices yet (unchanged M7/M10-S3b-2
+  deferral), so a group-only caller sees an empty ledger exactly like the
+  devices list.
+- No alerting or diagnostics work (M11/Step-12), no global configuration
+  changes — the slice is the two read endpoints plus the page.
+- The bounded feed counts on-demand probe failures too (`origin=on_demand`),
+  matching the panel title "Recent poll failures"; filtering by origin is not
+  exposed (M11 can add it).
+
+### 13.6 Files changed
+
+- Backend: `internal/modules/checks/models.go`,
+  `internal/modules/checks/service.go`, `internal/modules/checks/http.go`
+  (`ListChecks` + filter/cursor/expiry helpers);
+  `internal/modules/pollhealth/health.go`,
+  `internal/modules/pollhealth/http.go` (`ListRecent` + `ListPollHealth`);
+  `internal/api/routes.go`, `internal/api/router.go` (routes + handlers),
+  `internal/api/routes_test.go` (pinned counts/metadata).
+- Contract/API: `openapi/argus.v1.yaml` (two paths),
+  `tests/contract/authz_contract_test.go` (poll-health surface + counts).
+- Integration tests: `tests/integration/m10s3b3_checks_health_test.go` (new).
+- Web: `web/src/features/checks/ChecksView.tsx` (new),
+  `web/src/app/(app)/checks/page.tsx` (new),
+  `web/src/app/(app)/layout.tsx` (nav), `web/src/app/(app)/page.tsx` (home
+  link).
+- Playwright: `web/e2e/checks.spec.ts` (new, 2 tests).
+- Docs: this section.

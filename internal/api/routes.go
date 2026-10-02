@@ -48,6 +48,10 @@ var routeTable = []Route{
 	{Method: "GET", Path: "/v1/devices/{id}/poll-health", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/status", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/devices/{id}/checks", Protected: true, CSRF: true, Capability: authz.CapDiagnosticRun, Scope: authz.ScopeDevice},
+	// M10-S3b-3 operator ledger: org-wide collection reads are scope-filtered
+	// site reads (same metadata shape as GET /v1/devices).
+	{Method: "GET", Path: "/v1/checks", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeSite},
+	{Method: "GET", Path: "/v1/poll-health", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeSite},
 	{Method: "GET", Path: "/v1/checks/{id}", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/devices/{id}/merge", Protected: true, CSRF: true, Capability: authz.CapDeviceMerge, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/devices/{id}/split", Protected: true, CSRF: true, Capability: authz.CapDeviceSplit, Scope: authz.ScopeDevice},

@@ -96,6 +96,135 @@ func (h *HTTP) ListDevicePollHealth(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, payload)
 }
 
+// Bounds for the bounded recent poll-health feed (M10-S3b-3).
+const (
+	recentDefaultWindow = time.Hour
+	recentMaxWindow     = 24 * time.Hour
+	// recentWindowGrace absorbs client/server clock and request-latency skew
+	// for a caller that asks for exactly the 24 h maximum (an exact
+	// now-24h bound would otherwise be rejected milliseconds later).
+	recentWindowGrace  = time.Minute
+	recentDefaultLimit = 50
+	recentMaxLimit     = 200
+)
+
+// ListPollHealth handles GET /v1/poll-health (session + device.read capability
+// enforced by the router; scope enforced here). Bounded recent feed: outcome
+// (success|failure), poll_type (icmp|snmp), device_id filters, an RFC3339
+// `since` (default now-1h, must be within the last 24h plus a 60 s
+// clock-skew grace) and limit <=200 (default 50). Ordered ts DESC; there is
+// no cursor (documented bounded feed, not a deep-pagination collection).
+//
+// Scope mirrors the checks list / devices list (join devices on site); an
+// explicit out-of-scope device_id is a deterministic 403.
+func (h *HTTP) ListPollHealth(w http.ResponseWriter, r *http.Request) {
+	p, ok := httpx.PrincipalFrom(r.Context())
+	if !ok {
+		httpx.WriteProblem(w, r, http.StatusUnauthorized, "auth.unauthenticated", "authentication required")
+		return
+	}
+	sc, err := h.Devices.ScopeFor(r.Context(), p.OrgID, p.UserID)
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "authorization scope lookup failed")
+		return
+	}
+	query := r.URL.Query()
+	limit := recentDefaultLimit
+	if raw := query.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > recentMaxLimit {
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "limit must be an integer between 1 and 200")
+			return
+		}
+		limit = n
+	}
+	now := time.Now().UTC()
+	since := now.Add(-recentDefaultWindow)
+	if raw := query.Get("since"); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid since",
+				httpx.FieldError{Field: "since", Code: "invalid", Message: "must be RFC3339, e.g. 2026-10-02T09:00:00Z"})
+			return
+		}
+		since = parsed.UTC()
+	}
+	if since.After(now) {
+		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid since",
+			httpx.FieldError{Field: "since", Code: "invalid", Message: "must not be in the future"})
+		return
+	}
+	if since.Before(now.Add(-recentMaxWindow - recentWindowGrace)) {
+		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid since",
+			httpx.FieldError{Field: "since", Code: "invalid", Message: "must be within the last 24 hours"})
+		return
+	}
+	filter := RecentFilter{Scope: ScopeFilter{Unrestricted: sc.Unrestricted, SiteIDs: sc.Sites}}
+	if raw := query.Get("outcome"); raw != "" {
+		switch raw {
+		case "success", "failure":
+			filter.Outcome = &raw
+		default:
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid outcome filter",
+				httpx.FieldError{Field: "outcome", Code: "invalid", Message: "allowed: success, failure"})
+			return
+		}
+	}
+	if raw := query.Get("poll_type"); raw != "" {
+		switch raw {
+		case "icmp", "snmp":
+			filter.PollType = &raw
+		default:
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid poll_type filter",
+				httpx.FieldError{Field: "poll_type", Code: "invalid", Message: "allowed: icmp, snmp"})
+			return
+		}
+	}
+	if raw := query.Get("device_id"); raw != "" {
+		deviceID, err := uuid.Parse(raw)
+		if err != nil {
+			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid device_id filter",
+				httpx.FieldError{Field: "device_id", Code: "invalid", Message: "must be a UUID"})
+			return
+		}
+		if !sc.Unrestricted {
+			dev, err := h.Devices.GetDevice(r.Context(), p.OrgID, deviceID, true)
+			if err != nil {
+				if errors.Is(err, inventory.ErrDeviceNotFound) {
+					writeScopeForbidden(w, r, "device filter is outside the caller's scope")
+					return
+				}
+				httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+				return
+			}
+			if !sc.AllowsDevice(dev.SiteID) {
+				writeScopeForbidden(w, r, "device filter is outside the caller's scope")
+				return
+			}
+		}
+		filter.DeviceID = &deviceID
+	}
+	records, err := h.Svc.ListRecent(r.Context(), p.OrgID, filter, since, limit)
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "poll health lookup failed")
+		return
+	}
+	data := make([]map[string]any, 0, len(records))
+	for _, rec := range records {
+		data = append(data, recordPayload(rec))
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"data":  data,
+		"since": since.Format(time.RFC3339),
+	})
+}
+
+// writeScopeForbidden is the deterministic 403 for out-of-scope collection
+// filters (mirrors the M7 device-list site filter).
+func writeScopeForbidden(w http.ResponseWriter, r *http.Request, detail string) {
+	httpx.WriteProblem(w, r, http.StatusForbidden, "auth.forbidden", detail)
+}
+
 // GetDeviceStatus handles GET /v1/devices/{id}/status (session + device.read
 // capability enforced by the router; scope enforced here). Foreign, missing
 // and out-of-scope devices are an identical 404 (M7 enumeration resistance).

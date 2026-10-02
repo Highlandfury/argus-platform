@@ -49,6 +49,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <a href="/device-groups" data-testid="nav-device-groups">
             Device groups
           </a>
+          <a href="/checks" data-testid="nav-checks">
+            Checks
+          </a>
           <a href="/credentials" data-testid="nav-credentials">
             Credentials
           </a>

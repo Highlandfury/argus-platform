@@ -75,6 +75,31 @@ type DeviceCheck struct {
 	LatencyMS   *int
 }
 
+// ScopeFilter is the resolved collection-read scope (M10-S3b-3). It mirrors the
+// inventory list filter: an unrestricted caller sees every row of the org,
+// otherwise only checks whose device site is in SiteIDs. Group-only bindings
+// do not expand to devices (documented deferral, same as the devices list).
+type ScopeFilter struct {
+	Unrestricted bool
+	SiteIDs      []uuid.UUID
+}
+
+// ListFilter narrows ListChecks. Pointer fields distinguish "not filtered"
+// (nil) from a validated value.
+type ListFilter struct {
+	Status   *string
+	PollType *string
+	DeviceID *uuid.UUID
+	Scope    ScopeFilter
+}
+
+// CheckPage is one cursor page of the org-wide check ledger.
+type CheckPage struct {
+	Checks     []DeviceCheck
+	NextCursor string
+	HasMore    bool
+}
+
 // Sentinel errors mapped to HTTP problems at the edge.
 var (
 	ErrNotFound          = errors.New("checks: check not found")
@@ -88,4 +113,5 @@ var (
 	ErrInvalidOutcome    = errors.New("checks: invalid outcome")
 	ErrInvalidLatency    = errors.New("checks: invalid latency")
 	ErrInvalidErrorClass = errors.New("checks: invalid error class")
+	ErrInvalidCursor     = errors.New("checks: invalid cursor")
 )

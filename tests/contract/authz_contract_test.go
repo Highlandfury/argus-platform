@@ -17,10 +17,18 @@ import (
 	"github.com/argus-platform/argus/internal/platform/authz"
 )
 
-// isCheckPath reports whether a path belongs to the M10-S0 on-demand check
-// surface (/v1/devices/{id}/checks, /v1/checks/{id}).
+// isCheckPath reports whether a path belongs to the on-demand check surface
+// (/v1/devices/{id}/checks and the M10-S3b-3 org-wide list/extent
+// /v1/checks, /v1/checks/{id}).
 func isCheckPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/checks") || strings.HasSuffix(path, "/checks")
+}
+
+// isPollHealthPath reports whether a path belongs to the M10-S3b-3 bounded
+// recent poll-health feed (/v1/poll-health). The per-device M9-S1 route lives
+// under /v1/devices and is covered by the inventory surface.
+func isPollHealthPath(path string) bool {
+	return path == "/v1/poll-health"
 }
 
 // isInventoryPath reports whether a path belongs to the M7-S3 inventory
@@ -86,14 +94,16 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 
 	// Enforced metadata from the route registry.
 	enforced := map[routeKey]authzMeta{}
-	inventoryCount, credentialCount, checkCount := 0, 0, 0
+	inventoryCount, credentialCount, checkCount, pollHealthCount := 0, 0, 0, 0
 	for _, rt := range api.Routes() {
-		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) && !isCheckPath(rt.Path) {
+		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) && !isCheckPath(rt.Path) && !isPollHealthPath(rt.Path) {
 			continue
 		}
 		switch {
 		case isCheckPath(rt.Path):
 			checkCount++
+		case isPollHealthPath(rt.Path):
+			pollHealthCount++
 		case isCredentialPath(rt.Path):
 			credentialCount++
 		default:
@@ -107,8 +117,11 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	if credentialCount != 6 {
 		t.Fatalf("credential routes in registry = %d, want the 6 M7-S4 routes", credentialCount)
 	}
-	if checkCount != 2 {
-		t.Fatalf("check routes in registry = %d, want the 2 M10-S0 routes", checkCount)
+	if checkCount != 3 {
+		t.Fatalf("check routes in registry = %d, want the 2 M10-S0 routes + the M10-S3b-3 org-wide collection read (GET /v1/checks)", checkCount)
+	}
+	if pollHealthCount != 1 {
+		t.Fatalf("poll-health list routes in registry = %d, want 1 (GET /v1/poll-health)", pollHealthCount)
 	}
 	for key, meta := range enforced {
 		if meta.Capability == "" {
@@ -131,7 +144,7 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	documented := map[routeKey]authzMeta{}
 	for pair := model.Model.Paths.PathItems.First(); pair != nil; pair = pair.Next() {
 		path := pair.Key()
-		if !isInventoryPath(path) && !isCredentialPath(path) && !isCheckPath(path) {
+		if !isInventoryPath(path) && !isCredentialPath(path) && !isCheckPath(path) && !isPollHealthPath(path) {
 			continue
 		}
 		item := pair.Value()
@@ -213,6 +226,8 @@ func vocabularyName(path string) string {
 	switch {
 	case isCheckPath(path):
 		return "check"
+	case isPollHealthPath(path):
+		return "poll-health"
 	case isCredentialPath(path):
 		return "credential"
 	default:

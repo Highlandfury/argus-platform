@@ -54,6 +54,8 @@ export default async function DashboardPage() {
         interfaces, ICMP charts, on-demand checks).{" "}
         <a href="/device-groups">Device groups</a> — dynamic group CRUD with a
         JSON selector (membership resolution is deferred).{" "}
+        <a href="/checks">Checks</a> — the org-wide on-demand check ledger and
+        the bounded recent poll-failure feed.{" "}
         <a href="/credentials">Credentials</a> — write-only secret metadata and
         bindings. <a href="/collectors">Collectors</a> — enrollment, identity,
         and the secure control stream. Sites open the site dashboard; alerting

@@ -589,6 +589,43 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
 
+  /v1/checks:
+    get:
+      tags: [inventory]
+      summary: Org-wide on-demand check ledger, newest first by default (cursor = check id)
+      description: >
+        M10-S3b-3 operator ledger. Newest first by default (order=desc; UUIDv7
+        ids are time-ordered); order=asc mirrors the devices-list additive order
+        contract. Cursor-paged by check id. Scope-filtered exactly like the
+        devices list: rows whose device site is outside the caller's bindings
+        are invisible. An explicit filter[device_id] outside the caller's scope
+        is a deterministic 403 (M7 list-filter rule); pending rows past their
+        TTL are lazily failed as expired before the page is read.
+      x-argus-capability: device.read
+      x-argus-scope: site
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string }, description: Check id from next_cursor; pages walk by id in the requested order }
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc }, description: desc = newest first (default); asc = oldest first }
+        - { name: 'filter[status]', in: query, schema: { type: string, enum: [pending, completed, failed] } }
+        - { name: 'filter[poll_type]', in: query, schema: { type: string, enum: [icmp, snmp] } }
+        - { name: 'filter[device_id]', in: query, schema: { type: string, format: uuid }, description: Out-of-scope device ids are a deterministic 403 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Check' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /v1/checks/{id}:
     get:
       tags: [inventory]
@@ -605,6 +642,40 @@ paths:
               schema: { $ref: '#/components/schemas/Check' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/poll-health:
+    get:
+      tags: [inventory]
+      summary: Bounded recent poll-health feed (ts DESC; default 1 h, max 24 h window; no deep pagination)
+      description: >
+        M10-S3b-3 operator feed. Filters outcome (success|failure), poll_type
+        (icmp|snmp) and device_id; since is RFC3339 (default now-1h) and must
+        fall within the last 24 hours; limit is 1..200 (default 50). Ordered
+        ts DESC; there is no cursor because the feed is bounded by the window
+        and limit. Scope-filtered exactly like the devices list; an explicit
+        out-of-scope device_id is a deterministic 403.
+      x-argus-capability: device.read
+      x-argus-scope: site
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: since, in: query, schema: { type: string, format: date-time }, description: RFC3339 lower bound; defaults to now-1h and must be within the last 24h (a 60 s clock-skew grace applies at the exact boundary) }
+        - { name: outcome, in: query, schema: { type: string, enum: [success, failure] } }
+        - { name: poll_type, in: query, schema: { type: string, enum: [icmp, snmp] } }
+        - { name: device_id, in: query, schema: { type: string, format: uuid }, description: Out-of-scope device ids are a deterministic 403 }
+      responses:
+        '200':
+          description: OK (newest first; `since` echoes the effective window start)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, since]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/PollHealthRecord' } }
+                  since: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /v1/devices/{id}/merge:
     post:
