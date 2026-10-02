@@ -36,11 +36,15 @@ test.describe.configure({ mode: "serial" });
 
 let context: BrowserContext;
 let page: Page;
+let csrf = "";
 
 test.beforeAll(async ({ browser }) => {
   context = await browser.newContext();
   page = await context.newPage();
   await login(page);
+  csrf =
+    (await page.context().cookies()).find((c) => c.name === "argus_csrf")
+      ?.value ?? "";
 });
 
 test.afterAll(async () => {
@@ -95,4 +99,100 @@ test("credential mutations require the session CSRF pair", async () => {
   expect(res.status()).toBe(403);
   const body = (await res.json()) as { code: string };
   expect(body.code).toBe("auth.csrf");
+});
+
+// M10-S3b-1: the per-credential binding surface binds to a site and a device
+// group, renders the deterministic 409 binding_conflict on a duplicate, and
+// unbinds per row. An intercepted 403 renders the org-wide scope rule.
+test("credential bindings: site and device-group bind, conflict, unbind", async () => {
+  const now = Date.now();
+  const credName = `e2e-bind-cred-${now}`;
+  const createRes = await page.request.post("/api/v1/credentials", {
+    headers: { "X-CSRF-Token": csrf },
+    data: { name: credName, kind: "snmp_v2c", secret: `e2e-community-${now}` },
+  });
+  expect(createRes.status()).toBe(201);
+
+  const groupName = `e2e-bind-group-${now}`;
+  const groupRes = await page.request.post("/api/v1/device-groups", {
+    headers: { "X-CSRF-Token": csrf },
+    data: { name: groupName, selector: { kinds: ["switch"] } },
+  });
+  expect(groupRes.status()).toBe(201);
+  const groupID = ((await groupRes.json()) as { id: string }).id;
+
+  const sitesRes = await page.request.get("/api/v1/sites?limit=1");
+  expect(sitesRes.ok()).toBeTruthy();
+  const siteID = (
+    (await sitesRes.json()) as { data: { id: string }[] }
+  ).data[0].id;
+
+  await page.goto("/credentials");
+  const card = page.getByTestId(`credential-bindings-${credName}`);
+  await expect(card).toBeVisible({ timeout: 15_000 });
+  const scopeSelect = card.getByTestId(`credential-binding-scope-${credName}`);
+  const targetSelect = card.getByTestId(`credential-binding-target-${credName}`);
+  const submit = card.getByTestId(`credential-binding-submit-${credName}`);
+
+  // Site binding with priority 3.
+  await scopeSelect.selectOption("site");
+  await targetSelect.selectOption(siteID);
+  await card.getByTestId(`credential-binding-priority-${credName}`).fill("3");
+  await submit.click();
+  const siteRow = card.getByTestId(
+    `credential-binding-row-${credName}-site-${siteID}`,
+  );
+  await expect(siteRow).toBeVisible({ timeout: 15_000 });
+  await expect(siteRow).toContainText("3");
+
+  // Duplicate binding -> deterministic 409 binding_conflict detail.
+  await submit.click();
+  await expect(
+    card.getByTestId(`credential-binding-error-${credName}`),
+  ).toContainText("already bound", { timeout: 15_000 });
+
+  // Device-group binding (target picker switches with the scope type).
+  await scopeSelect.selectOption("device_group");
+  await expect(
+    targetSelect.locator(`option[value="${groupID}"]`),
+  ).toHaveCount(1);
+  await targetSelect.selectOption(groupID);
+  await submit.click();
+  const groupRow = card.getByTestId(
+    `credential-binding-row-${credName}-device_group-${groupID}`,
+  );
+  await expect(groupRow).toBeVisible({ timeout: 15_000 });
+  await expect(groupRow).toContainText(groupName);
+
+  // Unbind the site row; the group row stays.
+  await card
+    .getByTestId(`credential-binding-unbind-${credName}-site-${siteID}`)
+    .click();
+  await expect(siteRow).toHaveCount(0, { timeout: 15_000 });
+  await expect(groupRow).toBeVisible();
+  await expect(
+    card.getByTestId(`credential-binding-result-${credName}`),
+  ).toContainText("Unbound");
+
+  // The credential surface is org-wide: a 403 renders the server detail.
+  await page.route("**/api/v1/credentials/*/unbind", (route) =>
+    route.fulfill({
+      status: 403,
+      contentType: "application/problem+json",
+      body: JSON.stringify({
+        type: "about:blank",
+        title: "Forbidden",
+        status: 403,
+        code: "auth.forbidden",
+        detail: "credential management requires org-wide scope",
+      }),
+    }),
+  );
+  await card
+    .getByTestId(`credential-binding-unbind-${credName}-device_group-${groupID}`)
+    .click();
+  await expect(
+    card.getByTestId(`credential-binding-error-${credName}`),
+  ).toContainText("org-wide scope", { timeout: 15_000 });
+  await page.unroute("**/api/v1/credentials/*/unbind");
 });

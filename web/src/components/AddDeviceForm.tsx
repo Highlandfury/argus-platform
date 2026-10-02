@@ -24,6 +24,24 @@ const DEVICE_KINDS = [
   "unknown",
 ];
 
+// Server-allowed identity types (device_identity_history CHECK + the create
+// endpoint's identities[] validation). Identity windows are recorded in
+// device_identity_history; serial/sysObjectID/mgmt IP are additionally stored
+// on the device row by the same request.
+const IDENTITY_TYPES = [
+  "serial",
+  "chassis_id",
+  "sys_object_id",
+  "mac",
+  "hostname",
+  "mgmt_ip",
+];
+
+interface IdentityRow {
+  type: string;
+  value: string;
+}
+
 interface Site {
   id: string;
   name: string;
@@ -52,6 +70,7 @@ export default function AddDeviceForm({
   const [mgmtIP, setMgmtIP] = useState("");
   const [serial, setSerial] = useState("");
   const [sysObjectID, setSysObjectID] = useState("");
+  const [identities, setIdentities] = useState<IdentityRow[]>([]);
   const [critical, setCritical] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -63,9 +82,18 @@ export default function AddDeviceForm({
     setError("");
     setMessage("");
     setFieldErrors([]);
+    // Client validation: every identity row must carry a value before the
+    // request is sent (the server still validates type/value formats and
+    // returns indexed problem field errors when a value is invalid).
+    for (let i = 0; i < identities.length; i += 1) {
+      if (identities[i].value.trim() === "") {
+        setError(`identity row ${i + 1} (${identities[i].type}) needs a value`);
+        return;
+      }
+    }
     setBusy(true);
     try {
-      const body: Record<string, string | boolean> = {
+      const body: Record<string, unknown> = {
         site_id: siteID,
         name: name.trim(),
         kind,
@@ -74,6 +102,12 @@ export default function AddDeviceForm({
       if (mgmtIP.trim() !== "") body.mgmt_ip = mgmtIP.trim();
       if (serial.trim() !== "") body.serial = serial.trim();
       if (sysObjectID.trim() !== "") body.sys_object_id = sysObjectID.trim();
+      if (identities.length > 0) {
+        body.identities = identities.map((row) => ({
+          type: row.type,
+          value: row.value.trim(),
+        }));
+      }
       const res = await fetch("/api/v1/devices", {
         method: "POST",
         headers: {
@@ -97,6 +131,7 @@ export default function AddDeviceForm({
       setMgmtIP("");
       setSerial("");
       setSysObjectID("");
+      setIdentities([]);
       onCreated?.();
     } catch {
       setError("network error");
@@ -177,6 +212,79 @@ export default function AddDeviceForm({
             data-testid="device-sys-object-id"
             placeholder="1.3.6.1.4.1.9"
           />
+          <fieldset
+            data-testid="device-identities"
+            style={{ marginTop: 8, border: "1px solid #2a2f3a", padding: 8 }}
+          >
+            <legend>Identity attributes (optional)</legend>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Extra identity windows recorded at add time (source=manual), e.g.
+              MAC, hostname or chassis ID. The server also records
+              serial/sysObjectID/management IP from their fields above; identity
+              values are unique across live devices in the organization.
+            </p>
+            {identities.map((row, i) => (
+              <div
+                key={i}
+                className="btn-row"
+                style={{ alignItems: "center", gap: 8, marginBottom: 8 }}
+              >
+                <select
+                  aria-label={`Identity ${i + 1} type`}
+                  value={row.type}
+                  onChange={(e) =>
+                    setIdentities((rows) =>
+                      rows.map((current, idx) =>
+                        idx === i ? { ...current, type: e.target.value } : current,
+                      ),
+                    )
+                  }
+                  data-testid={`device-identity-type-${i}`}
+                  style={{ width: "auto" }}
+                >
+                  {IDENTITY_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  aria-label={`Identity ${i + 1} value`}
+                  value={row.value}
+                  onChange={(e) =>
+                    setIdentities((rows) =>
+                      rows.map((current, idx) =>
+                        idx === i ? { ...current, value: e.target.value } : current,
+                      ),
+                    )
+                  }
+                  placeholder={row.type === "mac" ? "aa:bb:cc:dd:ee:ff" : "value"}
+                  data-testid={`device-identity-value-${i}`}
+                  style={{ width: "auto" }}
+                />
+                <button
+                  type="button"
+                  className="btn-sm btn-ghost"
+                  data-testid={`device-identity-remove-${i}`}
+                  onClick={() =>
+                    setIdentities((rows) => rows.filter((_, idx) => idx !== i))
+                  }
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="btn-sm btn-ghost"
+              data-testid="device-identity-add"
+              onClick={() =>
+                setIdentities((rows) => [...rows, { type: "mac", value: "" }])
+              }
+            >
+              Add identity
+            </button>
+          </fieldset>
           <label
             htmlFor="device-critical"
             style={{ display: "flex", alignItems: "center", gap: 8 }}

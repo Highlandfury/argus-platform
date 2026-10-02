@@ -16,6 +16,10 @@ const (
 	ActionDeviceMerge  = "device.merge"
 	ActionDeviceSplit  = "device.split"
 
+	// M10-S3b-1 identity-window mutations (add/close on an existing device).
+	ActionDeviceIdentityAdd   = "device.identity_add"
+	ActionDeviceIdentityClose = "device.identity_close"
+
 	ActionInterfaceCreate = "interface.create"
 	ActionInterfaceUpdate = "interface.update"
 	ActionInterfaceDelete = "interface.delete"

@@ -1066,3 +1066,188 @@ observable).
 6. **Not addressed** (still out of scope): credential edit of non-secret
    metadata, device-group binding UI, undoing a device delete, and surfacing
    the effective credential on the devices list.
+
+---
+
+# 11. M10-S3b-1 — identity add/close API, device-list usability, credential binding UI
+
+**Status: M10-S3b-1 COMPLETE.** First UI-completion batch of M10-S3b: (A)
+identity attributes at device create **and** after create, (B) device-list
+filters/search/cursor pagination, (C) credential binding UI for the
+site/device_group/org scopes. Additive: no migration (schema stays v17), the
+existing PATCH identity lifecycle and every pre-existing route shape are
+unchanged. Interface add/edit UI, the device-groups page, merge/split UI and
+the global checks page remain S3b-2/3.
+
+## 11.1 API deltas
+
+| Method + path | Capability / scope | Purpose |
+|---|---|---|
+| `POST /v1/devices/{id}/identities` | `device.write` / `device` | Open one identity-history window (`source=manual`, `last_seen_at` null) |
+| `POST /v1/devices/{id}/identities/{historyId}/close` | `device.write` / `device` | Close one identity-history window (stamp `last_seen_at`) |
+
+- Both routes are session + CSRF protected and admin-gated in the handler
+  (`requireAdmin`) plus the router capability check; scope is enforced by
+  resolving the parent device and `Scope.AllowsDevice`, so foreign/out-of-scope
+  devices are a uniform `404 device.not_found` (enumeration resistance). A
+  history row that is missing or belongs to another device is
+  `404 device.identity_not_found`, so a foreign row and a random UUID are
+  indistinguishable.
+- **Lifecycle reuse:** the add path reuses `openIdentity` (the same store
+  function device create/PATCH use) so the partial unique index
+  `device_identity_history_open_uniq` (migration 000011) produces the
+  deterministic `409 device.identity_conflict` when the key is open on another
+  live device. `openIdentity` now reports whether it actually inserted; a
+  repeat for the same `(device, type, value)` returns the existing open row
+  (`201`) and emits **no redundant audit event**. Close is likewise idempotent:
+  a repeat close returns the already-closed row (`200`) without a second audit
+  event. Closing a window frees the value for historical reuse (proved by the
+  integration test).
+- **Audit:** new actions `device.identity_add` / `device.identity_close`
+  (resource type `device`, resource id = device id, data carries the history
+  row id/type/value) go through the existing inventory `AuditSink`; only
+  actual window transitions are recorded.
+- **Create-path validation addition (small, additive):** `identities[]` values
+  are now format-checked for `mac` (`net.ParseMAC`) and `mgmt_ip`
+  (`net.ParseIP`), the two types `identity.go` canonicalizes. Field errors stay
+  indexed (`identities[i].value`) so the add form renders them per row. Other
+  identity types remain free text.
+- **OpenAPI:** both operations + the `IdentityCreate` schema are documented with
+  exact `x-argus-capability`/`x-argus-scope`; the authz contract test and the
+  route-registry unit test pin the new inventory count (22).
+- Device detail gets the add/close controls; the device list keeps its existing
+  fields and adds a poll-status chip (no response-shape change).
+
+## 11.2 Device list
+
+- **Server filters already existed** (`filter[site_id]`, `filter[status]`,
+  `filter[kind]`, `cursor`, `limit`) and are unchanged; the UI uses site and
+  kind server-side and always requests `include=status` for the M10-S1
+  rollup decoration.
+- **Status select is up/down/unknown over `poll_status.status`** and is applied
+  client-side: the server's `filter[status]` is the inventory lifecycle
+  (`new/up/down/degraded/maintenance/retired`) and has no `unknown`, so the
+  S1 rollup has no server filter. This is a documented judgment call; the
+  select's values are exactly the S1 poll-status vocabulary.
+- **Search filters by name or management IP client-side over the loaded rows**:
+  `/v1/devices` has no text-query parameter (inspect: only the four filters,
+  `cursor`, `limit`). The URL still carries `q` via `router.replace`.
+- **URL-driven params**: `site`, `status`, `kind`, `q` (same
+  `window.location.search` pattern as the site dashboard).
+- **Load more** follows `next_cursor` and appends pages (first page keeps the
+  pre-existing 100-row size so a freshly added device is visible immediately;
+  capped at 5 loaded pages / 500 rows) with an explicit note; no unbounded
+  loading.
+- Existing rendering (name links, critical badge, kind/site/lifecycle status,
+  mgmt IP, timestamps) is preserved; the poll-status chip carries
+  `data-status` so the filter is assertable.
+- **Newest-first ordering (verification follow-up):** the slice's first
+  verification failed once the dev database passed 100 live devices, because
+  `/v1/devices` ordered ascending and newly created devices fell past the first
+  cursor page. Fix: additive `order=asc|desc` on the device list (desc mirrors
+  the cursor comparison; default `asc` keeps existing consumers byte-identical)
+  and the UI now requests `order=desc`. Pinned by
+  `TestInventoryListNewestFirstOrder` (asc default, desc pages, invalid order ->
+  400). Final gate after the fix: full local gate green (integration 322 s) and
+  the full Playwright suite green (27/27).
+
+## 11.3 Credential binding UI
+
+- New `CredentialBindings` client component on `/credentials` (rendered for
+  admins): one section per credential listing its binding summaries (scope,
+  resolved target label, priority) with a per-binding **Unbind**, plus a
+  **Bind** form (scope type select, target picker, optional priority default 0).
+  All mutations carry session + CSRF.
+- **Targets**: sites from `GET /v1/sites`, device groups from
+  `GET /v1/device-groups`, and org — `GET /v1/me` returns
+  `org: {id, slug, name}` (`httpx.MePayload`), so the org id is knowable and
+  org is bound directly to the caller's own org id, matching the server's
+  `resolveTarget` rule. **No org deferral is needed.**
+- Device-scope bindings are listed and can be unbound here, but binding to a
+  device stays on the device detail page (M10-S3a panel).
+- problem+json details render verbatim: `403 auth.forbidden` ("credential
+  management requires org-wide scope"), `409 credential.binding_conflict`
+  ("already bound"), `404 credential.target_not_found`. After bind/unbind the
+  component reloads its list and `router.refresh()` re-renders the server
+  table's binding-summary column.
+
+## 11.4 Tests and observed results
+
+Environment: Windows 11 dev host, Docker Desktop (WSL2); full integration suite
+runs against a testcontainers TimescaleDB; Playwright runs against the rebuilt
+dev stack (`docker compose -f deployments/compose/docker-compose.dev.yml up -d
+--build server web`) at `http://127.0.0.1:3000` with the real API.
+
+| Command | Result |
+|---|---|
+| `go build ./...` (windows) and `GOOS=linux go build ./...` | **pass** |
+| `go test ./internal/... -count=1` | **pass** (all packages; new route-count pin in `internal/api`) |
+| `go test ./tests/integration/ -count=1 -timeout 30m` | **pass, 365s** (new `TestInventoryIdentityAddAndClose` + capability/CSRF/scope/cross-tenant additions) |
+| `go test ./tests/contract/... -count=1` | **pass** (OpenAPI ↔ route metadata match, inventory count 22) |
+| `gofmt -l internal cmd tests` | **empty** |
+| `golangci-lint run` (v2.14.0) | **0 issues** |
+| `npm run build` (web/) | **pass** (Next.js 16.3.7, TypeScript clean) |
+| `npx playwright test --workers=1` | **pass, 27/27** (29.7s): 22 pre-existing + 5 new |
+
+New Playwright coverage:
+- `devices.spec.ts`: add form records a MAC identity (invalid MAC renders the
+  indexed `identities[0].value` problem, then the detail page shows the open
+  window); URL-driven site/kind/status/q filters with a server refetch and a
+  poll-status consistency check; "Load more" follows `next_cursor` and appends
+  the next page (deterministic two-page interception).
+- `device-admin.spec.ts`: add identity on an existing device (bad-MAC field
+  error, hostname window, idempotent repeat leaves one row, close stamps the
+  window and removes the button).
+- `credentials.spec.ts`: bind to a site (priority 3) and a device group,
+  duplicate bind renders `credential.binding_conflict`, per-row unbind, and an
+  intercepted 403 renders the org-wide scope rule.
+
+Environment notes (acceptance hygiene, not code deltas): the dev stack had
+accumulated 111 `e2e-*` fixture devices from earlier suite runs, which pushes
+new devices past the first cursor page; those fixtures were soft-deleted with
+the API's delete semantics (open identity windows closed, non-fixture devices
+preserved) before the full run. The suite was run with `--workers=1` because
+the per-IP login limiter (burst 10, 1 token/6s) is marginal for the 10
+first-logins the seven spec files issue when four workers start together; the
+single-worker run is fully green and all assertions are unchanged.
+
+## 11.5 Decisions and limitations
+
+1. **Poll-status and text search are client-side over loaded rows.** The
+   status filter only sees rows already loaded (use Load more for deeper
+   pages); `filter[status]` is deliberately not reused because it is the
+   inventory lifecycle and lacks `unknown`.
+2. **Load more is capped at 5 pages (500 rows)** with an explicit note rather
+   than unbounded accumulation; the first page stays at 100 rows (the
+   pre-existing page size) because the ascending id cursor would otherwise hide
+   a freshly added device behind the loaded pages.
+3. **Identity add/close only touch identity history.** Adding `serial`,
+   `sys_object_id` or `mgmt_ip` via the new endpoint does not rewrite the
+   corresponding device column; those columns still transition through PATCH
+   (existing lifecycle untouched), which the UI copy states.
+4. **Org binding is included, not deferred**, because `/v1/me` exposes the org
+   id; the org target is fixed to the caller's organization (the API rejects
+   any other id as a uniform 404).
+5. **Device-group membership remains unresolvable** in the effective-credential
+   previews (pre-existing server resolver limitation); the bindings UI simply
+   manages the binding, it does not claim resolution.
+6. **Device-scope bindings are not addable on `/credentials`** (only listed and
+   unbindable); adding them stays on the device page, per the slice brief.
+7. **Create-path identity format validation is a small behavior addition**:
+   invalid MAC/mgmt_ip values in `identities[]` now yield indexed 400 field
+   errors instead of being stored verbatim.
+
+## 11.6 Files changed
+
+- Backend: `internal/modules/inventory/{audit,http,service,store}.go`,
+  `internal/api/{routes,router}.go`, `internal/api/routes_test.go`,
+  `openapi/argus.v1.yaml`, `tests/contract/authz_contract_test.go`.
+- Integration tests: `tests/integration/m10s3b1_identity_test.go` (new) plus
+  capability/CSRF/scope/cross-tenant additions in
+  `tests/integration/inventory_api_test.go`.
+- Web: `web/src/components/{AddDeviceForm,CredentialBindings}.tsx`,
+  `web/src/features/visibility/DeviceDetail.tsx`,
+  `web/src/features/inventory/DevicesList.tsx`,
+  `web/src/app/(app)/credentials/page.tsx`.
+- Playwright: `web/e2e/{devices,device-admin,credentials}.spec.ts`.
+- Docs: this section.

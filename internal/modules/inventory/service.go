@@ -78,14 +78,14 @@ func (s *Service) record(orgID uuid.UUID, actor Actor, action, resourceType stri
 }
 
 // ListDevices returns one cursor page ordered by id (UUIDv7, time-sortable).
-func (s *Service) ListDevices(ctx context.Context, orgID uuid.UUID, f DeviceFilter, limit int, cursor string) (DevicePage, error) {
+func (s *Service) ListDevices(ctx context.Context, orgID uuid.UUID, f DeviceFilter, limit int, cursor string, desc bool) (DevicePage, error) {
 	after, err := parseCursor(cursor)
 	if err != nil {
 		return DevicePage{}, err
 	}
 	var page DevicePage
 	err = database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := listDevices(ctx, tx, limit+1, after, f)
+		rows, err := listDevices(ctx, tx, limit+1, after, f, desc)
 		if err != nil {
 			return err
 		}
@@ -263,7 +263,7 @@ func (s *Service) UpdateDevice(ctx context.Context, orgID, id uuid.UUID, p Devic
 				}
 			}
 			if tr.Open != nil {
-				if err := openIdentity(ctx, tx, orgID, id, tr.Type, *tr.Open, identitySourceManual); err != nil {
+				if _, err := openIdentity(ctx, tx, orgID, id, tr.Type, *tr.Open, identitySourceManual); err != nil {
 					return err
 				}
 			}
@@ -345,6 +345,76 @@ func (s *Service) ListIdentityHistory(ctx context.Context, orgID, deviceID uuid.
 		return nil
 	})
 	return page, err
+}
+
+// AddIdentity opens an identity-history window for one key on an existing live
+// device (M10-S3b-1). The window lifecycle is the canonical one: source=manual,
+// first_seen_at=now(), last_seen_at NULL (open). Repeating the same key for the
+// same device is idempotent (openIdentity inserts nothing; the existing open
+// row is returned). A key already open on ANOTHER live device is a
+// deterministic ErrIdentityConflict via the partial unique index. The device
+// row is not modified: canonical device columns (serial/sysObjectID/mgmt IP)
+// change through PATCH transitions only.
+func (s *Service) AddIdentity(ctx context.Context, orgID, deviceID uuid.UUID, in IdentityInput, actor Actor) (IdentityRecord, error) {
+	var out IdentityRecord
+	var created bool
+	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := findDevice(ctx, tx, deviceID, false); err != nil {
+			return err
+		}
+		value := canonicalIdentityValue(in.Type, in.Value)
+		var err error
+		created, err = openIdentity(ctx, tx, orgID, deviceID, in.Type, value, identitySourceManual)
+		if err != nil {
+			return err
+		}
+		out, err = findOpenIdentity(ctx, tx, deviceID, in.Type, value)
+		return err
+	})
+	if err != nil {
+		if isIdentityConflict(err) {
+			return IdentityRecord{}, ErrIdentityConflict
+		}
+		return IdentityRecord{}, err
+	}
+	// Idempotent repeats do not add a redundant audit event: only an actual
+	// window opening is evidence.
+	if created {
+		s.record(orgID, actor, ActionDeviceIdentityAdd, "device", deviceID, "", map[string]any{
+			"identity_history_id": out.ID.String(),
+			"identifier_type":     out.IdentifierType,
+			"identifier_value":    out.IdentifierValue,
+		})
+	}
+	return out, nil
+}
+
+// CloseIdentity closes one identity-history window of a live device by row id
+// (M10-S3b-1). Closing is idempotent: an already-closed row is returned
+// unchanged and is not re-audited. Unknown or foreign rows (RLS hides foreign
+// tenants) are ErrIdentityNotFound.
+func (s *Service) CloseIdentity(ctx context.Context, orgID, deviceID, historyID uuid.UUID, actor Actor) (IdentityRecord, error) {
+	var out IdentityRecord
+	var closed bool
+	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := findDevice(ctx, tx, deviceID, false); err != nil {
+			return err
+		}
+		var err error
+		out, closed, err = closeIdentityByID(ctx, tx, deviceID, historyID)
+		return err
+	})
+	if err != nil {
+		return IdentityRecord{}, err
+	}
+	if closed {
+		s.record(orgID, actor, ActionDeviceIdentityClose, "device", deviceID, "", map[string]any{
+			"identity_history_id": out.ID.String(),
+			"identifier_type":     out.IdentifierType,
+			"identifier_value":    out.IdentifierValue,
+		})
+	}
+	return out, nil
 }
 
 // MergeDevices merges source devices into target (P2-D7): identity history and

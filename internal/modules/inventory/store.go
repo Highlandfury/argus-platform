@@ -130,15 +130,21 @@ func lockDeviceIDs(ctx context.Context, tx pgx.Tx, ids []uuid.UUID) ([]uuid.UUID
 	return found, rows.Err()
 }
 
-func listDevices(ctx context.Context, tx pgx.Tx, limit int, after *uuid.UUID, f DeviceFilter) ([]Device, error) {
+func listDevices(ctx context.Context, tx pgx.Tx, limit int, after *uuid.UUID, f DeviceFilter, desc bool) ([]Device, error) {
+	// Newest-first walks descending ids (UUIDv7 is time-ordered); the cursor
+	// comparison flips with the direction so pages stay stable.
+	cmp, dir := ">", ""
+	if desc {
+		cmp, dir = "<", " DESC"
+	}
 	rows, err := tx.Query(ctx, `SELECT `+deviceColumns+` FROM devices d
-		WHERE ($1::uuid IS NULL OR d.id > $1)
+		WHERE ($1::uuid IS NULL OR d.id `+cmp+` $1)
 		  AND ($2::uuid IS NULL OR d.site_id = $2)
 		  AND ($3::text IS NULL OR d.status = $3)
 		  AND ($4::text IS NULL OR d.kind = $4)
 		  AND ($5::boolean OR d.deleted_at IS NULL)
 		  AND ($7::boolean OR d.site_id = ANY($8::uuid[]))
-		ORDER BY d.id
+		ORDER BY d.id`+dir+`
 		LIMIT $6`, after, f.SiteID, f.Status, f.Kind, f.IncludeDeleted, limit,
 		f.Scope.Unrestricted, f.Scope.SiteIDs)
 	if err != nil {
@@ -240,13 +246,15 @@ func closeOpenIdentity(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID, ident
 // openIdentity inserts a new open identity window for a device unless the same
 // device already has that exact key open (same-value corner: no redundant row).
 // A conflict with ANOTHER device's open window raises 23505 on the partial
-// unique index (migration 000011) and surfaces as ErrIdentityConflict.
-func openIdentity(ctx context.Context, tx pgx.Tx, orgID, deviceID uuid.UUID, identifierType, value, source string) error {
+// unique index (migration 000011) and surfaces as ErrIdentityConflict. The
+// boolean result reports whether a new row was actually inserted (idempotent
+// repeats return false).
+func openIdentity(ctx context.Context, tx pgx.Tx, orgID, deviceID uuid.UUID, identifierType, value, source string) (bool, error) {
 	id, err := newID()
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = tx.Exec(ctx, `
+	tag, err := tx.Exec(ctx, `
 		INSERT INTO device_identity_history
 			(id, org_id, device_id, identifier_type, identifier_value, source, first_seen_at)
 		SELECT $1, $2, $3, $4, $5, $6, now()
@@ -255,7 +263,56 @@ func openIdentity(ctx context.Context, tx pgx.Tx, orgID, deviceID uuid.UUID, ide
 			WHERE device_id = $3 AND identifier_type = $4 AND identifier_value = $5 AND last_seen_at IS NULL
 		)`,
 		id, orgID, deviceID, identifierType, value, source)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// findOpenIdentity returns the device's open window for one identity key.
+func findOpenIdentity(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID, identifierType, value string) (IdentityRecord, error) {
+	h, err := scanIdentity(tx.QueryRow(ctx, `SELECT `+identityColumns+` FROM device_identity_history h
+		WHERE h.device_id = $1 AND h.identifier_type = $2 AND h.identifier_value = $3 AND h.last_seen_at IS NULL
+		ORDER BY h.id DESC
+		LIMIT 1`, deviceID, identifierType, value))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return IdentityRecord{}, ErrIdentityNotFound
+	}
+	return h, err
+}
+
+// findIdentityByID returns one identity-history row belonging to a device. RLS
+// scopes the lookup to the transaction's org; a foreign/missing row is
+// ErrIdentityNotFound (no existence oracle).
+func findIdentityByID(ctx context.Context, tx pgx.Tx, deviceID, historyID uuid.UUID) (IdentityRecord, error) {
+	h, err := scanIdentity(tx.QueryRow(ctx, `SELECT `+identityColumns+` FROM device_identity_history h
+		WHERE h.id = $1 AND h.device_id = $2`, historyID, deviceID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return IdentityRecord{}, ErrIdentityNotFound
+	}
+	return h, err
+}
+
+// closeIdentityByID closes one open identity window by history id and returns
+// the row plus whether this call performed the close. An already-closed row is
+// returned unchanged with closed=false, making repeat closes idempotent; an
+// unknown/foreign row is ErrIdentityNotFound.
+func closeIdentityByID(ctx context.Context, tx pgx.Tx, deviceID, historyID uuid.UUID) (IdentityRecord, bool, error) {
+	h, err := scanIdentity(tx.QueryRow(ctx, `
+		UPDATE device_identity_history h SET last_seen_at = now()
+		WHERE h.id = $1 AND h.device_id = $2 AND h.last_seen_at IS NULL
+		RETURNING `+identityColumns, historyID, deviceID))
+	if err == nil {
+		return h, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return IdentityRecord{}, false, err
+	}
+	h, err = findIdentityByID(ctx, tx, deviceID, historyID)
+	if err != nil {
+		return IdentityRecord{}, false, err
+	}
+	return h, false, nil
 }
 
 // mergeDevicesTx re-points identity history and interfaces of sources into

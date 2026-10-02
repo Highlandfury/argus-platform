@@ -114,6 +114,64 @@ test("device edit: updates mgmt_ip and renders validation problems", async () =>
   await expect(page.getByTestId("device-edit-form")).toHaveCount(0);
 });
 
+// M10-S3b-1: identity windows on an existing device. The add control posts
+// /v1/devices/{id}/identities (indexed server field error for a bad MAC is
+// rendered), repeats are idempotent, and Close stamps the open window.
+test("device identities: add (idempotent) and close a window", async () => {
+  const now = Date.now();
+  const name = `e2e-admin-identity-${now}`;
+  const deviceID = await createDevice(name, uniqueIP("198.56"));
+  const hostname = `e2e-host-${now}`;
+
+  await page.goto(`/devices/${deviceID}`);
+  await expect(page.getByTestId("device-identity-table")).toBeVisible({
+    timeout: 15_000,
+  });
+
+  // Bad MAC -> indexed server problem field error; nothing is added.
+  await page.getByTestId("device-identity-add-type").selectOption("mac");
+  await page.getByTestId("device-identity-add-value").fill("not-a-mac");
+  await page.getByTestId("device-identity-add-submit").click();
+  await expect(page.getByTestId("device-identity-field-errors")).toContainText(
+    "value",
+    { timeout: 15_000 },
+  );
+
+  await page.getByTestId("device-identity-add-type").selectOption("hostname");
+  await page.getByTestId("device-identity-add-value").fill(hostname);
+  await page.getByTestId("device-identity-add-submit").click();
+  await expect(page.getByTestId("device-identity-action-result")).toContainText(
+    "added",
+    { timeout: 15_000 },
+  );
+  const row = page
+    .getByTestId("device-identity-table")
+    .locator("tr", { hasText: hostname });
+  await expect(row).toContainText("open window");
+
+  // Idempotent repeat on the same device: still exactly one window row.
+  await page.getByTestId("device-identity-add-value").fill(hostname);
+  await page.getByTestId("device-identity-add-submit").click();
+  await expect(page.getByTestId("device-identity-action-result")).toContainText(
+    "added",
+    { timeout: 15_000 },
+  );
+  await expect(
+    page.getByTestId("device-identity-table").locator("tr", { hasText: hostname }),
+  ).toHaveCount(1);
+
+  // Close: the window is stamped and the button disappears.
+  await page.getByTestId(`device-identity-close-${hostname}`).click();
+  await expect(page.getByTestId("device-identity-action-result")).toContainText(
+    "closed",
+    { timeout: 15_000 },
+  );
+  await expect(row).not.toContainText("open window");
+  await expect(page.getByTestId(`device-identity-close-${hostname}`)).toHaveCount(
+    0,
+  );
+});
+
 // M10-S3a: bind/unbind through the panel. The credential is created through
 // the API; binding a fresh device with priority 5 must show up as the
 // device-scope binding and as the effective credential (device tier wins);

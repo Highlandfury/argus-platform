@@ -25,7 +25,7 @@ func credentialRoute(path string) bool {
 }
 
 // TestInventoryRoutesDeclareCapabilityAndScope pins the M7-S3 route metadata:
-// all 18 inventory routes declare a capability from the vocabulary and a scope
+// all inventory routes declare a capability from the vocabulary and a scope
 // from {org,site,device_group,device}, and every mutation keeps CSRF.
 func TestInventoryRoutesDeclareCapabilityAndScope(t *testing.T) {
 	inventory := 0
@@ -54,8 +54,8 @@ func TestInventoryRoutesDeclareCapabilityAndScope(t *testing.T) {
 			}
 		}
 	}
-	if inventory != 20 {
-		t.Fatalf("inventory routes = %d, want the 18 M7-S3 routes + 1 M9-S1 poll-health route + 1 M10-S1 device-status route", inventory)
+	if inventory != 22 {
+		t.Fatalf("inventory routes = %d, want the 18 M7-S3 routes + 1 M9-S1 poll-health route + 1 M10-S1 device-status route + 2 M10-S3b-1 identity routes", inventory)
 	}
 }
 

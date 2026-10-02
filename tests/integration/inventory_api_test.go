@@ -647,6 +647,8 @@ func TestInventoryAuthzS17(t *testing.T) {
 		{"delete_device", http.MethodDelete, "/v1/devices/" + deviceID, ""},
 		{"merge_device", http.MethodPost, "/v1/devices/" + deviceID + "/merge", `{"source_device_ids":["` + newUUID() + `"]}`},
 		{"split_device", http.MethodPost, "/v1/devices/" + deviceID + "/split", `{"identity_history_ids":["` + newUUID() + `"],"name":"x"}`},
+		{"add_identity", http.MethodPost, "/v1/devices/" + deviceID + "/identities", `{"type":"mac","value":"aa:bb:cc:dd:ee:99"}`},
+		{"close_identity", http.MethodPost, "/v1/devices/" + deviceID + "/identities/" + newUUID() + "/close", ""},
 		{"create_interface", http.MethodPost, "/v1/devices/" + deviceID + "/interfaces", `{"if_index":9,"if_name":"Gi9"}`},
 		{"create_group", http.MethodPost, "/v1/device-groups", `{"name":"viewer-group"}`},
 		{"delete_group", http.MethodDelete, "/v1/device-groups/" + groupID, ""},
@@ -910,6 +912,7 @@ func TestInventoryCapabilityEnforcement(t *testing.T) {
 		{http.MethodGet, "/v1/devices/" + deviceID + "/interfaces"},
 		{http.MethodGet, "/v1/device-groups"},
 		{http.MethodPost, "/v1/devices"},
+		{http.MethodPost, "/v1/devices/" + deviceID + "/identities"},
 	} {
 		res = doRequest(t, anon, tc.method, env.srv.URL+tc.path, "", nil)
 		requireProblem(t, res, http.StatusUnauthorized, "auth.unauthenticated")
@@ -945,6 +948,8 @@ func TestInventoryCapabilityEnforcement(t *testing.T) {
 		{"delete_device", http.MethodDelete, "/v1/devices/" + deviceID, ""},
 		{"merge_device", http.MethodPost, "/v1/devices/" + deviceID + "/merge", `{"source_device_ids":["` + newUUID() + `"]}`},
 		{"split_device", http.MethodPost, "/v1/devices/" + deviceID + "/split", `{"identity_history_ids":["` + newUUID() + `"],"name":"x"}`},
+		{"add_identity", http.MethodPost, "/v1/devices/" + deviceID + "/identities", `{"type":"mac","value":"aa:bb:cc:dd:ee:99"}`},
+		{"close_identity", http.MethodPost, "/v1/devices/" + deviceID + "/identities/" + newUUID() + "/close", ""},
 		{"create_interface", http.MethodPost, "/v1/devices/" + deviceID + "/interfaces", `{"if_index":2,"if_name":"Gi2"}`},
 		{"update_interface", http.MethodPatch, "/v1/interfaces/" + interfaceID, `{"description":"x"}`},
 		{"delete_interface", http.MethodDelete, "/v1/interfaces/" + interfaceID, ""},
@@ -1071,6 +1076,12 @@ func TestInventoryScopeEnforcement(t *testing.T) {
 	}
 	if res = do(http.MethodPost, "/v1/devices/"+d1+"/split", `{"identity_history_ids":["`+newUUID()+`"],"name":"x"}`); res.Status != http.StatusNotFound {
 		t.Fatalf("split out-of-scope source: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodPost, "/v1/devices/"+d1+"/identities", `{"type":"mac","value":"aa:bb:cc:dd:ee:98"}`); res.Status != http.StatusNotFound {
+		t.Fatalf("scoped out-of-scope identity add: status %d body %v", res.Status, res.Body)
+	}
+	if res = do(http.MethodPost, "/v1/devices/"+d1+"/identities/"+newUUID()+"/close", ""); res.Status != http.StatusNotFound {
+		t.Fatalf("scoped out-of-scope identity close: status %d body %v", res.Status, res.Body)
 	}
 
 	// Destination scope on PATCH (M7-S3 review finding): moving a device to
@@ -1557,6 +1568,8 @@ func TestInventoryCSRFEnforcement(t *testing.T) {
 		{"delete_device", http.MethodDelete, "/v1/devices/" + deviceID, ""},
 		{"merge_device", http.MethodPost, "/v1/devices/" + deviceID + "/merge", `{"source_device_ids":["` + newUUID() + `"]}`},
 		{"split_device", http.MethodPost, "/v1/devices/" + deviceID + "/split", `{"identity_history_ids":["` + newUUID() + `"],"name":"x"}`},
+		{"add_identity", http.MethodPost, "/v1/devices/" + deviceID + "/identities", `{"type":"mac","value":"aa:bb:cc:dd:ee:99"}`},
+		{"close_identity", http.MethodPost, "/v1/devices/" + deviceID + "/identities/" + newUUID() + "/close", ""},
 		{"create_interface", http.MethodPost, "/v1/devices/" + deviceID + "/interfaces", `{"if_index":2,"if_name":"Gi2"}`},
 		{"update_interface", http.MethodPatch, "/v1/interfaces/" + interfaceID, `{"description":"x"}`},
 		{"delete_interface", http.MethodDelete, "/v1/interfaces/" + interfaceID, ""},
@@ -1619,6 +1632,8 @@ func TestInventoryCrossTenantS21(t *testing.T) {
 		{"read_group", http.MethodGet, "/v1/device-groups/" + aGroup, "", "device_group.not_found"},
 		{"merge_target", http.MethodPost, "/v1/devices/" + aDevice + "/merge", `{"source_device_ids":["` + bDevice + `"]}`, "device.not_found"},
 		{"split_source", http.MethodPost, "/v1/devices/" + aDevice + "/split", `{"identity_history_ids":["` + newUUID() + `"],"name":"x"}`, "device.not_found"},
+		{"add_identity", http.MethodPost, "/v1/devices/" + aDevice + "/identities", `{"type":"mac","value":"aa:bb:cc:dd:ee:97"}`, "device.not_found"},
+		{"close_identity", http.MethodPost, "/v1/devices/" + aDevice + "/identities/" + newUUID() + "/close", "", "device.not_found"},
 	} {
 		t.Run("cross_tenant_"+tc.name, func(t *testing.T) {
 			res := b.do(t, tc.method, tc.path, tc.body)

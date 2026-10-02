@@ -296,6 +296,22 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 			}
 			h.inventoryHTTP.ListDeviceIdentityHistory(w, r)
 		})
+	case "/v1/devices/{id}/identities":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			h.inventoryHTTP.AddDeviceIdentity(w, r)
+		})
+	case "/v1/devices/{id}/identities/{historyId}/close":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.inventoryHTTP == nil {
+				serviceUnavailable(w, r, "inventory service not configured")
+				return
+			}
+			h.inventoryHTTP.CloseDeviceIdentity(w, r)
+		})
 	case "/v1/devices/{id}/poll-health":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if h.pollHealthHTTP == nil {

@@ -43,6 +43,8 @@ var routeTable = []Route{
 	{Method: "PATCH", Path: "/v1/devices/{id}", Protected: true, CSRF: true, Capability: authz.CapDeviceWrite, Scope: authz.ScopeDevice},
 	{Method: "DELETE", Path: "/v1/devices/{id}", Protected: true, CSRF: true, Capability: authz.CapDeviceWrite, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/identity-history", Protected: true, Capability: authz.CapDeviceIdentityRead, Scope: authz.ScopeDevice},
+	{Method: "POST", Path: "/v1/devices/{id}/identities", Protected: true, CSRF: true, Capability: authz.CapDeviceWrite, Scope: authz.ScopeDevice},
+	{Method: "POST", Path: "/v1/devices/{id}/identities/{historyId}/close", Protected: true, CSRF: true, Capability: authz.CapDeviceWrite, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/poll-health", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
 	{Method: "GET", Path: "/v1/devices/{id}/status", Protected: true, Capability: authz.CapDeviceRead, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/devices/{id}/checks", Protected: true, CSRF: true, Capability: authz.CapDiagnosticRun, Scope: authz.ScopeDevice},

@@ -329,6 +329,10 @@ paths:
         - { name: include_deleted, in: query, schema: { type: boolean, default: false } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
         - { name: cursor, in: query, schema: { type: string } }
+        - name: order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: asc }
+          description: "`desc` returns newest first (UUIDv7 id order) and the cursor walks backwards; the default `asc` preserves the historical cursor contract."
       responses:
         '200':
           description: OK
@@ -444,6 +448,67 @@ paths:
                   has_more: { type: boolean }
         '400': { $ref: '#/components/responses/Validation' }
         '401': { $ref: '#/components/responses/Unauthenticated' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/devices/{id}/identities:
+    post:
+      tags: [inventory]
+      summary: 'Open an identity-history window for a device (admin; idempotent per key)'
+      description: >
+        Records one identity key as an open `device_identity_history` window
+        (`source=manual`, `last_seen_at` null). Repeating the same key for the same
+        device returns the existing open row (201); a key already open on another
+        live device is a deterministic `409 device.identity_conflict` via the
+        partial unique index. Device columns (serial, sysObjectID, management IP)
+        are NOT modified by this operation; they change through PATCH transitions.
+      x-argus-capability: device.write
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IdentityCreate' }
+      responses:
+        '201':
+          description: Open identity window (the existing row for idempotent repeats)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityRecord' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/devices/{id}/identities/{historyId}/close:
+    post:
+      tags: [inventory]
+      summary: 'Close an identity-history window (admin; idempotent repeat close)'
+      description: >
+        Closes the open window identified by `historyId` (stamps `last_seen_at`).
+        Repeat closes are idempotent and return the already-closed row without a
+        new audit event; unknown rows/foreign devices are uniformly 404.
+      x-argus-capability: device.write
+      x-argus-scope: device
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - name: historyId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '200':
+          description: Closed window returned (already-closed rows unchanged)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IdentityRecord' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /v1/devices/{id}/poll-health:
@@ -1286,6 +1351,14 @@ components:
         first_seen_at: { type: string, format: date-time }
         last_seen_at: { type: [string, 'null'], format: date-time, description: null = open window }
         created_at: { type: string, format: date-time }
+    IdentityCreate:
+      type: object
+      required: [type, value]
+      properties:
+        type: { type: string, enum: [serial, chassis_id, sys_object_id, mac, hostname, mgmt_ip] }
+        value:
+          type: string
+          description: Identity value; MAC values and management IPs must parse (canonicalized on write).
     PollHealthRecord:
       type: object
       required: [id, device_id, collector_id, poll_type, checked_at, latency_ms, outcome, error_class, consecutive_failures, origin]

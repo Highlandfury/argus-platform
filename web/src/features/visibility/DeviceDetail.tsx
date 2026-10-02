@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { fetchJSON } from "@/lib/api";
+import { fetchJSON, problemDetail, readCSRF } from "@/lib/api";
 
 import AvailabilityRibbon from "./AvailabilityRibbon";
 import CheckRunner from "./CheckRunner";
@@ -60,6 +60,23 @@ interface IdentityRecord {
   first_seen_at: string;
   last_seen_at: string | null;
 }
+
+interface ProblemFieldError {
+  field?: string;
+  code?: string;
+  message?: string;
+}
+
+// Server-allowed identity types (device_identity_history CHECK; M10-S3b-1 add
+// endpoint). Values are canonicalized server-side (MAC case, management IP).
+const IDENTITY_TYPES = [
+  "serial",
+  "chassis_id",
+  "sys_object_id",
+  "mac",
+  "hostname",
+  "mgmt_ip",
+];
 
 interface InterfaceRow {
   id: string;
@@ -161,6 +178,17 @@ export default function DeviceDetail({
   const [statusError, setStatusError] = useState("");
   const [identity, setIdentity] = useState<IdentityRecord[] | null>(null);
   const [identityError, setIdentityError] = useState("");
+  const [identityActionError, setIdentityActionError] = useState("");
+  const [identityFieldErrors, setIdentityFieldErrors] = useState<
+    ProblemFieldError[]
+  >([]);
+  const [identityMessage, setIdentityMessage] = useState("");
+  const [identityType, setIdentityType] = useState("mac");
+  const [identityValue, setIdentityValue] = useState("");
+  const [identityBusy, setIdentityBusy] = useState(false);
+  const [closingIdentityID, setClosingIdentityID] = useState<string | null>(
+    null,
+  );
   const [interfaces, setInterfaces] = useState<InterfaceRow[] | null>(null);
   const [interfacesError, setInterfacesError] = useState("");
   const [health, setHealth] = useState<PollHealthRecord[] | null>(null);
@@ -216,6 +244,81 @@ export default function DeviceDetail({
       setHealthError(healthRes.error);
     }
   }, [device.id]);
+
+  // M10-S3b-1: open/close identity-history windows. Both mutations carry the
+  // session + CSRF pair, render problem+json (including indexed field errors
+  // for the add form), and refresh the identity table from the server.
+  async function addIdentity(e: React.FormEvent) {
+    e.preventDefault();
+    setIdentityActionError("");
+    setIdentityMessage("");
+    setIdentityFieldErrors([]);
+    if (identityValue.trim() === "") {
+      setIdentityActionError("identity value is required");
+      return;
+    }
+    setIdentityBusy(true);
+    try {
+      const res = await fetch(`/api/v1/devices/${device.id}/identities`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": readCSRF(),
+        },
+        body: JSON.stringify({ type: identityType, value: identityValue.trim() }),
+      });
+      if (!res.ok) {
+        const problem = (await res.json().catch(() => null)) as {
+          detail?: string;
+          errors?: ProblemFieldError[];
+        } | null;
+        setIdentityFieldErrors(
+          Array.isArray(problem?.errors) ? problem.errors : [],
+        );
+        setIdentityActionError(
+          problem?.detail ?? `identity add failed (status ${res.status})`,
+        );
+        return;
+      }
+      setIdentityMessage(`Identity ${identityType} added.`);
+      setIdentityValue("");
+      await loadTables();
+    } catch {
+      setIdentityActionError("network error");
+    } finally {
+      setIdentityBusy(false);
+    }
+  }
+
+  async function closeIdentity(row: IdentityRecord) {
+    setIdentityActionError("");
+    setIdentityMessage("");
+    setIdentityFieldErrors([]);
+    setClosingIdentityID(row.id);
+    try {
+      const res = await fetch(
+        `/api/v1/devices/${device.id}/identities/${row.id}/close`,
+        {
+          method: "POST",
+          headers: { "X-CSRF-Token": readCSRF() },
+        },
+      );
+      if (!res.ok) {
+        setIdentityActionError(
+          await problemDetail(res, `identity close failed (status ${res.status})`),
+        );
+        return;
+      }
+      setIdentityMessage(
+        `Identity ${row.identifier_type} ${row.identifier_value} closed.`,
+      );
+      await loadTables();
+    } catch {
+      setIdentityActionError("network error");
+    } finally {
+      setClosingIdentityID(null);
+    }
+  }
 
   const loadCharts = useCallback(
     async (key: RangeKey) => {
@@ -458,6 +561,7 @@ export default function DeviceDetail({
                 <th>Source</th>
                 <th>First seen</th>
                 <th>Last seen</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -470,10 +574,92 @@ export default function DeviceDetail({
                   <td className="muted">
                     {row.last_seen_at ? shortTime(row.last_seen_at) : "open window"}
                   </td>
+                  <td>
+                    {row.last_seen_at === null && role === "admin" && (
+                      <button
+                        type="button"
+                        className="btn-sm btn-ghost"
+                        data-testid={`device-identity-close-${row.identifier_value}`}
+                        disabled={closingIdentityID === row.id}
+                        onClick={() => void closeIdentity(row)}
+                      >
+                        {closingIdentityID === row.id ? "Closing…" : "Close"}
+                      </button>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        )}
+        {!identityError && identity !== null && role === "admin" && (
+          <form
+            onSubmit={addIdentity}
+            data-testid="device-identity-add-form"
+            style={{ marginTop: 12 }}
+          >
+            <h3 className="vis-subhead">Add identity</h3>
+            <p className="muted">
+              Opens a new identity-history window (source=manual). Repeating an
+              existing key on this device is a no-op; a key already open on
+              another live device is rejected as a conflict.
+            </p>
+            <label htmlFor="device-identity-add-type">Type</label>
+            <select
+              id="device-identity-add-type"
+              value={identityType}
+              onChange={(e) => setIdentityType(e.target.value)}
+              data-testid="device-identity-add-type"
+            >
+              {IDENTITY_TYPES.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+            <label htmlFor="device-identity-add-value">Value</label>
+            <input
+              id="device-identity-add-value"
+              value={identityValue}
+              onChange={(e) => setIdentityValue(e.target.value)}
+              placeholder={identityType === "mac" ? "aa:bb:cc:dd:ee:ff" : "value"}
+              data-testid="device-identity-add-value"
+            />
+            <button
+              type="submit"
+              className="btn-sm"
+              disabled={identityBusy}
+              data-testid="device-identity-add-submit"
+            >
+              {identityBusy ? "Adding…" : "Add identity"}
+            </button>
+          </form>
+        )}
+        {!identityError && identity !== null && role !== "admin" && (
+          <p className="muted" data-testid="device-identity-readonly">
+            Adding or closing identity windows requires the admin role (
+            <code>device.write</code>).
+          </p>
+        )}
+        {identityFieldErrors.length > 0 && (
+          <ul className="error" data-testid="device-identity-field-errors">
+            {identityFieldErrors.map((fe, i) => (
+              <li key={`${fe.field ?? "field"}-${i}`}>
+                {fe.field ? `${fe.field}: ` : ""}
+                {fe.message ?? "invalid value"}
+              </li>
+            ))}
+          </ul>
+        )}
+        {identityActionError && (
+          <p className="error" data-testid="device-identity-action-error">
+            {identityActionError}
+          </p>
+        )}
+        {identityMessage && (
+          <p className="muted" data-testid="device-identity-action-result">
+            {identityMessage}
+          </p>
         )}
       </section>
 

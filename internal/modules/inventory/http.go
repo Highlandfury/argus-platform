@@ -287,7 +287,16 @@ func (h *HTTP) ListDevices(w http.ResponseWriter, r *http.Request) {
 	}
 	filter.Scope = scopeFilter(sc)
 
-	page, err := h.Svc.ListDevices(r.Context(), p.OrgID, filter, limit, query.Get("cursor"))
+	// Newest-first ordering is opt-in and additive; the default stays ascending
+	// so existing cursor consumers are unchanged.
+	order := query.Get("order")
+	if order != "" && order != "asc" && order != "desc" {
+		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid order",
+			httpx.FieldError{Field: "order", Code: "invalid", Message: "allowed: asc, desc"})
+		return
+	}
+
+	page, err := h.Svc.ListDevices(r.Context(), p.OrgID, filter, limit, query.Get("cursor"), order == "desc")
 	if err != nil {
 		if errors.Is(err, ErrInvalidCursor) {
 			httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid cursor")
@@ -416,6 +425,12 @@ func (h *HTTP) CreateDevice(w http.ResponseWriter, r *http.Request) {
 		if strings.TrimSpace(e.Value) == "" {
 			fieldErrs = append(fieldErrs, httpx.FieldError{
 				Field: "identities[" + strconv.Itoa(i) + "].value", Code: "required", Message: "value is required",
+			})
+			continue
+		}
+		if code, message, ok := validateIdentityValue(e.Type, e.Value); !ok {
+			fieldErrs = append(fieldErrs, httpx.FieldError{
+				Field: "identities[" + strconv.Itoa(i) + "].value", Code: code, Message: message,
 			})
 			continue
 		}
@@ -763,6 +778,146 @@ func (h *HTTP) ListDeviceIdentityHistory(w http.ResponseWriter, r *http.Request)
 		"next_cursor": cursorOrNil(page.NextCursor),
 		"has_more":    page.HasMore,
 	})
+}
+
+// validateIdentityValue checks per-type value formats for identity windows.
+// MACs and management IPs are the two canonicalized encodings (identity.go),
+// so a value that cannot be canonicalized is rejected at the edge; the other
+// identity types remain free text.
+func validateIdentityValue(typ, value string) (code, message string, ok bool) {
+	switch typ {
+	case IdentityTypeMAC:
+		if _, err := net.ParseMAC(value); err != nil {
+			return "invalid", "mac must be a MAC address", false
+		}
+	case IdentityTypeMgmtIP:
+		if net.ParseIP(value) == nil {
+			return "invalid", "mgmt_ip must be a valid IP address", false
+		}
+	}
+	return "", "", true
+}
+
+type addIdentityRequest struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+// AddDeviceIdentity handles POST /v1/devices/{id}/identities (admin only;
+// M10-S3b-1): open one identity-history window for the device. Repeating the
+// same key is idempotent; a key already open on another live device is 409
+// device.identity_conflict (partial unique index), and foreign/unknown devices
+// are uniformly 404.
+func (h *HTTP) AddDeviceIdentity(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
+	p, _ := httpx.PrincipalFrom(r.Context())
+	deviceID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	var req addIdentityRequest
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	var fieldErrs []httpx.FieldError
+	if !contains(IdentityTypes, req.Type) {
+		fieldErrs = append(fieldErrs, httpx.FieldError{Field: "type", Code: "invalid", Message: "allowed: " + strings.Join(IdentityTypes, ", ")})
+	}
+	if strings.TrimSpace(req.Value) == "" {
+		fieldErrs = append(fieldErrs, httpx.FieldError{Field: "value", Code: "required", Message: "value is required"})
+	} else if contains(IdentityTypes, req.Type) {
+		if code, message, ok := validateIdentityValue(req.Type, req.Value); !ok {
+			fieldErrs = append(fieldErrs, httpx.FieldError{Field: "value", Code: code, Message: message})
+		}
+	}
+	if len(fieldErrs) > 0 {
+		httpx.WriteProblem(w, r, http.StatusBadRequest, "validation.failed", "invalid identity", fieldErrs...)
+		return
+	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	dev, err := h.Svc.GetDevice(r.Context(), p.OrgID, deviceID, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(dev.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	created, err := h.Svc.AddIdentity(r.Context(), p.OrgID, deviceID, IdentityInput(req), actorFrom(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrDeviceNotFound):
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		case errors.Is(err, ErrIdentityConflict):
+			httpx.WriteProblem(w, r, http.StatusConflict, "device.identity_conflict", "an identity value is already assigned to another live device")
+		default:
+			httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "identity add failed")
+		}
+		return
+	}
+	httpx.WriteJSON(w, http.StatusCreated, identityPayload(created))
+}
+
+// CloseDeviceIdentity handles POST /v1/devices/{id}/identities/{historyId}/close
+// (admin only; M10-S3b-1): close one identity-history window. Repeat closes are
+// idempotent (the closed row is returned); unknown rows are 404 and foreign
+// devices are uniformly 404 like missing ones.
+func (h *HTTP) CloseDeviceIdentity(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
+	p, _ := httpx.PrincipalFrom(r.Context())
+	deviceID, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	historyID, err := uuid.Parse(r.PathValue("historyId"))
+	if err != nil {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.identity_not_found", "identity history row not found")
+		return
+	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	dev, err := h.Svc.GetDevice(r.Context(), p.OrgID, deviceID, false)
+	if err != nil {
+		if errors.Is(err, ErrDeviceNotFound) {
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+			return
+		}
+		httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "device lookup failed")
+		return
+	}
+	if !sc.AllowsDevice(dev.SiteID) {
+		httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		return
+	}
+	closed, err := h.Svc.CloseIdentity(r.Context(), p.OrgID, deviceID, historyID, actorFrom(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrDeviceNotFound):
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.not_found", "device not found")
+		case errors.Is(err, ErrIdentityNotFound):
+			httpx.WriteProblem(w, r, http.StatusNotFound, "device.identity_not_found", "identity history row not found")
+		default:
+			httpx.WriteProblem(w, r, http.StatusInternalServerError, "internal.error", "identity close failed")
+		}
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, identityPayload(closed))
 }
 
 type mergeRequest struct {

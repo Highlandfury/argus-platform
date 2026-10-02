@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 
 import CreateCredentialForm from "@/components/CreateCredentialForm";
+import CredentialBindings from "@/components/CredentialBindings";
 import RotateCredential from "@/components/RotateCredential";
 import { serverFetch } from "@/lib/api";
 
@@ -25,6 +26,7 @@ interface CredentialMetadata {
 
 interface MeResponse {
   user: { role: string };
+  org?: { id: string; slug: string; name: string };
 }
 
 function shortTime(value: string | null): string {
@@ -53,6 +55,8 @@ export default async function CredentialsPage() {
   const cookieHeader = (await cookies()).toString();
   let credentials: CredentialMetadata[] = [];
   let role = "";
+  let orgID = "";
+  let orgName = "";
   let loadError = "";
   try {
     const [listRes, meRes] = await Promise.all([
@@ -66,7 +70,10 @@ export default async function CredentialsPage() {
       loadError = `credentials unavailable (status ${listRes.status})`;
     }
     if (meRes.ok) {
-      role = ((await meRes.json()) as MeResponse).user.role;
+      const me = (await meRes.json()) as MeResponse;
+      role = me.user.role;
+      orgID = me.org?.id ?? "";
+      orgName = me.org?.name ?? "";
     }
   } catch {
     // API unreachable: the shell renders the outage; keep the list empty.
@@ -126,9 +133,15 @@ export default async function CredentialsPage() {
           <CreateCredentialForm />
         </div>
       )}
+      {role === "admin" && orgID !== "" && (
+        <div style={{ marginTop: 16 }}>
+          <CredentialBindings orgID={orgID} orgName={orgName} />
+        </div>
+      )}
       <p className="muted" style={{ marginTop: 16 }}>
         Secrets are write-only: the API returns metadata only and there is no
-        reveal action for any role. Bind a credential to a device from that
+        reveal action for any role. Bind a credential to a site, device group or
+        the organization above; bindings to a specific device live on that
         device&apos;s detail page (SNMP credentials panel), which posts
         <code>/v1/credentials/&#123;id&#125;/bind</code> and
         <code>/unbind</code>.
