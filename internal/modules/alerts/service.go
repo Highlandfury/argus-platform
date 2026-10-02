@@ -32,12 +32,18 @@ type Service struct {
 	az  Authorizer
 	// Now is the clock seam for deterministic tests.
 	Now func() time.Time
+	// sink consumes committed transitions (M11-S2 notify engine). Nil means
+	// notifications are disabled; the state machine is unaffected.
+	sink TransitionSink
 }
 
 // New wires the service.
 func New(app *pgxpool.Pool, az Authorizer) *Service {
 	return &Service{app: app, az: az, Now: time.Now}
 }
+
+// SetSink installs the committed-transition consumer (notify engine).
+func (s *Service) SetSink(sink TransitionSink) { s.sink = sink }
 
 // ScopeFor resolves the caller's bindings (fails closed when the authorizer is
 // not configured).
@@ -463,9 +469,9 @@ func lockAlert(ctx context.Context, tx pgx.Tx, alertID uuid.UUID) (Alert, error)
 // AckAlert acknowledges an open alert (capability enforced by the router;
 // scope by the handler).
 func (s *Service) AckAlert(ctx context.Context, orgID, alertID uuid.UUID, actor Actor, sc authz.Scope) (Alert, error) {
-	return s.transitionAlert(ctx, orgID, alertID, sc, func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, error) {
+	return s.transitionAlert(ctx, orgID, alertID, sc, func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, *AlertEvent, error) {
 		if a.State != StateActive && a.State != StateAcknowledged && a.State != StateSnoozed && a.State != StateSuppressed {
-			return Alert{}, ErrStateConflict
+			return Alert{}, nil, ErrStateConflict
 		}
 		now := s.Now().UTC()
 		row := tx.QueryRow(ctx, `
@@ -476,14 +482,15 @@ func (s *Service) AckAlert(ctx context.Context, orgID, alertID uuid.UUID, actor 
 			alertID, actorRef(actor), now)
 		out, err := scanAlert(row)
 		if err != nil {
-			return Alert{}, err
+			return Alert{}, nil, err
 		}
-		if err := appendEvent(ctx, tx, orgID, alertID, EventAcknowledged, actorRef(actor), map[string]any{
+		ev, err := appendEvent(ctx, tx, orgID, alertID, EventAcknowledged, actorRef(actor), map[string]any{
 			"from": a.State, "to": StateAcknowledged,
-		}, now); err != nil {
-			return Alert{}, err
+		}, now)
+		if err != nil {
+			return Alert{}, nil, err
 		}
-		return out, nil
+		return out, &ev, nil
 	})
 }
 
@@ -503,11 +510,11 @@ func (s *Service) SnoozeAlert(ctx context.Context, orgID, alertID uuid.UUID, act
 	if until.After(now.Add(MaxSnooze)) {
 		return Alert{}, ValidationErrors{{Field: "until", Code: "range", Message: "snooze expiry must be within 30 days"}}
 	}
-	return s.transitionAlert(ctx, orgID, alertID, sc, func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, error) {
+	return s.transitionAlert(ctx, orgID, alertID, sc, func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, *AlertEvent, error) {
 		switch a.State {
 		case StatePending, StateActive, StateAcknowledged, StateSnoozed, StateSuppressed:
 		default:
-			return Alert{}, ErrStateConflict
+			return Alert{}, nil, ErrStateConflict
 		}
 		row := tx.QueryRow(ctx, `
 			UPDATE alerts AS a SET state = 'snoozed', snooze_until = $2, last_evaluated_at = $3
@@ -516,14 +523,15 @@ func (s *Service) SnoozeAlert(ctx context.Context, orgID, alertID uuid.UUID, act
 			alertID, until, now)
 		out, err := scanAlert(row)
 		if err != nil {
-			return Alert{}, err
+			return Alert{}, nil, err
 		}
-		if err := appendEvent(ctx, tx, orgID, alertID, EventSnoozed, actorRef(actor), map[string]any{
+		ev, err := appendEvent(ctx, tx, orgID, alertID, EventSnoozed, actorRef(actor), map[string]any{
 			"from": a.State, "to": StateSnoozed, "snooze_until": until.Format(time.RFC3339), "reason": reason,
-		}, now); err != nil {
-			return Alert{}, err
+		}, now)
+		if err != nil {
+			return Alert{}, nil, err
 		}
-		return out, nil
+		return out, &ev, nil
 	})
 }
 
@@ -535,9 +543,9 @@ func (s *Service) ResolveAlert(ctx context.Context, orgID, alertID uuid.UUID, ac
 	if reason == "" || len(reason) > MaxCommentLen {
 		return Alert{}, ValidationErrors{{Field: "reason", Code: "required", Message: "reason is required (max 2000 characters)"}}
 	}
-	return s.transitionAlert(ctx, orgID, alertID, sc, func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, error) {
+	return s.transitionAlert(ctx, orgID, alertID, sc, func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, *AlertEvent, error) {
 		if a.State == StateResolved {
-			return Alert{}, ErrStateConflict
+			return Alert{}, nil, ErrStateConflict
 		}
 		now := s.Now().UTC()
 		row := tx.QueryRow(ctx, `
@@ -547,14 +555,15 @@ func (s *Service) ResolveAlert(ctx context.Context, orgID, alertID uuid.UUID, ac
 			alertID, now)
 		out, err := scanAlert(row)
 		if err != nil {
-			return Alert{}, err
+			return Alert{}, nil, err
 		}
-		if err := appendEvent(ctx, tx, orgID, alertID, EventManualResolved, actorRef(actor), map[string]any{
+		ev, err := appendEvent(ctx, tx, orgID, alertID, EventManualResolved, actorRef(actor), map[string]any{
 			"from": a.State, "to": StateResolved, "reason": reason,
-		}, now); err != nil {
-			return Alert{}, err
+		}, now)
+		if err != nil {
+			return Alert{}, nil, err
 		}
-		return out, nil
+		return out, &ev, nil
 	})
 }
 
@@ -564,22 +573,28 @@ func (s *Service) CommentAlert(ctx context.Context, orgID, alertID uuid.UUID, ac
 	if comment == "" || len(comment) > MaxCommentLen {
 		return Alert{}, ValidationErrors{{Field: "comment", Code: "required", Message: "comment is required (max 2000 characters)"}}
 	}
-	return s.transitionAlert(ctx, orgID, alertID, sc, func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, error) {
+	return s.transitionAlert(ctx, orgID, alertID, sc, func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, *AlertEvent, error) {
 		now := s.Now().UTC()
-		if err := appendEvent(ctx, tx, orgID, alertID, EventComment, actorRef(actor), map[string]any{
+		ev, err := appendEvent(ctx, tx, orgID, alertID, EventComment, actorRef(actor), map[string]any{
 			"comment": comment,
-		}, now); err != nil {
-			return Alert{}, err
+		}, now)
+		if err != nil {
+			return Alert{}, nil, err
 		}
-		return a, nil
+		return a, &ev, nil
 	})
 }
 
 // transitionAlert locks the alert, enforces scope, applies fn, and reloads the
-// site projection.
+// site projection. After the transaction commits, the transition is handed to
+// the configured sink (M11-S2); a sink failure never rolls back or fails the
+// state machine (best-effort enqueue is documented in M11_EVIDENCE §S2).
 func (s *Service) transitionAlert(ctx context.Context, orgID, alertID uuid.UUID, sc authz.Scope,
-	fn func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, error)) (Alert, error) {
-	var out Alert
+	fn func(ctx context.Context, tx pgx.Tx, a Alert) (Alert, *AlertEvent, error)) (Alert, error) {
+	var (
+		out Alert
+		ev  *AlertEvent
+	)
 	err := database.WithTenant(ctx, s.app, orgID, func(ctx context.Context, tx pgx.Tx) error {
 		a, err := lockAlert(ctx, tx, alertID)
 		if err != nil {
@@ -588,17 +603,20 @@ func (s *Service) transitionAlert(ctx context.Context, orgID, alertID uuid.UUID,
 		if err := requireAlertScope(a, sc); err != nil {
 			return err
 		}
-		updated, err := fn(ctx, tx, a)
+		updated, event, err := fn(ctx, tx, a)
 		if err != nil {
 			return err
 		}
 		// The UPDATE ... RETURNING path omits site_id; carry it forward.
 		updated.SiteID = a.SiteID
-		out = updated
+		out, ev = updated, event
 		return nil
 	})
 	if err != nil {
 		return Alert{}, err
+	}
+	if s.sink != nil && ev != nil && NotifyKinds[ev.Kind] {
+		s.sink.Transitioned(ctx, Transition{Alert: out, Event: *ev})
 	}
 	return out, nil
 }
@@ -611,17 +629,22 @@ func actorRef(a Actor) *uuid.UUID {
 	return &uid
 }
 
-// appendEvent writes one alert_events row. The generator is the timeline.
-func appendEvent(ctx context.Context, tx pgx.Tx, orgID, alertID uuid.UUID, kind string, actor *uuid.UUID, data map[string]any, ts time.Time) error {
+// appendEvent writes one alert_events row and returns it. The generator is the
+// timeline; the returned row is what the notify TransitionSink consumes.
+func appendEvent(ctx context.Context, tx pgx.Tx, orgID, alertID uuid.UUID, kind string, actor *uuid.UUID, data map[string]any, ts time.Time) (AlertEvent, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
-		return err
+		return AlertEvent{}, err
 	}
+	payload := mustMarshal(data)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO alert_events (id, org_id, alert_id, kind, actor_id, data, ts)
 		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)`,
-		id, orgID, alertID, kind, actor, mustMarshal(data), ts)
-	return err
+		id, orgID, alertID, kind, actor, payload, ts)
+	if err != nil {
+		return AlertEvent{}, err
+	}
+	return AlertEvent{ID: id, AlertID: alertID, Kind: kind, ActorID: actor, Data: payload, Ts: ts}, nil
 }
 
 // requireAlertScope maps out-of-scope alerts to not-found (enumeration

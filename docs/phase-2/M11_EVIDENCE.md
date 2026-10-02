@@ -383,3 +383,193 @@ security property without the wall-clock dependency (verified `-count=3`).
   `m11s1_evaluator_test.go`, `m11s1_alerts_api_test.go`;
   `tests/integration/migrations_test.go` (RLS/policy counts 20 → 23).
 - This file.
+
+## S2. Notification engine (channels, routes, deliveries, default pack)
+
+### S2.1 Scope and shape
+
+Implements the docs/10 §17.7 pipeline end to end for committed alert
+transitions: route match -> render -> adapter -> delivery log -> retries and
+breaker. Canonical references: docs/10 §17.7 (pipeline, channels, backoff,
+breaker, budgets, message fields), docs/12 §22.9/§22.14/§22.17 (channel/route/
+deliveries APIs, webhook signing), docs/04 §6.4-6.5 (capabilities), docs/17
+§35.1 (delivery-log retention).
+
+Delivered in this slice: channel adapters (SMTP, generic webhook, Slack,
+Teams); the transition consumer; severity+scope routing; channel templates
+with a plain-text fallback; at-least-once delivery with dedup identity,
+retry schedule and dead-letter; per-channel circuit breaker; severity token
+buckets and per-recipient caps; duplicate-content suppression; delivery logs
+with response code/excerpt; channel test endpoint; P2-AC-32 curated default
+rule pack with new-org seeding. Out of scope by plan: maintenance windows,
+silences, SSE and the alert UI (S3); incidents, grouping/digest and
+escalation policies (V2).
+
+### S2.2 Pipeline as built
+
+- **Consumption**: `alerts.TransitionSink` (interface in the alerts module)
+  is implemented by `notify.Engine.Transitioned`. Only the canonical notify
+  kinds dispatch: `activated`, `reactivated`, `resolved`, `manual_resolved`.
+  Pending/updated/suppression/ack/snooze/comment transitions are
+  timeline-only.
+- **Enqueue** runs in one tenant transaction: enabled routes are matched on
+  severity (empty = all) and scope (sites / device ids / device kinds; empty
+  scope = org-wide). For each (transition, route, channel) the engine mints
+  the delivery id, consumes the per-route severity token bucket once per
+  matched route (never per channel), applies the per-recipient cap (SMTP `to`
+  addresses; webhook uses the single channel recipient), and writes either a
+  `pending` row (next attempt = now, rendered subject/body/payload snapshot)
+  or a `dead_letter` audit row for suppression (`suppressed: duplicate
+  content within 5m window`) or throttling (`throttled: ... severity bucket
+  exhausted`, `per-recipient cap exhausted`). Suppressed/throttled
+  transitions never send and never spend a bucket token for other channels.
+- **Delivery identity**: `DedupKey = sha256("v1|channel_id|alert_id|
+  event_kind")`, stable across retries and identical transitions; the
+  webhook adapter exposes it and the delivery id as `X-Argus-Dedup-Key` /
+  `X-Argus-Delivery`.
+- **Worker**: `ProcessDue(org, now, limit)` claims due `pending`/`failed`
+  rows with a row lock plus lease (`LeaseDuration`) so a second Phase-2
+  worker cannot double-claim; open per-channel breakers keep the message
+  queued with the provider's last excerpt; otherwise one attempt with a 10 s
+  timeout. Success -> `delivered` (delivered_at, response code/excerpt) and
+  the channel failure watch. Failure -> `attempts+1`, next attempt =
+  failure instant + schedule (1m, 5m, 30m, 2h, 6h; the last delay repeats,
+  capped at created+24 h) until 12 attempts -> `dead_letter`. An unreadable
+  vault secret or a missing transport dead-letters immediately (no retry
+  storm).
+- **Circuit breaker**: 5 consecutive failures open the channel; a half-open
+  probe is admitted every 5 min; a success resets. Covered by unit tests.
+- **Channel failure watch**: >5% failed/dead-letter attempts over 15 min
+  (with at least 20 observations) increments
+  `argus_notify_channel_failure_watch_total` and logs a warning; wiring that
+  to an ops alert is M12.
+- **Best-effort boundary**: the alert transition commit and the enqueue are
+  separate transactions (crash window documented). Receivers dedup via the
+  stable dedup key/header, so at-least-once delivery is safe.
+
+### S2.3 Migration 000019
+
+`notification_channels` (kind/config non-secret + SecretsVault envelope
+columns; per-kind config and secret shapes documented in the migration),
+`notification_routes` (canonical `match` jsonb + ordered `channel_ids`),
+`notification_deliveries` (status/attempts/delivered-shape/dedup-length
+constraints; indexes for the due scan, the delivery log, per-channel and
+per-alert views, and the 5 min dedup lookup). All three tables are RLS
+ENABLE + FORCE with the standard `app.current_org` predicate. Bodies are
+90-day and metadata 13-month retention (docs/17 §35.1); enforcement is the
+M13 retention job.
+
+### S2.4 Adapters and wire format
+
+- **SMTP** (`{host, port, username?, from, to[], starttls?}` + write-only
+  `{password?}`): plain-text body with the canonical required fields
+  (severity, scope, summary, start, evidence and ack links, delivery id),
+  subject-header injection guard, tested against a local SMTP sink.
+- **Generic webhook** (`{url, payload: ids|summary, timeout_ms?}` +
+  write-only `{signing_secret}`): canonical signature
+  `X-Argus-Signature: v1=hex(hmac-sha256(secret, timestamp + "." + body))`
+  with `X-Argus-Timestamp` (Unix seconds) and the 5 min replay window;
+  `notify.VerifySignature` is exported for receivers and proved against a
+  local httptest receiver in the integration suite. `ids` payloads drop the
+  summary fields. Default timeout 10 s.
+- **Slack** (incoming webhook `{webhook_url}`): `{"text": subject + "\n" +
+  body}`. **Teams** (incoming webhook `{webhook_url}`): MessageCard with
+  severity theme color.
+- **Envelope**: versioned `spec_version: "1"` payload with `event`
+  (`alert.fired` / `alert.resolved`), `occurred_at`, `org_id` and `data`
+  (alert id, fingerprint, severity, summary, resource, state, started_at,
+  `site_id`, `resolved_at`, `evidence_ref`, `ack_url`).
+
+### S2.5 API surface and authorization
+
+- `/v1/notification/channels` CRUD + `POST /{id}/test`: capability
+  `integration.write`; secrets are write-only (`has_secret` only, never
+  echoed); name conflicts are deterministic 409s; channel DELETE is a
+  soft-disable so the delivery log keeps its FK.
+- `/v1/notification/routes` CRUD: capability `alertrule.write`; matches are
+  canonicalized and fail closed; channel ids must exist in the same tenant.
+- `/v1/notification/deliveries` list: capability `alert.read`; filters
+  `filter[channel_id]`, `filter[alert_id]`, `filter[status]` plus cursor.
+- **Scope enforcement (found missing and fixed during S2 verification)**:
+  every notification route declares `x-argus-scope: org`. The HTTP edge now
+  resolves server-side bindings and denies scope-bound callers with 403
+  `auth.forbidden` ("notification management requires org-wide scope"),
+  mirroring the credentials `requireOrgScope` rule from M7; the authorizer is
+  wired in `cmd/argus-server` and the integration harness.
+
+### S2.6 Curated default pack (P2-AC-32)
+
+`internal/modules/alerts/defaults/default_rules.yaml` (embedded) ships five
+v1-vocabulary rules: `device-unreachable-icmp`, `poll-failures`,
+`interface-down`, `cpu-high`, `interface-utilization-high`. Selectors are
+org-wide per device kind; `net.if.util` stays dormant until the collector
+emits that canonical series (documented, no fake data). Installation is
+idempotent per `default_key`; patching an installed rule writes a normal
+immutable version N+1. `POST /v1/alert-rules:install-defaults` exposes it to
+`alertrule.write` admins, and the scheduler seeds a brand-new org through
+`EnsureDefaults` (any-rule guard: operator deletions never resurrect).
+
+### S2.7 Test evidence
+
+| Command | Result |
+|---|---|
+| `go build ./...` (windows) | pass |
+| `gofmt -l internal cmd tests` | empty |
+| `go vet ./tests/integration/ ./internal/modules/notify/ ./internal/modules/alerts/ ./cmd/argus-server/` | pass |
+| `go test ./internal/... -count=1` | pass (all packages, incl. `notify` adapter/engine/render/validate suites and `alerts` defaults) |
+| `go test ./tests/integration/ -run '^TestM11S2' -count=1 -timeout 20m` | pass (7 tests): migration RLS invariants; channel/route API + secret hygiene (no plaintext in responses, logs or non-vault columns); signed-webhook end to end with resolve; retry/duplicate/throttle rows; authz/scope/cross-tenant; install-defaults idempotence; EnsureDefaults seeding |
+| `scripts/ci-local.ps1 -WithIntegration` (authoritative gate) | **PASS**: fmt/vet/build/test/lint/proto + full integration (545 s) |
+
+Test-robustness fix found during this verification (test-only, no
+production/security change): `TestM3EnrollmentRateLimit` (security suite
+S01 `rate_limit`) issued its 11 attempts sequentially; on a loaded host the
+enrollment token bucket refilled between attempts, so the 11th was admitted
+and failed with `PermissionDenied` instead of `ResourceExhausted`. The burst
+is now issued concurrently (`sync.WaitGroup`) and asserts exactly
+10 x PermissionDenied + 1 x ResourceExhausted - the same security property
+without the wall-clock dependency. Verified `-count=2` in isolation plus the
+full gate.
+
+### S2.8 Defects found and fixed during S2 verification
+
+- `CreateChannel`/`CreateRoute` used the aliased `channelMetaColumns` /
+  `routeColumns` lists in `RETURNING` without a table alias, so every create
+  failed with SQLSTATE 42P01 (`missing FROM-clause entry for table "c"`) and
+  returned a 500. The INSERTs now alias the table (`AS c` / `AS r`).
+- The notification HTTP surface had no scope checks at all: a site-bound
+  admin could manage org-level channels/routes (found by the authz
+  integration suite). Fixed as described in S2.5.
+
+### S2.9 Limitations and deferrals
+
+- Grouping/collapse (one message per group with N items) and quiet-hours
+  digests are V2; this slice renders one message per (transition, route,
+  channel).
+- Escalation policies are V2; route channel order is stored and honored as
+  priority only.
+- Retention enforcement (90 d bodies / 13 mo metadata) is the M13 maintenance
+  job; the shapes are already constrained by the migration.
+- The channel failure-rate watch emits a metric/log only (ops alert wiring is
+  M12).
+- Slack/Teams support incoming-webhook formats only; SMTP supports PLAIN
+  auth with optional STARTTLS (no OAuth).
+- Maintenance windows, silences, SSE and the alert UI remain S3.
+
+### S2.10 Files changed
+
+- `migrations/000019_notification_engine.{up,down}.sql`;
+  `migrations/embed.go` (`Latest = 19`).
+- `internal/modules/notify/`: `adapters.go`, `engine.go`, `http.go`,
+  `metrics.go`, `models.go`, `render.go`, `service.go`, `validate.go` plus
+  `adapters_test.go`, `engine_test.go`, `render_test.go`, `validate_test.go`.
+- `internal/modules/alerts/`: transition-sink hooks in `evaluator.go`,
+  `http.go`, `models.go`, `scheduler.go`, `service.go`; `defaults.go`,
+  `defaults/default_rules.yaml`, `defaults_test.go`.
+- `internal/api/{router,routes}.go`; `internal/platform/authz/authz.go`
+  (+notification capability use); `cmd/argus-server/main.go` (notify
+  service/engine/worker, scope authorizer, metrics, scheduler seeding).
+- `openapi/argus.v1.yaml` (channels/routes/deliveries/test +
+  install-defaults); `tests/contract/authz_contract_test.go`.
+- `tests/integration/`: `m11s2_helpers_test.go`, `m11s2_notify_test.go`;
+  `migrations_test.go` (policy counts).
+- This file.

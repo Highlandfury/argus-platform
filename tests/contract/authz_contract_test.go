@@ -63,6 +63,24 @@ func isAlertPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/alerts")
 }
 
+// M11-S2 notification surface: channels (integration.write), routes
+// (alertrule.write) and the delivery log (alert.read) per docs/12 §22.14.
+func isNotificationChannelPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/notification/channels")
+}
+
+func isNotificationRoutePath(path string) bool {
+	return strings.HasPrefix(path, "/v1/notification/routes")
+}
+
+func isNotificationDeliveryPath(path string) bool {
+	return strings.HasPrefix(path, "/v1/notification/deliveries")
+}
+
+func isNotificationPath(path string) bool {
+	return isNotificationChannelPath(path) || isNotificationRoutePath(path) || isNotificationDeliveryPath(path)
+}
+
 type authzMeta struct {
 	Capability string
 	Scope      string
@@ -82,6 +100,15 @@ func capabilityInVocabulary(path, capability string) bool {
 		return authz.IsAlertRuleCapability(capability)
 	}
 	if isAlertPath(path) {
+		return authz.IsAlertCapability(capability)
+	}
+	if isNotificationChannelPath(path) {
+		return authz.IsIntegrationCapability(capability)
+	}
+	if isNotificationRoutePath(path) {
+		return authz.IsAlertRuleCapability(capability)
+	}
+	if isNotificationDeliveryPath(path) {
 		return authz.IsAlertCapability(capability)
 	}
 	return authz.IsInventoryCapability(capability)
@@ -115,9 +142,11 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	enforced := map[routeKey]authzMeta{}
 	inventoryCount, credentialCount, checkCount, pollHealthCount := 0, 0, 0, 0
 	alertRuleCount, alertCount := 0, 0
+	channelCount, routeCount, deliveryCount := 0, 0, 0
 	for _, rt := range api.Routes() {
 		if !isInventoryPath(rt.Path) && !isCredentialPath(rt.Path) && !isCheckPath(rt.Path) &&
-			!isPollHealthPath(rt.Path) && !isAlertRulePath(rt.Path) && !isAlertPath(rt.Path) {
+			!isPollHealthPath(rt.Path) && !isAlertRulePath(rt.Path) && !isAlertPath(rt.Path) &&
+			!isNotificationPath(rt.Path) {
 			continue
 		}
 		switch {
@@ -127,6 +156,12 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 			pollHealthCount++
 		case isCredentialPath(rt.Path):
 			credentialCount++
+		case isNotificationChannelPath(rt.Path):
+			channelCount++
+		case isNotificationRoutePath(rt.Path):
+			routeCount++
+		case isNotificationDeliveryPath(rt.Path):
+			deliveryCount++
 		case isAlertRulePath(rt.Path):
 			alertRuleCount++
 		case isAlertPath(rt.Path):
@@ -148,11 +183,20 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	if pollHealthCount != 1 {
 		t.Fatalf("poll-health list routes in registry = %d, want 1 (GET /v1/poll-health)", pollHealthCount)
 	}
-	if alertRuleCount != 6 {
-		t.Fatalf("alert-rule routes in registry = %d, want the 6 M11-S1 routes", alertRuleCount)
+	if alertRuleCount != 7 {
+		t.Fatalf("alert-rule routes in registry = %d, want the 6 M11-S1 routes + the M11-S2 install-defaults route", alertRuleCount)
 	}
 	if alertCount != 6 {
 		t.Fatalf("alert routes in registry = %d, want the 6 M11-S1 routes", alertCount)
+	}
+	if channelCount != 6 {
+		t.Fatalf("notification channel routes in registry = %d, want the 6 M11-S2 routes", channelCount)
+	}
+	if routeCount != 5 {
+		t.Fatalf("notification route routes in registry = %d, want the 5 M11-S2 routes", routeCount)
+	}
+	if deliveryCount != 1 {
+		t.Fatalf("notification delivery routes in registry = %d, want 1 (GET /v1/notification/deliveries)", deliveryCount)
 	}
 	for key, meta := range enforced {
 		if meta.Capability == "" {
@@ -176,7 +220,8 @@ func TestInventoryAuthzMetadataMatchesRoutes(t *testing.T) {
 	for pair := model.Model.Paths.PathItems.First(); pair != nil; pair = pair.Next() {
 		path := pair.Key()
 		if !isInventoryPath(path) && !isCredentialPath(path) && !isCheckPath(path) &&
-			!isPollHealthPath(path) && !isAlertRulePath(path) && !isAlertPath(path) {
+			!isPollHealthPath(path) && !isAlertRulePath(path) && !isAlertPath(path) &&
+			!isNotificationPath(path) {
 			continue
 		}
 		item := pair.Value()
@@ -262,6 +307,12 @@ func vocabularyName(path string) string {
 		return "poll-health"
 	case isCredentialPath(path):
 		return "credential"
+	case isNotificationChannelPath(path):
+		return "notification-channel"
+	case isNotificationRoutePath(path):
+		return "notification-route"
+	case isNotificationDeliveryPath(path):
+		return "notification-delivery"
 	case isAlertRulePath(path):
 		return "alert-rule"
 	case isAlertPath(path):

@@ -78,6 +78,23 @@ func TestCapabilityAndScopeVocabulary(t *testing.T) {
 	}
 }
 
+func TestIntegrationCapabilityDerivation(t *testing.T) {
+	for _, cap := range IntegrationCapabilities {
+		if !Allowed("admin", cap) {
+			t.Errorf("admin lacks integration capability %q", cap)
+		}
+		if !IsIntegrationCapability(cap) {
+			t.Errorf("IsIntegrationCapability(%q) = false", cap)
+		}
+		if Allowed("viewer", cap) {
+			t.Errorf("viewer unexpectedly holds %q (docs/04 §6.4 denies integrations to read-only)", cap)
+		}
+	}
+	if IsIntegrationCapability(CapAlertRead) || IsAlertCapability(CapIntegrationWrite) {
+		t.Error("integration and alert vocabularies must not cross")
+	}
+}
+
 func TestScopeEvaluation(t *testing.T) {
 	siteA, siteB := uuid.New(), uuid.New()
 	groupA := uuid.New()

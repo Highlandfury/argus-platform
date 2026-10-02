@@ -74,6 +74,9 @@ var routeTable = []Route{
 	{Method: "POST", Path: "/v1/alert-rules", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
 	{Method: "GET", Path: "/v1/alert-rules", Protected: true, Capability: authz.CapAlertRuleRead, Scope: authz.ScopeOrg},
 	{Method: "POST", Path: "/v1/alert-rules:validate", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	// P2-AC-32 curated default pack (M11-S2): installs the embedded rules for
+	// the org, idempotent per rule key. Rule-write capability, org scope.
+	{Method: "POST", Path: "/v1/alert-rules:install-defaults", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
 	{Method: "GET", Path: "/v1/alert-rules/{id}", Protected: true, Capability: authz.CapAlertRuleRead, Scope: authz.ScopeOrg},
 	{Method: "PATCH", Path: "/v1/alert-rules/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
 	{Method: "DELETE", Path: "/v1/alert-rules/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
@@ -83,6 +86,23 @@ var routeTable = []Route{
 	{Method: "POST", Path: "/v1/alerts/{id}/snooze", Protected: true, CSRF: true, Capability: authz.CapAlertSnooze, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/alerts/{id}/resolve", Protected: true, CSRF: true, Capability: authz.CapAlertAck, Scope: authz.ScopeDevice},
 	{Method: "POST", Path: "/v1/alerts/{id}/comment", Protected: true, CSRF: true, Capability: authz.CapAlertAck, Scope: authz.ScopeDevice},
+	// M11-S2 notification pipeline. Canonical docs/12 §22.14: channels are
+	// enforced under integration.write (CRUD, including reads — the channel
+	// payload is integration configuration, and secrets are write-only);
+	// routes under alertrule.write; the delivery log under alert.read
+	// (docs/17 §35.1). All three surfaces are org-scoped.
+	{Method: "POST", Path: "/v1/notification/channels", Protected: true, CSRF: true, Capability: authz.CapIntegrationWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/notification/channels", Protected: true, Capability: authz.CapIntegrationWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/notification/channels/{id}", Protected: true, Capability: authz.CapIntegrationWrite, Scope: authz.ScopeOrg},
+	{Method: "PATCH", Path: "/v1/notification/channels/{id}", Protected: true, CSRF: true, Capability: authz.CapIntegrationWrite, Scope: authz.ScopeOrg},
+	{Method: "DELETE", Path: "/v1/notification/channels/{id}", Protected: true, CSRF: true, Capability: authz.CapIntegrationWrite, Scope: authz.ScopeOrg},
+	{Method: "POST", Path: "/v1/notification/channels/{id}/test", Protected: true, CSRF: true, Capability: authz.CapIntegrationWrite, Scope: authz.ScopeOrg},
+	{Method: "POST", Path: "/v1/notification/routes", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/notification/routes", Protected: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/notification/routes/{id}", Protected: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "PATCH", Path: "/v1/notification/routes/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "DELETE", Path: "/v1/notification/routes/{id}", Protected: true, CSRF: true, Capability: authz.CapAlertRuleWrite, Scope: authz.ScopeOrg},
+	{Method: "GET", Path: "/v1/notification/deliveries", Protected: true, Capability: authz.CapAlertRead, Scope: authz.ScopeOrg},
 	{Method: "GET", Path: "/v1/credentials", Protected: true, Capability: authz.CapCredentialReadMetadata, Scope: authz.ScopeOrg},
 	{Method: "POST", Path: "/v1/credentials", Protected: true, CSRF: true, Capability: authz.CapCredentialWrite, Scope: authz.ScopeOrg},
 	{Method: "GET", Path: "/v1/credentials/{id}", Protected: true, Capability: authz.CapCredentialReadMetadata, Scope: authz.ScopeOrg},

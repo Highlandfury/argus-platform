@@ -25,6 +25,7 @@
 package alerts
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -289,6 +290,35 @@ type AlertPage struct {
 // Actor identifies the operator for audit timelines and rule authorship.
 type Actor struct {
 	UserID uuid.UUID
+}
+
+// Transition is one committed alert state transition: the alert snapshot after
+// the transition plus the alert_events row that recorded it (docs/10 §17.7:
+// the notification pipeline consumes transitions). The alerts module emits
+// every state transition to the configured TransitionSink AFTER the tenant
+// transaction commits; it never blocks or rolls back the state machine on a
+// sink error (the sink is best-effort at-least-once enqueue).
+type Transition struct {
+	Alert Alert
+	Event AlertEvent
+}
+
+// TransitionSink consumes committed alert transitions. Implemented by the
+// notify engine (internal/modules/notify); an interface here keeps the alerts
+// module free of a notify import.
+type TransitionSink interface {
+	Transitioned(ctx context.Context, t Transition)
+}
+
+// NotifyKinds are the transition kinds the notification pipeline dispatches
+// (docs/10 §17.7: fired/reactivated and resolved transitions). Pending,
+// updated, suppression and operator ack/snooze/comment transitions are
+// timeline-only: they never notify on their own.
+var NotifyKinds = map[string]bool{
+	EventActivated:      true,
+	EventReactivated:    true,
+	EventResolved:       true,
+	EventManualResolved: true,
 }
 
 // RuleCreateInput is the validated POST /v1/alert-rules body.

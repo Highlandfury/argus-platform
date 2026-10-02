@@ -440,17 +440,44 @@ func TestM3EnrollmentRateLimit(t *testing.T) {
 	_ = raw
 
 	clients := dialEnroll(t, env)
-	for i := 1; i <= 10; i++ {
-		if _, err := clients.Enroll(ctx, &collectorv1.EnrollRequest{
-			EnrollmentToken: "arg_enr_" + "bad", CsrPem: "x", CollectorName: "rl",
-		}); err == nil || !strings.Contains(err.Error(), "PermissionDenied") {
-			t.Fatalf("attempt %d: want PermissionDenied, got %v", i, err)
-		}
+	// 11 rapid attempts issued concurrently: the limiter is mutex-serialized,
+	// so the burst reaches it within the window regardless of host load.
+	// Sequential attempts paid enough wall time on a loaded host for the token
+	// bucket to refill, turning the 11th attempt into PermissionDenied (the
+	// same robustness fix as TestLoginRateLimitS09).
+	const attempts = 11
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		denied    int
+		exhausted int
+		other     []string
+	)
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := clients.Enroll(ctx, &collectorv1.EnrollRequest{
+				EnrollmentToken: "arg_enr_" + "bad", CsrPem: "x", CollectorName: "rl",
+			})
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err != nil && strings.Contains(err.Error(), "PermissionDenied"):
+				denied++
+			case err != nil && strings.Contains(err.Error(), "ResourceExhausted"):
+				exhausted++
+			case err == nil:
+				other = append(other, "nil error")
+			default:
+				other = append(other, err.Error())
+			}
+		}()
 	}
-	if _, err := clients.Enroll(ctx, &collectorv1.EnrollRequest{
-		EnrollmentToken: "arg_enr_" + "bad", CsrPem: "x", CollectorName: "rl",
-	}); err == nil || !strings.Contains(err.Error(), "ResourceExhausted") {
-		t.Fatalf("11th attempt: want ResourceExhausted, got %v", err)
+	wg.Wait()
+	if denied != 10 || exhausted != 1 || len(other) != 0 {
+		t.Fatalf("rapid burst = %d PermissionDenied / %d ResourceExhausted / other %v, want 10 / 1 with none other",
+			denied, exhausted, other)
 	}
 }
 

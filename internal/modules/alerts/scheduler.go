@@ -27,20 +27,33 @@ type Scheduler struct {
 	eval      *Evaluator
 	logger    *slog.Logger
 	interval  time.Duration
+	// defaults seeds the curated pack into a brand-new org (no alert_rules
+	// rows at all). Optional; nil disables auto-seeding.
+	defaults defaultsSeeder
 
-	mu   sync.Mutex
-	last map[uuid.UUID]time.Time
+	mu        sync.Mutex
+	last      map[uuid.UUID]time.Time
+	seedTried map[uuid.UUID]bool
 }
+
+// defaultsSeeder is the seeding seam (alerts.Service.EnsureDefaults).
+type defaultsSeeder interface {
+	EnsureDefaults(ctx context.Context, orgID uuid.UUID) (int, error)
+}
+
+// SetDefaultsSeeder installs the new-org default-pack seeder.
+func (s *Scheduler) SetDefaultsSeeder(seeder defaultsSeeder) { s.defaults = seeder }
 
 // NewScheduler wires the scheduler.
 func NewScheduler(app, auth *pgxpool.Pool, eval *Evaluator, logger *slog.Logger) *Scheduler {
 	return &Scheduler{
-		app:      app,
-		auth:     auth,
-		eval:     eval,
-		logger:   logger,
-		interval: 15 * time.Second,
-		last:     map[uuid.UUID]time.Time{},
+		app:       app,
+		auth:      auth,
+		eval:      eval,
+		logger:    logger,
+		interval:  15 * time.Second,
+		last:      map[uuid.UUID]time.Time{},
+		seedTried: map[uuid.UUID]bool{},
 	}
 }
 
@@ -89,6 +102,35 @@ func (s *Scheduler) tickOrg(ctx context.Context, orgID uuid.UUID, now time.Time)
 			s.logger.Warn("alert scheduler: load rules failed", "component", "alerts", "org_id", orgID, "error", err)
 		}
 		return
+	}
+	// New-org seeding (P2-AC-32): an organization with no rule rows at all
+	// gets the curated pack once. The in-memory marker avoids a DB check on
+	// every tick; a restart re-checks (still idempotent).
+	if len(rules) == 0 && s.defaults != nil {
+		s.mu.Lock()
+		tried := s.seedTried[orgID]
+		s.mu.Unlock()
+		if !tried {
+			installed, serr := s.defaults.EnsureDefaults(ctx, orgID)
+			s.mu.Lock()
+			s.seedTried[orgID] = true
+			s.mu.Unlock()
+			if serr != nil {
+				if ctx.Err() == nil && s.logger != nil {
+					s.logger.Warn("alert scheduler: default-pack seeding failed",
+						"component", "alerts", "org_id", orgID, "error", serr)
+				}
+			} else if installed > 0 {
+				if s.logger != nil {
+					s.logger.Info("alert scheduler: default rule pack installed",
+						"component", "alerts", "org_id", orgID, "rules", installed)
+				}
+				rules, err = s.eval.loadEnabledRules(ctx, orgID)
+				if err != nil {
+					return
+				}
+			}
+		}
 	}
 	for _, r := range rules {
 		if !s.due(r, now) {

@@ -289,6 +289,34 @@ func (h *HTTP) ValidateRule(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"valid": true})
 }
 
+// InstallDefaults handles POST /v1/alert-rules:install-defaults: installs the
+// curated P2-AC-32 pack for the org. Idempotent per rule key (already-present
+// keys are skipped), so a retry never duplicates or rewrites rules.
+func (h *HTTP) InstallDefaults(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.principalOrg(w, r)
+	if !ok {
+		return
+	}
+	sc, ok := h.scopeFor(w, r, p)
+	if !ok {
+		return
+	}
+	res, err := h.Svc.InstallDefaults(r.Context(), p.OrgID, Actor{UserID: p.UserID}, sc)
+	if err != nil {
+		writeRuleError(w, r, err)
+		return
+	}
+	data := make([]map[string]any, 0, len(res.Rules))
+	for _, rule := range res.Rules {
+		data = append(data, rulePayload(rule))
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"installed": res.Installed,
+		"skipped":   res.Skipped,
+		"data":      data,
+	})
+}
+
 // ListAlerts handles GET /v1/alerts (alert.read) with state/severity/rule_id/
 // device_id filters and a keyset cursor.
 func (h *HTTP) ListAlerts(w http.ResponseWriter, r *http.Request) {

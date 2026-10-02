@@ -19,6 +19,7 @@ import (
 	"github.com/argus-platform/argus/internal/modules/identity"
 	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
+	"github.com/argus-platform/argus/internal/modules/notify"
 	"github.com/argus-platform/argus/internal/modules/pollhealth"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/httpx"
@@ -51,6 +52,10 @@ type Options struct {
 	PollHealth        *pollhealth.Service
 	Checks            *checks.Service
 	Alerts            *alerts.Service
+	// M11-S2 notification pipeline. Engines stay nil in degraded configs;
+	// channel test answers 503 then.
+	Notify       *notify.Service
+	NotifyEngine *notify.Engine
 }
 
 type handlers struct {
@@ -65,6 +70,7 @@ type handlers struct {
 	pollHealthHTTP  *pollhealth.HTTP
 	checksHTTP      *checks.HTTP
 	alertsHTTP      *alerts.HTTP
+	notifyHTTP      *notify.HTTP
 }
 
 func newHandlers(o Options) *handlers {
@@ -123,6 +129,13 @@ func newHandlers(o Options) *handlers {
 	}
 	if o.Alerts != nil {
 		h.alertsHTTP = &alerts.HTTP{Svc: o.Alerts}
+	}
+	if o.Notify != nil {
+		h.notifyHTTP = &notify.HTTP{
+			Svc:         o.Notify,
+			Engine:      o.NotifyEngine,
+			Idempotency: httpx.NewIdempotencyCache(24*time.Hour, 4096),
+		}
 	}
 	return h
 }
@@ -455,6 +468,84 @@ func (h *handlers) handlerFor(rt Route) http.Handler {
 				return
 			}
 			h.alertsHTTP.ValidateRule(w, r)
+		})
+	case "/v1/alert-rules:install-defaults":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.alertsHTTP == nil {
+				serviceUnavailable(w, r, "alerts service not configured")
+				return
+			}
+			h.alertsHTTP.InstallDefaults(w, r)
+		})
+	case "/v1/notification/channels":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.notifyHTTP == nil {
+				serviceUnavailable(w, r, "notification service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.notifyHTTP.CreateChannel(w, r)
+				return
+			}
+			h.notifyHTTP.ListChannels(w, r)
+		})
+	case "/v1/notification/channels/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.notifyHTTP == nil {
+				serviceUnavailable(w, r, "notification service not configured")
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				h.notifyHTTP.UpdateChannel(w, r)
+			case http.MethodDelete:
+				h.notifyHTTP.DeleteChannel(w, r)
+			default:
+				h.notifyHTTP.GetChannel(w, r)
+			}
+		})
+	case "/v1/notification/channels/{id}/test":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.notifyHTTP == nil || h.notifyHTTP.Engine == nil {
+				serviceUnavailable(w, r, "notification engine not configured")
+				return
+			}
+			h.notifyHTTP.TestChannel(w, r)
+		})
+	case "/v1/notification/routes":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.notifyHTTP == nil {
+				serviceUnavailable(w, r, "notification service not configured")
+				return
+			}
+			if r.Method == http.MethodPost {
+				h.notifyHTTP.CreateRoute(w, r)
+				return
+			}
+			h.notifyHTTP.ListRoutes(w, r)
+		})
+	case "/v1/notification/routes/{id}":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.notifyHTTP == nil {
+				serviceUnavailable(w, r, "notification service not configured")
+				return
+			}
+			switch r.Method {
+			case http.MethodPatch:
+				h.notifyHTTP.UpdateRoute(w, r)
+			case http.MethodDelete:
+				h.notifyHTTP.DeleteRoute(w, r)
+			default:
+				h.notifyHTTP.GetRoute(w, r)
+			}
+		})
+	case "/v1/notification/deliveries":
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if h.notifyHTTP == nil {
+				serviceUnavailable(w, r, "notification service not configured")
+				return
+			}
+			h.notifyHTTP.ListDeliveries(w, r)
 		})
 	case "/v1/alert-rules/{id}":
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -86,6 +86,22 @@ const (
 	CapAlertRuleWrite = "alertrule.write"
 )
 
+// Integration capability vocabulary (M11-S2). Canonical names from docs/04
+// §6.5: integration.read, integration.write, integration.secrets.read,
+// webhook.write. The notification channel surface (docs/12 §22.14) is
+// enforced under integration.write (the canonical channel CRUD capability);
+// integration.secrets.read is declared but never granted a read route — the
+// channel secret surface is write-only by construction (docs/12: "secrets
+// write-only"), so no route can ever read one back. webhook.write belongs to
+// the outbound /webhooks subscription surface (V2) and is declared here so
+// the vocabulary is complete; no route uses it yet.
+const (
+	CapIntegrationRead        = "integration.read"
+	CapIntegrationWrite       = "integration.write"
+	CapIntegrationSecretsRead = "integration.secrets.read"
+	CapWebhookWrite           = "webhook.write"
+)
+
 // Scope types: nodes of the resource tree the authorizer resolves at. Device
 // scope resolves through the device's site binding (device-level bindings are
 // not representable in migration 000010).
@@ -128,6 +144,15 @@ var AlertCapabilities = []string{
 // gets neither (not even alertrule.read).
 var AlertRuleCapabilities = []string{CapAlertRuleRead, CapAlertRuleWrite}
 
+// IntegrationCapabilities is the M11-S2 notification/integration vocabulary.
+// Admin holds all of them. The viewer gets nothing: docs/04 §6.4 grants no
+// integration permission to Read-only (channel configs carry secrets).
+// integration.secrets.read is declared for catalog completeness but must
+// never be attached to a read route (write-only secret invariant).
+var IntegrationCapabilities = []string{
+	CapIntegrationRead, CapIntegrationWrite, CapIntegrationSecretsRead, CapWebhookWrite,
+}
+
 // ReadCapabilities are granted to the viewer role (all read-class inventory
 // capabilities).
 var ReadCapabilities = []string{
@@ -165,7 +190,7 @@ func adminCapabilities() []string {
 	var out []string
 	for _, set := range [][]string{
 		InventoryCapabilities, CredentialCapabilities, DiagnosticCapabilities,
-		AlertCapabilities, AlertRuleCapabilities,
+		AlertCapabilities, AlertRuleCapabilities, IntegrationCapabilities,
 	} {
 		out = append(out, set...)
 	}
@@ -229,6 +254,17 @@ func IsAlertCapability(name string) bool {
 // vocabulary.
 func IsAlertRuleCapability(name string) bool {
 	for _, c := range AlertRuleCapabilities {
+		if c == name {
+			return true
+		}
+	}
+	return false
+}
+
+// IsIntegrationCapability reports whether name is part of the M11-S2
+// notification/integration vocabulary.
+func IsIntegrationCapability(name string) bool {
+	for _, c := range IntegrationCapabilities {
 		if c == name {
 			return true
 		}

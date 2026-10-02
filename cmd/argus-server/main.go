@@ -30,6 +30,7 @@ import (
 	"github.com/argus-platform/argus/internal/modules/ingest"
 	"github.com/argus-platform/argus/internal/modules/inventory"
 	"github.com/argus-platform/argus/internal/modules/metrics"
+	"github.com/argus-platform/argus/internal/modules/notify"
 	"github.com/argus-platform/argus/internal/modules/pollhealth"
 	"github.com/argus-platform/argus/internal/modules/tenancy"
 	"github.com/argus-platform/argus/internal/platform/authz"
@@ -105,6 +106,7 @@ func cmdServe(args []string) int {
 	metrics.RegisterSeriesMetrics(tel)
 	metrics.RegisterGuardMetrics(tel)
 	alerts.RegisterMetrics(tel)
+	notify.RegisterMetrics(tel)
 
 	// Pools + readiness (SPEC §17): readyz reflects DB reachability, auth-role
 	// reachability, and schema state.
@@ -178,6 +180,7 @@ func cmdServe(args []string) int {
 	var (
 		credentialsSvc     *credentials.Service
 		credentialResolver *credentials.Resolver
+		secretsVault       secrets.SecretsVault
 	)
 	if appPool != nil {
 		kek, err := secrets.LoadOrCreateLocalKMS(secrets.LocalConfig{
@@ -190,6 +193,7 @@ func cmdServe(args []string) int {
 			logger.Error("credentials API disabled: secrets vault unavailable", "error", err)
 		} else {
 			vault := secrets.New(kek)
+			secretsVault = vault
 			credentialsSvc = credentials.New(appPool, vault, credentials.SlogAudit{Logger: logger})
 			credentialResolver = credentials.NewResolver(appPool, vault)
 		}
@@ -287,6 +291,32 @@ func cmdServe(args []string) int {
 		alertSched = alerts.NewScheduler(appPool, authPool, alertEval, logger)
 	}
 
+	// Notification engine (M11-S2): consumes the alerts transition sink,
+	// persists deliveries and runs the retry/breaker worker. Secrets go
+	// through the shared M7 vault; without it channels still work but
+	// secret-bearing operations fail closed.
+	var (
+		notifySvc    *notify.Service
+		notifyEngine *notify.Engine
+	)
+	if appPool != nil {
+		notifySvc = notify.New(appPool, secretsVault)
+		notifySvc.SetAuthorizer(authz.New(appPool))
+		notifyEngine = notify.NewEngine(appPool, secretsVault, notify.EngineOptions{
+			Logger: logger,
+			Auth:   authPool,
+		})
+		if alertsSvc != nil {
+			alertsSvc.SetSink(notifyEngine)
+		}
+		if alertEval != nil {
+			alertEval.SetSink(notifyEngine)
+		}
+		if alertSched != nil && alertsSvc != nil {
+			alertSched.SetDefaultsSeeder(alertsSvc)
+		}
+	}
+
 	opts := api.Options{
 		Logger:            logger,
 		Telemetry:         tel,
@@ -305,6 +335,8 @@ func cmdServe(args []string) int {
 		PollHealth:        pollHealthSvc,
 		Checks:            checksSvc,
 		Alerts:            alertsSvc,
+		Notify:            notifySvc,
+		NotifyEngine:      notifyEngine,
 	}
 
 	httpSrv := &http.Server{
@@ -339,6 +371,10 @@ func cmdServe(args []string) int {
 	// Alert evaluator (M11-S1): in-process scheduler, per-rule cadence.
 	if alertSched != nil {
 		go alertSched.Run(ctx, 15*time.Second)
+	}
+	// Notification retry/breaker worker (M11-S2).
+	if notifyEngine != nil {
+		go notifyEngine.Run(ctx, 15*time.Second)
 	}
 
 	errCh := make(chan error, 4)

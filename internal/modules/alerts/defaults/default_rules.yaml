@@ -1,0 +1,76 @@
+# Argus curated default alert rule pack (P2-AC-32, docs/10 §17.2).
+#
+# Applied for new organizations (alerts.Service.EnsureDefaults seeds an org
+# that has never had any alert_rules row) and installable on demand through
+# POST /v1/alert-rules:install-defaults. Installation is idempotent per `key`:
+# a key that already exists in the org is skipped, and patching an installed
+# rule writes a normal immutable version N+1.
+#
+# Rules use only the canonical v1 vocabulary (threshold / absence). Selectors
+# are org-wide by device kind. `net.if.util` is a canonical dotted metric that
+# this Phase-2 collector does not emit yet, so that rule stays dormant until
+# the series exists (documented in M11_EVIDENCE §S2).
+version: 1
+rules:
+  - key: device-unreachable-icmp
+    name: "Device unreachable (ICMP)"
+    type: absence
+    severity: critical
+    scope_selector:
+      metric_key: net.icmp.reachable
+      device_kinds: [switch, router, firewall, ap, host, server]
+    condition:
+      source: samples
+      window: 2m
+
+  - key: poll-failures
+    name: "Poll failures (scheduled)"
+    type: absence
+    severity: critical
+    scope_selector:
+      device_kinds: [switch, router, firewall, ap, host, server]
+    condition:
+      source: poll_health
+      consecutive_failures: 2
+
+  - key: interface-down
+    name: "Interface down"
+    type: threshold
+    severity: warning
+    scope_selector:
+      metric_key: net.if.oper_status
+      device_kinds: [switch, router, firewall, ap]
+    condition:
+      agg: max
+      op: eq
+      value: 0
+      window: 5m
+      for_duration: 5m
+
+  - key: cpu-high
+    name: "CPU high (>90% for 5m)"
+    type: threshold
+    severity: warning
+    scope_selector:
+      metric_key: sys.cpu.util
+      device_kinds: [host, server]
+    condition:
+      agg: avg
+      op: gt
+      value: 90
+      window: 5m
+      for_duration: 5m
+
+  - key: interface-utilization-high
+    name: "Interface utilization high (>80% for 5m)"
+    type: threshold
+    severity: warning
+    scope_selector:
+      metric_key: net.if.util
+      device_kinds: [switch, router, firewall, ap]
+    condition:
+      agg: avg
+      op: gt
+      value: 80
+      window: 5m
+      for_duration: 5m

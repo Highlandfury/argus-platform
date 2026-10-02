@@ -1159,6 +1159,30 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  /v1/alert-rules:install-defaults:
+    post:
+      tags: [alerts]
+      summary: Install the curated default rule pack (P2-AC-32), idempotent per rule key
+      description: >
+        M11-S2. Installs the embedded curated pack (device unreachable, poll
+        failures, interface down, CPU high, interface utilization) as normal
+        version-1 immutable rules. Rules whose pack key already exists in the
+        organization are skipped, so retries never duplicate or rewrite
+        operator edits. New organizations are also seeded automatically by
+        the evaluator the first time a tick finds zero rules.
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '200':
+          description: Install result (200 even when every key was skipped)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DefaultRuleInstallResult' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   /v1/alert-rules/{id}:
     get:
       tags: [alerts]
@@ -1380,6 +1404,296 @@ paths:
         '401': { $ref: '#/components/responses/Unauthenticated' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/notification/channels:
+    post:
+      tags: [notifications]
+      summary: Create a notification channel (SMTP/webhook/Slack/Teams); secrets are write-only
+      description: >
+        M11-S2. `config` carries non-secret destination fields per kind
+        (smtp: host/port/username/from/to/starttls; webhook: url/payload/
+        timeout_ms; slack: channel; teams: {}). `secret` is sealed through the
+        M7 SecretsVault and can never be read back (`has_secret` only).
+      x-argus-capability: integration.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationChannelCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationChannel' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Name already in use (notification.name_conflict)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [notifications]
+      summary: List notification channels (cursor-paged, newest first; no secret material)
+      x-argus-capability: integration.write
+      x-argus-scope: org
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/NotificationChannel' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/notification/channels/{id}:
+    get:
+      tags: [notifications]
+      summary: Get one notification channel (metadata only; secrets are write-only)
+      x-argus-capability: integration.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationChannel' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [notifications]
+      summary: 'Update a channel (secret omitted = keep, secret = replace, secret: null = clear)'
+      x-argus-capability: integration.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationChannelPatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationChannel' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Name already in use (notification.name_conflict)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [notifications]
+      summary: Soft-disable a channel (the delivery-log audit trail survives)
+      x-argus-capability: integration.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '200':
+          description: Disabled (enabled=false)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationChannel' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/notification/channels/{id}/test:
+    post:
+      tags: [notifications]
+      summary: Send one synchronous test message through the channel adapter (no delivery row)
+      x-argus-capability: integration.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        '200':
+          description: Provider accepted the test message
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationChannelTestResult' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '502':
+          description: Provider rejected the test message (result carries ok=false)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationChannelTestResult' }
+
+  /v1/notification/routes:
+    post:
+      tags: [notifications]
+      summary: Create a notification route (severity/scope match to ordered channels)
+      description: >
+        M11-S2. `match` is {severity?: [...], scope?: {sites?, device_ids?,
+        device_kinds?}}; unknown keys are rejected. `channel_ids` is ordered
+        (delivery priority) and validated against the org's channels.
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationRouteCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationRoute' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Name already in use (notification.name_conflict)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    get:
+      tags: [notifications]
+      summary: List notification routes (cursor-paged, newest first)
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/NotificationRoute' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/notification/routes/{id}:
+    get:
+      tags: [notifications]
+      summary: Get one notification route
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationRoute' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [notifications]
+      summary: Update a route (omitted fields keep their value; channel_ids replaces the ordered list)
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotificationRoutePatch' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationRoute' }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Name already in use (notification.name_conflict)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    delete:
+      tags: [notifications]
+      summary: Delete a route (deliveries keep route_id = null)
+      x-argus-capability: alertrule.write
+      x-argus-scope: org
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/CsrfToken' }
+      responses:
+        '204':
+          description: Deleted
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/notification/deliveries:
+    get:
+      tags: [notifications]
+      summary: Delivery log (status/retries/provider response; cursor-paged, newest first)
+      description: >
+        M11-S2/docs/17 §35.1. Body content is retained 90 days, delivery
+        metadata 13 months (enforcement is the M13 retention job).
+      x-argus-capability: alert.read
+      x-argus-scope: org
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 25 } }
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: 'filter[channel_id]', in: query, schema: { type: string, format: uuid } }
+        - { name: 'filter[status]', in: query, schema: { type: string, enum: [pending, delivered, failed, dead_letter] } }
+        - { name: 'filter[alert_id]', in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, has_more]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/NotificationDelivery' } }
+                  next_cursor: { type: [string, 'null'] }
+                  has_more: { type: boolean }
+        '400': { $ref: '#/components/responses/Validation' }
+        '401': { $ref: '#/components/responses/Unauthenticated' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /v1/healthz:
     get:
@@ -2150,6 +2464,145 @@ components:
       required: [comment]
       properties:
         comment: { type: string, minLength: 1, maxLength: 2000 }
+    DefaultRuleInstallResult:
+      type: object
+      required: [installed, skipped, data]
+      properties:
+        installed: { type: integer, description: Rules created by this run (0..pack size) }
+        skipped: { type: integer, description: Pack keys already present in the organization }
+        data:
+          type: array
+          description: The rules created by this run (skipped keys carry no payload)
+          items: { $ref: '#/components/schemas/AlertRule' }
+    NotificationChannel:
+      type: object
+      required: [id, kind, name, enabled, config, has_secret, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [smtp, webhook, slack, teams] }
+        name: { type: string, maxLength: 200 }
+        enabled: { type: boolean }
+        config:
+          type: object
+          additionalProperties: true
+          description: 'Non-secret destination config; per kind: smtp {host,port,username?,from,to[],starttls?}; webhook {url,payload: ids|summary,timeout_ms?}; slack {channel?}; teams {}'
+        has_secret: { type: boolean, description: A sealed secret exists (secret values are never returned) }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    NotificationChannelCreate:
+      type: object
+      required: [kind, name]
+      properties:
+        kind: { type: string, enum: [smtp, webhook, slack, teams] }
+        name: { type: string, minLength: 1, maxLength: 200 }
+        config: { type: object, additionalProperties: true }
+        secret:
+          type: object
+          additionalProperties: true
+          description: 'Write-only sealed JSON; smtp {password?}, webhook {signing_secret}, slack/teams {webhook_url}'
+    NotificationChannelPatch:
+      type: object
+      description: 'Partial update; omitted fields keep their value. A secret replaces the sealed envelope, secret:null clears it.'
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        enabled: { type: boolean }
+        config: { type: object, additionalProperties: true }
+        secret:
+          type: [object, 'null']
+          additionalProperties: true
+          description: Write-only replacement; null clears the stored secret
+    NotificationChannelTestResult:
+      type: object
+      required: [ok, kind, status_code, attempted_at]
+      properties:
+        ok: { type: boolean }
+        kind: { type: string, enum: [smtp, webhook, slack, teams] }
+        status_code: { type: integer, description: Provider response code (0 when none was received; SMTP 250) }
+        excerpt: { type: string, description: Bounded provider response/error excerpt }
+        attempted_at: { type: string, format: date-time }
+    NotificationRoute:
+      type: object
+      required: [id, name, match, channel_ids, template_overrides, enabled, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 200 }
+        match: { $ref: '#/components/schemas/NotificationRouteMatch' }
+        channel_ids:
+          type: array
+          items: { type: string, format: uuid }
+          description: Ordered channel list (delivery priority)
+        template_overrides:
+          type: object
+          additionalProperties: true
+          description: Currently {subject_prefix?}; canonical per-route templates/grouping are V2
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    NotificationRouteMatch:
+      type: object
+      additionalProperties: false
+      description: 'severity: [info|warning|critical] (omitted = all); scope narrows to sites/device_ids/device_kinds (omitted = all). Unknown keys are rejected.'
+      properties:
+        severity:
+          type: array
+          items: { type: string, enum: [info, warning, critical] }
+        scope:
+          type: object
+          additionalProperties: false
+          properties:
+            sites: { type: array, items: { type: string, format: uuid } }
+            device_ids: { type: array, items: { type: string, format: uuid } }
+            device_kinds: { type: array, items: { type: string } }
+    NotificationRouteCreate:
+      type: object
+      required: [name, channel_ids]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        match: { $ref: '#/components/schemas/NotificationRouteMatch' }
+        channel_ids:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        template_overrides: { type: object, additionalProperties: true }
+    NotificationRoutePatch:
+      type: object
+      description: Partial update; omitted fields keep their value. match/channel_ids replace the stored value when present.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        match: { $ref: '#/components/schemas/NotificationRouteMatch' }
+        channel_ids:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items: { type: string, format: uuid }
+        template_overrides: { type: object, additionalProperties: true }
+        enabled: { type: boolean }
+    NotificationDelivery:
+      type: object
+      required: [id, event_kind, severity, channel_id, status, attempts, dedup_key, subject, body, payload, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        alert_id: { type: [string, 'null'], format: uuid }
+        event_id: { type: [string, 'null'], format: uuid }
+        event_kind: { type: string, description: 'alert_events kind that produced this delivery (activated | reactivated | resolved | manual_resolved)' }
+        severity: { type: string, enum: [info, warning, critical] }
+        route_id: { type: [string, 'null'], format: uuid }
+        channel_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, delivered, failed, dead_letter] }
+        attempts: { type: integer, minimum: 0, maximum: 12 }
+        next_attempt_at: { type: [string, 'null'], format: date-time }
+        response_code: { type: [integer, 'null'] }
+        response_excerpt: { type: string, description: Bounded provider response/error excerpt }
+        dedup_key: { type: string, description: Stable at-least-once dedup identity (also the outbound dedup header) }
+        subject: { type: string }
+        body: { type: string, description: Rendered plain-text snapshot; retained 90 days }
+        payload: { type: object, additionalProperties: true, description: Versioned webhook envelope snapshot }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        delivered_at: { type: [string, 'null'], format: date-time }
 
 security:
   - sessionCookie: []
