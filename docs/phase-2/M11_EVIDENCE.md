@@ -1,10 +1,16 @@
 # M11-EVIDENCE — Alert engine (Phase 2)
 
-**Status: M11-S1 (alert persistence + evaluator + rules/alerts lifecycle API)
-COMPLETE.** This record covers the first slice of M11 only. Notifications and
-channels are M11-S2; maintenance windows, silences, SSE and the alert UI are
-M11-S3; composite/baseline rules and incidents are V2 (PHASE_2_SPEC §2 and
-P2-D3/P2-D6). Nothing else in M11 is claimed here.
+**Status: M11 COMPLETE - gate signed off by user 2026-10-02.** All slices are
+recorded here: S1 (alert persistence, evaluator, rules/alerts lifecycle API),
+S2 (notification engine + curated default pack), S3a (maintenance windows,
+silences, SSE stream), S3b (alerts workspace UI), S3c (`no_data` max
+lifetime/unknown state). The sign-off accepted the documented deferrals:
+per-site notify budget + digest coalescing and child-device suppression
+(P2-D6/V2), recurring maintenance windows (RFC 5545 subset, V2), the
+channel-failure ops self-alert and the metric->state p95 load measurement
+(M12), and per-resource dashboard maintenance markers folded into the UI
+redesign Phases 3-4. Composite/baseline rules and incidents are V2
+(PHASE_2_SPEC §2 and P2-D3/P2-D6).
 
 References: PHASE_2_SPEC M11 (P2-AC-27..30, P2-D3 in-process evaluator, P2-D6
 device-down gating is V2/topology), `../argus-platform-spec/docs/10-alerts-
