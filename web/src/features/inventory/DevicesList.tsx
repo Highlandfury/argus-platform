@@ -122,7 +122,7 @@ export default function DevicesList({ refreshKey = 0 }: { refreshKey?: number })
         {devices.map((d) => (
           <tr key={d.id}>
             <td>
-              {d.name}
+              <a href={`/devices/${d.id}`}>{d.name}</a>
               {d.critical && (
                 <span
                   className="status status-stale"

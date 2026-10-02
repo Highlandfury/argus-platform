@@ -38,7 +38,9 @@ export default async function DashboardPage() {
             <tbody>
               {sites.map((s) => (
                 <tr key={s.id}>
-                  <td>{s.name}</td>
+                  <td>
+                    <a href={`/sites/${s.id}`}>{s.name}</a>
+                  </td>
                   <td className="muted">{s.id}</td>
                 </tr>
               ))}
@@ -48,11 +50,12 @@ export default async function DashboardPage() {
       </div>
       <p className="muted" style={{ marginTop: 16 }}>
         <a href="/devices">Devices</a> — inventory list with sites, status, and
-        management addresses. <a href="/credentials">Credentials</a> — write-only
-        secret metadata and bindings.{" "}
+        management addresses; each device opens its visibility page (status,
+        interfaces, ICMP charts, on-demand checks). <a href="/credentials">Credentials</a>{" "}
+        — write-only secret metadata and bindings.{" "}
         <a href="/collectors">Collectors</a> — enrollment, identity, and the
-        secure control stream. Metrics, topology, and alerting arrive in later
-        milestones (M4+).
+        secure control stream. Sites open the site dashboard; alerting arrives
+        in M11.
       </p>
     </section>
   );

@@ -1,6 +1,7 @@
 # M10-EVIDENCE — Visibility & operational surfaces (Phase 2)
 
-**Status: M10-S0 COMPLETE; M10-S1 COMPLETE (§7); M10-S2 COMPLETE (§8).**
+**Status: M10-S0 COMPLETE; M10-S1 COMPLETE (§7); M10-S2 COMPLETE (§8);
+M10-S3 COMPLETE (§9).**
 M10-S0 closes the two
 M9-S4 deferrals recorded in `M9_EVIDENCE.md` §14.7 (see the signed M9 gate note
 at the top of that file): the operator-facing device criticality source that
@@ -11,8 +12,9 @@ and the poll-health device status rollups (P2-AC-21, P2-AC-22 device half).
 M10-S2 (§8) links SNMP-polled interface data into the `interfaces` inventory
 rows (auto-create, live attributes, audited ifIndex rebinding) and exposes the
 interface status rollup, closing the M9 AC-16 deferred clause.
-The M10 visibility pages, charts, site dashboard and Step-12 diagnostics
-remain future slices; nothing in this file duplicates the M9 record.
+M10-S3 (§9) adds the visibility pages, charts and site dashboard on top of
+those APIs; Step-12 diagnostics remain a future slice. Nothing in this file
+duplicates the M9 record.
 
 ---
 
@@ -420,10 +422,10 @@ golangci-lint v2.14.0, dev compose stack at schema v17.
 | `GOOS=linux GOARCH=amd64 go build ./...` / `arm64` | pass |
 | `go test ./internal/... -count=1` | pass (all packages; new metrics/pollhealth/api tests included) |
 | `go test ./tests/integration/ -run '^TestM10\|^TestMetrics\|^TestM4' -count=1 -v` | **pass (43 tests, 128.1 s)**; M10-S1 10/10 |
-| `go test ./tests/integration/ -count=1 -timeout 30m` | **pass, full suite** (see §7.5) |
+| `go test ./tests/integration/ -count=1 -timeout 30m` | **pass (268.5 s)**, full suite with the M10-S1 tests. One earlier attempt hit the pre-existing M9-S3 signed-bundle-cache timing flake (`TestM9S3BindingRemovalDropsCredentialRAMOnly`: the stream client applies session credentials one step before persisting the bundle file); the rerun and the isolated rerun were green. |
 | `go test ./tests/contract/... -count=1` | pass (OpenAPI ↔ route registry, capability/scope metadata) |
 | `gofmt -l internal cmd tests` | empty |
-| `docker run golangci/golangci-lint:v2.14.0 golangci-lint run --timeout 10m ./...` | **0 issues** |
+| `docker run golangci/golangci-lint:v2.14.0 golangci-lint run --timeout 10m ./...` | **0 issues** (verified on the committed M10-S1 slice in a detached worktree: exit 0; a cold-cache attempt hit the 10-minute wall under concurrent host load while the parallel M10-S2 session was building, so the confirming run used a warm container and `--timeout 20m` — the tool itself reported `0 issues`) |
 
 New unit tests:
 
@@ -773,4 +775,173 @@ table is intentionally not modified**; this section is the closure record.
   `tests/integration/m10s2_interfaces_test.go` (new),
   `tests/integration/{m3_collector_test.go,inventory_api_test.go}` (audit
   wiring/helper).
+- Docs: this file.
+
+---
+
+# 9. M10-S3 — visibility pages, charts and site dashboard
+
+**Status: M10-S3 COMPLETE.** Web-only slice: the device detail page
+(`/devices/[id]`), the interface detail page (`/interfaces/[id]`) and the site
+dashboard (`/sites/[id]`), all backed by the existing M10-S0/S1/S2 APIs. No
+Go, OpenAPI, proto or migration change; schema stays v17. (The dev compose
+server and collector images were rebuilt from the existing HEAD before
+verification because the running containers predated M10-S0..S2; that is a
+rebuild of committed code, not a backend change.) The M11 alerts panel is a
+placeholder by design; heat strips/floor plans and Step-12 diagnostics stay
+out of scope.
+
+## 9.1 Pages and data sources
+
+| Route | Content | APIs |
+|---|---|---|
+| `/devices/[id]` | Header (name, kind, site link, mgmt IP, critical badge, live status chip), status detail (last check/outcome/error/latency/consecutive failures/threshold/since/freshness), identity + identity-history table, interfaces table (if_name link, status chip, speed, MAC, last seen, one-query utilization strip), ICMP charts, poll-health table, checks panel, M11 placeholder | `GET /v1/devices/{id}`, `/status`, `/identity-history?limit=50`, `/interfaces?limit=100`, `/poll-health?limit=25`, `POST /v1/metrics/query`, `POST /v1/devices/{id}/checks` + `GET /v1/checks/{id}` |
+| `/interfaces/[id]` | Identity (name/alias/ifIndex/speed/MTU/MAC/admin+oper status/ifType/last seen/freshness), live status chip, traffic (in/out octets) and errors/discards charts, device backlink | `GET /v1/interfaces/{id}`, `GET /v1/devices/{id}`, `POST /v1/metrics/query` |
+| `/sites/[id]` | Status counts as filter cards, bounded recent issues, URL-driven device table (`?status=up|down|unknown`, `?q=` name/IP/kind) with device links | `GET /v1/devices?filter[site_id]=…&include=status&limit=100`, `GET /v1/devices/{id}/poll-health` (≤5 calls) |
+
+The home dashboard now links sites to `/sites/{id}` and the device list links
+each name to `/devices/{id}`, so "how is this site doing → which device →
+what's wrong" is at most three clicks. The device page's "recent checks" table
+reads `poll-health` rows with `origin=on_demand`; the M10-S0 check ledger has
+no list endpoint and no backend change was made.
+
+## 9.2 Chart implementation (query usage, badge, ribbon, gaps, brush)
+
+- **Query.** All charts use the canonical `POST /v1/metrics/query` with
+  selector objects, `step: "auto"`, `agg: "avg"`, `fill: "null"`. The device
+  page sends three selectors in one request (`net.icmp.reachable`,
+  `net.icmp.rtt_ms`, `net.icmp.loss_pct`); the interface page sends
+  `{device_id, metric_key, dimensions: {if_name}}` for octets and for
+  errors/discards. The real stored dimension is `if_name` (the IF-MIB
+  template's identity dimension; the collector never puts ifIndex in
+  dimensions), which is what the selector uses.
+- **Resolution badge.** `TimeSeriesChart` always renders
+  `resolution: <meta.resolution>` (raw|rollup_1m|rollup_5m|rollup_1h|rollup_1d)
+  plus a note chip when `meta.partial`, `meta.raw_fallback` or
+  `meta.resolution_warning` is set. It is visible during loading (`…`) and in
+  the empty state.
+- **Availability ribbon.** `net.icmp.reachable` (1/0, or a fractional bucket
+  average) is bucketed into ≤120 segments: fully reachable / partially
+  reachable / unreachable / no data. The legend, every segment `title`, and
+  the container `aria-label` carry the state text; the summary reports
+  "% of observed buckets fully reachable (n/m)" plus down/partial/no-data
+  counts.
+- **Gaps.** `connectNulls: false` on every line; the query API returns
+  explicit `null` buckets and the foot reports `meta.quality.gaps`, so gaps
+  render as line breaks and are counted, never interpolated.
+- **Brush-to-zoom.** A horizontal drag on the plot converts the pixel span
+  through `convertFromPixel` into axis values and applies
+  `dataZoom{startValue,endValue}`; a zoom readout (percentages or time range)
+  and a "Reset zoom" button appear while zoomed. Wheel zoom and the dataZoom
+  slider remain available; drag-to-pan is disabled so the drag is always the
+  brush. There is no auto-refresh on charts (range buttons re-query; status
+  alone polls at 30 s).
+
+## 9.3 Check-run UX
+
+`CheckRunner` posts `{poll_type}` to `POST /v1/devices/{id}/checks` with the
+session CSRF header and a client-generated `Idempotency-Key`, then polls
+`GET /v1/checks/{id}` once per second until the row is terminal (90 s bound,
+then an explicit "still pending — collector may be offline" notice). Both
+buttons are disabled while a check is pending, so UI retries cannot consume
+the per-device pending ceiling. Terminal results show status + outcome (icon +
+word), error class and latency. After settling, poll-health is refreshed
+immediately and again at +2 s/+5 s because the `origin=on_demand` health row
+is emitted asynchronously through the collector health path; that row then
+appears in the recent-checks table. A missing mgmt_ip, no collector
+(409 `check.no_collector`) and pending-limit (409 `check.pending_limit`) all
+render the server problem detail.
+
+## 9.4 Accessibility choices
+
+- Status is never color-only: every `StatusChip` renders a glyph **and** the
+  state word (`▲ up`, `▼ down`, `? unknown`, `✓ success`, …) and carries
+  `data-status`; the ribbon repeats its states in the legend text and in each
+  segment's accessible name.
+- Chart containers are `role="img"` with descriptive `aria-label`s; range and
+  filter buttons use `aria-pressed`; tables keep header rows and the device
+  links are real `<a>` elements.
+- Loading, empty and error states exist for every panel and assertable
+  `data-testid`s (used by the Playwright specs).
+
+## 9.5 Tests and observed results
+
+Environment: Windows 11 dev host, Docker Desktop, dev compose stack rebuilt
+from HEAD (server + collector + web; schema v17), Playwright against
+`http://127.0.0.1:3000` with the real API and the real dev collector.
+
+| Command | Result |
+|---|---|
+| `npm run build` (web/) | **pass** (Next.js 16.3.7, TypeScript clean; routes `/devices/[id]`, `/interfaces/[id]`, `/sites/[id]` dynamic) |
+| `npx playwright test e2e/visibility.spec.ts --reporter=list` | **pass, 5/5** (19.0 s) |
+| `npx playwright test --reporter=list` (full suite) | **pass, 18/18** (4 workers, 33.0 s; existing devices/credentials/collectors/metrics/login specs unchanged and green) |
+
+The new spec (`web/e2e/visibility.spec.ts`) uses one login for the whole file
+(login rate limiter), creates devices/interfaces through the real API with the
+session + CSRF pair, and covers:
+
+1. device detail: header/critical badge, live status chip, identity history
+   (serial + mgmt IP), interfaces table link, resolution badge present before
+   data, M11 placeholder;
+2. device charts: real stored ICMP series (`points >= 1`, resolution badge,
+   gap accounting, ribbon segments/summary) and brush-to-zoom + reset;
+3. on-demand check: pending → completed result with outcome/latency against a
+   polled device, then the on-demand poll-health row in recent checks;
+4. interface detail: identity/status/backlink, honest empty chart states on
+   the dev stack (no SNMP-polled interfaces), then an intercepted canonical
+   matrix to assert the chart renders a `rollup_1m` badge, `2 gaps` and brush
+   zoom (UI-state test; the real-API path is asserted first);
+5. site dashboard: status counts, URL-driven status filter with all shown
+   chips matching the filter, URL-driven search, and the device link.
+
+No Go code was touched, so no Go build/lint run was needed or performed.
+
+## 9.6 Decisions and limitations (M10-S3)
+
+1. **Web-only, no backend change:** no OpenAPI, Go, proto or migration edits.
+   The only environment action was rebuilding the dev server/collector images
+   from the existing HEAD (the running containers predated M10-S0..S2), which
+   is required for the app to reach the APIs this slice consumes.
+2. **Alerts panel is a placeholder** ("Alerting arrives with M11"); no alert
+   data source exists in M10.
+3. **Interface utilization strip** is one bounded query per device page
+   (`net.if.in_octets` selector without dimensions, latest value per
+   `if_name`, % of `speed_bps`); it renders "—" when no rate samples exist.
+   Heat strips/floor plans are deferred.
+4. **On-demand checks are invisible to the status rollup by design**
+   (M10-S0); the checks panel says so. The ledger itself is not listed (no
+   list endpoint); recent checks are the `origin=on_demand` poll-health rows.
+5. **Dev-stack interface counters are empty:** the dev collector has no
+   SNMP-polled interfaces (interfaces table empty, no `net.if.*` series), so
+   the interface charts show the honest empty state locally; the chart path is
+   exercised with a canonical matrix fixture in Playwright. In an SNMP-polled
+   environment the same selectors resolve real series (proved by M10-S2
+   integration tests).
+6. **Chart compare mode / threshold bands / heatmaps** from docs/13 §23 are
+   not in this slice; only ribbon + lines + dual axis are implemented.
+7. **No LCP/perf measurement was performed** (noted per the slice brief);
+   charts and pages are server-rendered shells with client data fetches, and
+   the existing ECharts dynamic import is reused (no new dependency).
+8. **Site device table is capped at the API page** (100 devices; `has_more` is
+   surfaced); pagination beyond one page is a follow-up. Recent issues fan out
+   to at most five poll-health requests and are capped at ten rows.
+9. **URL state** is used for the site filters only; device/interface range
+   selection stays component state (shareable-range URLs are a follow-up).
+10. **TanStack Query / generated OpenAPI client** (docs/13) are not used: the
+    Phase-1 web stack is plain client `fetch` components, and this slice
+    follows that existing pattern to avoid new dependencies.
+
+## 9.7 Files changed (M10-S3)
+
+- Pages: `web/src/app/(app)/devices/[id]/page.tsx`,
+  `web/src/app/(app)/interfaces/[id]/page.tsx`,
+  `web/src/app/(app)/sites/[id]/page.tsx` (new); `web/src/app/(app)/page.tsx`
+  (site links + copy).
+- Features: `web/src/features/visibility/{DeviceDetail,InterfaceDetail,
+  SiteDashboard,TimeSeriesChart,AvailabilityRibbon,CheckRunner,StatusChip,
+  format}.tsx|ts` (new).
+- Shared: `web/src/lib/api.ts` (`problemDetail`, `fetchJSON`),
+  `web/src/features/inventory/DevicesList.tsx` (device links),
+  `web/src/app/globals.css` (visibility styles).
+- Tests: `web/e2e/visibility.spec.ts` (new).
 - Docs: this file.

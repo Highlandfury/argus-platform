@@ -24,3 +24,37 @@ export function readCSRF(): string {
       ?.split("=")[1] ?? ""
   );
 }
+
+// problemDetail extracts the problem+json `detail` (or falls back to the
+// status) so client fetches render the same server-authored message the
+// existing forms show instead of a generic failure string.
+export async function problemDetail(
+  res: Response,
+  fallback?: string,
+): Promise<string> {
+  const body = (await res.json().catch(() => null)) as
+    | { detail?: string }
+    | null;
+  return body?.detail ?? fallback ?? `request failed (status ${res.status})`;
+}
+
+export type FetchResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; status: number; error: string };
+
+// fetchJSON is the read-side counterpart to the existing inline fetch blocks:
+// same no-store semantics, one uniform error string. Client components only.
+export async function fetchJSON<T>(
+  url: string,
+  init?: RequestInit,
+): Promise<FetchResult<T>> {
+  try {
+    const res = await fetch(url, { cache: "no-store", ...init });
+    if (!res.ok) {
+      return { ok: false, status: res.status, error: await problemDetail(res) };
+    }
+    return { ok: true, data: (await res.json()) as T };
+  } catch {
+    return { ok: false, status: 0, error: "network error" };
+  }
+}
